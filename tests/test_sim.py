@@ -1,41 +1,11 @@
 import math
-from collections import deque
 
 import pytest
+from scripted import limit, make, market
 
-from mmsim.book import OrderType, Side, Tif
+from mmsim.book import Side, Tif
 from mmsim.flow import CSTParams, ZeroIntelligence, prob_fill_first
 from mmsim.sim import Agent, Simulator
-
-
-class ScriptedFlow:
-    """Stands in for the Poisson flow: runs `cmd(book, ids)` at fixed times."""
-
-    owner = 0
-
-    def __init__(self, script):
-        self.script = deque(script)
-        self.now = 0.0
-
-    def seed(self, book, bid, ask, ids):
-        book.submit(next(ids), Side.BUY, bid, 5)
-        book.submit(next(ids), Side.SELL, ask, 5)
-
-    def step(self, book, rng, horizon, ids):
-        if self.script and self.script[0][0] - self.now <= horizon:
-            t, cmd = self.script.popleft()
-            dt, self.now = t - self.now, t
-            return dt, lambda: cmd(book, ids)
-        self.now += horizon
-        return None
-
-
-def market(side, qty):
-    return lambda book, ids: book.submit(next(ids), side, 0, qty, kind=OrderType.MARKET)
-
-
-def limit(side, px, qty=1):
-    return lambda book, ids: book.submit(next(ids), side, px, qty)
 
 
 class Recorder(Agent):
@@ -53,12 +23,6 @@ class Recorder(Agent):
 
     def on_book(self, ctx):
         self.books += 1
-
-
-def make(script, *agents, **kw):
-    sim = Simulator(ScriptedFlow(script), agents, **kw)
-    sim.seed(99, 102)
-    return sim
 
 
 def test_resting_order_fills_against_market_orders():
