@@ -1,9 +1,9 @@
 """Event-driven market simulator.
 
 One book, one background flow and any number of agents, in continuous time.
-The flow's Poisson clock drives background events, agents act from callbacks
-and timers, and every change to the book comes back as the book's own events,
-which update accounts and open orders and trigger fills.
+The flow's Poisson clock drives background events and agents act from
+callbacks and timers. Every change to the book comes back as the book's own
+events, which update accounts and open orders and trigger fill callbacks.
 
 Agent actions reach the book instantly; latency comes later. Callbacks never
 nest: a fill caused by an agent's own order is delivered after its current
