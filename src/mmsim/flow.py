@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import random
 from bisect import bisect_right
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from itertools import accumulate
 
@@ -80,12 +80,14 @@ class ZeroIntelligence:
 
     def step(
         self, book: Book, rng: random.Random, horizon: float, ids: Iterator[int]
-    ) -> tuple[float, list[Event]] | None:
-        """Draws the next background event.
+    ) -> tuple[float, Callable[[], list[Event]]] | None:
+        """Draws the next background event without applying it.
 
-        Returns (time until the event, its events), or None if nothing happens
-        within `horizon`. In that case the caller moves time forward by `horizon`
-        and asks again: the chain is memoryless, so throwing the draw away is exact.
+        Returns (time until the event, fire), where fire() applies the event to
+        the book and returns its events. The caller moves its clock first, so
+        anything it records in between still sees the old book. Returns None if
+        nothing happens within `horizon`; the caller then moves time forward by
+        `horizon` and asks again, which is exact because the chain is memoryless.
         """
         p = self.params
         bid, ask = book.best_bid(), book.best_ask()
@@ -119,12 +121,15 @@ class ZeroIntelligence:
             return None
         kind, arg = actions[bisect_right(cum, rng.random() * cum[-1], 0, len(cum) - 1)]
         if kind == _CANCEL:
-            return dt, book.cancel(rng.choice(arg))
+            oid = rng.choice(arg)
+            return dt, lambda: book.cancel(oid)
         if kind == _MARKET:
-            return dt, book.submit(next(ids), arg, 0, 1, owner=self.owner, kind=OrderType.MARKET)
+            return dt, lambda: book.submit(
+                next(ids), arg, 0, 1, owner=self.owner, kind=OrderType.MARKET
+            )
         i = 1 + bisect_right(self._cum_lam, rng.random() * lam, 0, len(self._cum_lam) - 1)
         px = self._ask - i if arg == Side.BUY else self._bid + i
-        return dt, book.submit(next(ids), arg, px, 1, owner=self.owner)
+        return dt, lambda: book.submit(next(ids), arg, px, 1, owner=self.owner)
 
 
 def prob_mid_up(a: int, b: int, lam: float, mu: float, theta: float, n_max: int = 100) -> float:

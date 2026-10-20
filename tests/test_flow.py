@@ -85,7 +85,7 @@ def test_simulated_mid_moves_match_exact(a, b):
         ids = itertools.count(1)
         book, flow = one_tick_book(a, b, ids), ZeroIntelligence(SKY)
         while (book.best_bid(), book.best_ask()) == (100, 101):
-            flow.step(book, rng, math.inf, ids)
+            flow.step(book, rng, math.inf, ids)[1]()
         ups += book.mid() > 100.5
     p = prob_mid_up(a, b, LAM1, MU, THETA1)
     assert abs(ups / n - p) < 4 * math.sqrt(p * (1 - p) / n)
@@ -101,8 +101,9 @@ def test_long_run_rates_and_invariants():
         step = flow.step(book, rng, horizon - t, ids)
         if step is None:
             break
-        dt, ev = step
+        dt, fire = step
         t += dt
+        ev = fire()
         events += 1
         if ev[0].type == EventType.ACCEPTED and ev[0].price != 0:
             limits += 1
@@ -118,7 +119,7 @@ def test_flow_never_cancels_other_owners():
     book, flow = one_tick_book(1, 1, ids), ZeroIntelligence(SKY)
     book.submit(10**6, Side.SELL, 300, 1, owner=7)
     for _ in range(3000):
-        flow.step(book, rng, math.inf, ids)
+        flow.step(book, rng, math.inf, ids)[1]()
     assert 10**6 in book
 
 
@@ -134,7 +135,7 @@ def test_market_orders_take_one_lot():
     book, flow = one_tick_book(3, 3, ids), ZeroIntelligence(SKY)
     seen = 0
     for _ in range(2000):
-        ev = flow.step(book, rng, math.inf, ids)[1]
+        ev = flow.step(book, rng, math.inf, ids)[1]()
         if ev[0].type == EventType.ACCEPTED and ev[0].price == 0:
             seen += 1
             assert ev[0].qty == 1
