@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 
+from . import avellaneda
 from .accounting import Fill
 from .book import Side
 from .sim import Agent, Context
@@ -70,3 +71,42 @@ class SymmetricQuoter(Quoter):
         if mid is None:
             return None, None
         return math.floor(mid - self.half_spread), math.ceil(mid + self.half_spread)
+
+
+class AvellanedaStoikov(Quoter):
+    """Avellaneda-Stoikov quotes on the live book.
+
+    Quotes the paper's spread around r = s - q gamma sigma^2 tau, with q the
+    position in lots and tau the time left in the run, or `horizon` if that is
+    shorter. Units are ticks, lots and the flow's time unit. Model prices are
+    rounded away from r to whole ticks and then kept passive: in the model a
+    quote can sit through the mid, but on a book that would be a market order,
+    so a bid stops one tick below everyone else's ask (and the ask one tick
+    above their bid).
+    """
+
+    def __init__(
+        self,
+        gamma: float,
+        sigma: float,
+        k: float,
+        *,
+        horizon: float | None = None,
+        size: int = 1,
+        max_position: int | None = None,
+    ) -> None:
+        super().__init__(size, max_position)
+        self.gamma = gamma
+        self.sigma = sigma
+        self.k = k
+        self.horizon = horizon
+
+    def targets(self, ctx: Context) -> tuple[int | None, int | None]:
+        s = ctx.mid
+        if s is None:
+            return None, None
+        tau = ctx.end - ctx.t
+        if self.horizon is not None:
+            tau = min(tau, self.horizon)
+        bid, ask = avellaneda.quotes(s, ctx.position, tau, self.gamma, self.sigma, self.k)
+        return min(math.floor(bid), ctx.ask - 1), max(math.ceil(ask), ctx.bid + 1)
