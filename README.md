@@ -4,7 +4,7 @@ A market-making research lab in Python. It has a limit order book with
 price-time priority, background order flow from the Cont-Stoikov-Talreja model,
 an event-driven simulator where bots quote against that flow, and the
 Avellaneda-Stoikov inventory model, checked against the paper's own tables.
-Adverse selection, the C++ [orderbook](https://github.com/Lemypoo/orderbook)
+Adverse selection, the C++ [orderbook](https://github.com/louisbelot/orderbook)
 engine and real NASDAQ data come next.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
