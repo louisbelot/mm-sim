@@ -2,10 +2,12 @@
 
 A market-making research lab in Python. It has a limit order book with
 price-time priority, background order flow from the Cont-Stoikov-Talreja model,
-an event-driven simulator where bots quote against that flow, and the
-Avellaneda-Stoikov inventory model, checked against the paper's own tables.
-Adverse selection, the C++ [orderbook](https://github.com/louisbelot/orderbook)
-engine and real NASDAQ data come next.
+an event-driven simulator where bots quote against that flow, the
+Avellaneda-Stoikov and Gueant-Lehalle-Fernandez-Tapia inventory models (each
+checked against its paper), informed traders with a private view of the
+fundamental value, and markout analysis to measure what they cost a market
+maker. The C++ [orderbook](https://github.com/louisbelot/orderbook) engine and
+real NASDAQ data come next.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -63,8 +65,104 @@ inventory whose standard deviation is 14 lots. At gamma = 0.001 the AS bot keeps
 63% of that mean with a sixth of the risk. Past that point its quotes sit far
 enough back that it barely trades. This flow has no informed traders, so the
 only adverse selection is mechanical (a fill often means the queue just
-emptied and the price is about to move through it). Informed flow comes
-next.
+emptied and the price is about to move through it). The informed traders
+below change that.
+
+## Gueant-Lehalle-Fernandez-Tapia, solved exactly
+
+Avellaneda-Stoikov leans on a horizon: its skew is gamma sigma^2 (T - t) per lot,
+so at the open of a long session it is huge and at the close it is zero. Gueant,
+Lehalle and Fernandez-Tapia (2013) solve the same problem with a hard inventory
+bound |q| <= Q. The substitution u = -exp(-gamma (x + q s)) v_q(t)^(-gamma/k)
+turns the HJB equation into a linear system v' = M v, where M is tridiagonal with
+alpha q^2 on the diagonal and -eta off it (alpha = k gamma sigma^2 / 2,
+eta = A (1 + gamma/k)^-(1 + k/gamma)). So v(t) = exp(-M (T - t)) 1 and the
+quotes are
+
+```
+delta_bid(q) = (1/k) ln(v_q / v_{q+1}) + (1/gamma) ln(1 + gamma/k)
+delta_ask(q) = (1/k) ln(v_q / v_{q-1}) + (1/gamma) ln(1 + gamma/k)
+```
+
+with no bid at q = Q and no ask at q = -Q. `glft.Model` computes this for any t,
+the long-horizon limit (the ground state of M), the paper's closed-form
+approximation, and its two extensions: a drift mu in the mid and a price impact xi
+per fill, which is the paper's model of adverse selection.
+
+![GLFT quotes](docs/glft_quotes.png)
+
+This is the paper's example (sigma = 0.3 tick per sqrt(s), A = 0.9 per s, k = 0.3
+per tick, gamma = 0.01 per tick, T = 600 s). Far from the end the quotes barely
+depend on t (at t = 0 they are within 4e-7 ticks of the infinite-horizon limit), and the stationary spread is 6.6261 ticks against 6.626 from
+the closed form. The closed form is within 0.002 ticks for |q| <= 10 and drifts
+off near the bound: at q = 29 the exact bid sits 6.13 ticks below the mid, the
+closed form says 5.28. For comparison, Avellaneda-Stoikov at t = 0 with q = 20
+would move its reservation price by 10.8 ticks; GLFT moves its bid by 1.35.
+
+The checks: the quotes match a direct solve of the nonlinear HJB system (Radau,
+in log space) to 1e-6 ticks, with and without drift and impact. Near the end
+they reduce to the Avellaneda-Stoikov expansion, the paper's footnote 8. Taking
+the plotted window [-30, 30] out of a bound of Q = 50 reproduces the axis ranges
+of the paper's figures 1 to 3. And an exact Monte Carlo (Poisson fills by
+thinning, the Brownian part integrated out analytically, Q = 4 and T = 50) earns
+a certainty equivalent of 63.93 +- 0.08 ticks against the value function's
+63.90, while moving every quote 0.3 ticks in or out loses about 0.8.
+
+## Informed traders and markouts
+
+`informed.py` adds a fundamental value V that follows a Brownian motion nobody
+else can see, and informed traders who wake up at Poisson times and send a
+market order whenever V is beyond the best quote. They are the only link between
+V and the book, so the mid follows V with a lag, and every informed trade is
+profitable at the moment it happens. Fills now record who the counterparty was,
+and the simulator keeps a tape of every change in the mid, so `markout.py` can
+measure, for each fill, how far the mid has moved for or against it h minutes
+later.
+
+![markouts and P&L with informed flow](docs/informed_flow.png)
+
+One informed trader at 1 order per minute, V moving 1 tick per sqrt(minute),
+200 sessions of 390 minutes per row, every bot capped at 5 lots:
+
+| strategy           | informed flow | mean P&L (se) | sd P&L | fills |
+|--------------------|---------------|---------------|--------|-------|
+| join the touch     | no            | 86.9 (4.0)    | 56.3   | 252   |
+| join the touch     | yes           | -73.2 (5.1)   | 72.6   | 336   |
+| AS, gamma 0.001    | no            | 74.7 (2.0)    | 28.7   | 218   |
+| AS, gamma 0.001    | yes           | 8.7 (2.8)     | 40.0   | 295   |
+| GLFT, gamma 0.3    | no            | 62.5 (1.3)    | 17.9   | 202   |
+| GLFT, gamma 0.3    | yes           | 32.6 (1.8)    | 25.7   | 285   |
+| GLFT, gamma 1      | no            | 18.3 (0.8)    | 10.6   | 83    |
+| GLFT, gamma 1      | yes           | 13.5 (1.1)    | 15.6   | 159   |
+| GLFT, gamma 1, xi  | no            | 4.1 (0.3)     | 4.4    | 13    |
+| GLFT, gamma 1, xi  | yes           | 5.3 (0.6)     | 8.7    | 36    |
+
+The markouts tell the story. Against noise flow the touch quoter earns its half
+spread and keeps it. Against informed flow it earns the same 0.54 ticks at the
+instant of the fill, is underwater after 2.5 minutes and is down 2.96 ticks per
+lot after 30. Three fills in ten are informed, and that is enough to turn +87
+ticks a session into -73.
+
+The noise curve rising to +1.01 is a side effect of the position cap: once
+informed buying has pushed the quoter to -5 lots it only shows a bid, so its
+remaining noise fills are buys made while the price is still catching up with V.
+Without the cap the curve stays flat (0.60 at the fill, 0.54 after 30 minutes,
+over 40 sessions).
+
+Inventory control turns out to be the defence. Informed flow is one-sided, so it
+builds inventory, and a bot that leans against its inventory stops feeding it.
+GLFT with gamma = 0.3 keeps more than half its P&L. The bot's sigma, k and A were
+measured on noise flow only, so it does not know the informed traders exist.
+
+The paper's own answer to adverse selection is xi, a permanent price impact per
+fill. It widens both quotes by xi / 2 and makes the inventory penalty steeper.
+Measured from the touch quoter's markouts (fill to 30 minutes, all
+counterparties) it is 0.72 ticks, which moves the flat-inventory quotes from 0.57
+to 1.24 ticks off the mid. The spread on this book is one tick 74% of the time,
+so the bot now sits a tick behind the best price whenever it is flat, where the
+fill rate is about 40 times lower. It drops from 83 fills a session to 13 and
+makes 4 to 5 ticks with or without the informed traders. On a tick grid, leaning
+on inventory did far more than widening.
 
 ## Install
 
@@ -108,8 +206,31 @@ bid, ask = av.quotes(100.0, 3, 0.5, 0.1, 2.0, 1.5)   # 98.65, 100.15: long, so b
 prob_mid_up(2, 1, lam=1.85, mu=0.94, theta=0.71)   # 0.335; CST Table 3 says 0.336
 ```
 
-`python examples/as_replication.py` and `python examples/cst_sessions.py` redraw
-the two charts. The second one takes about 40 seconds here.
+```python
+from mmsim.bots import GLFT
+from mmsim.glft import Model
+from mmsim.informed import Fundamental, InformedTrader
+from mmsim.markout import curve, markouts
+
+m = Model(sigma=0.3, A=0.9, k=0.3, gamma=0.01, Q=30)
+bid, ask = m.quotes(float("inf"))   # mid minus bid and ask minus mid, q = -30..30
+bid[30] + ask[30]                   # 6.626, the spread at q = 0
+
+value = Fundamental(sigma=1.0, seed=1)
+bot = GLFT(Model(sigma=1.0, A=2.1, k=3.6, gamma=0.3, Q=5))
+flow = ZeroIntelligence(CSTParams.sky_perfect())
+sim = Simulator(flow, [bot, InformedTrader(value, rate=1.0, seed=1)], seed=1)
+sim.seed(10_000, 10_001)
+sim.warm_up(30)
+sim.run(390)
+fills = sim.contexts[0].account.fills
+curve(fills, markouts(fills, sim.tape, [0, 1, 5, 30], sim.end))
+# mean markout per lot 0.50, 0.42, 0.23, 0.11 over 271 fills
+```
+
+`python examples/as_replication.py`, `cst_sessions.py`, `glft_quotes.py` and
+`informed_flow.py` redraw the four charts. The last one runs 2000 sessions and
+takes about 90 seconds here.
 
 ## Notes
 
@@ -156,6 +277,25 @@ away from the reservation price and then keeps them passive, so a bid never
 reaches past one tick below everyone else's ask. Inventory risk shows up as the
 bot stepping back on the side that would add to its position, which on a queue
 mostly means that side stops filling.
+
+**Solving GLFT without losing the tails.** The quotes depend on ratios of
+neighbouring entries of v = exp(-M tau) 1, and those entries can span many orders
+of magnitude: with the order-book calibration (gamma = 1, Q = 10) the smallest is
+1e-18 of the largest. An eigendecomposition gets the tails wrong, because the
+eigenvectors are only accurate to about 1e-16 of their largest entry. But -M tau
+has nonnegative off-diagonal entries, so shifting it by its smallest diagonal
+entry makes every entry nonnegative. The Taylor series of a nonnegative matrix
+has no cancellation, and neither does repeated squaring, so every entry of the
+exponential comes out with full relative precision (the same idea as
+uniformization for Markov chains). The long-horizon quotes are this exponential
+at tau = 80 / (spectral gap), by which point the other eigenvectors have decayed
+by e^-80.
+
+**Markouts.** A markout is side times (mid at t + h minus fill price). The tape
+keeps the last mid of each instant, so h = 0 already includes the book's
+reaction to the fill. Horizons that run past the end of the session are left
+out. Summed to the close, a fill's markouts are exactly its contribution to
+P&L, which a test pins down.
 
 ## License
 
