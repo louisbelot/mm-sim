@@ -12,6 +12,7 @@ from typing import NamedTuple
 from .accounting import Account, Fill
 from .book import Book, Event, EventType, OrderType, Side, Tif
 from .flow import ZeroIntelligence
+from .markout import Tape
 
 
 class Agent:
@@ -145,6 +146,7 @@ class Simulator:
         record_every: float | None = 1.0,
     ) -> None:
         self.book = Book()
+        self.tape = Tape()
         self.flow = flow
         self.rng = random.Random(seed)
         self.t = 0.0
@@ -167,6 +169,7 @@ class Simulator:
 
     def seed(self, bid: int, ask: int) -> None:
         self.flow.seed(self.book, bid, ask, self._ids)
+        self.tape.record(self.t, self.book.mid())
 
     def warm_up(self, duration: float) -> None:
         if self._started:
@@ -264,6 +267,7 @@ class Simulator:
                     self._reduce(ctx, e.id, e.qty)
                 case EventType.REJECTED if e.id not in ctx.orders:
                     del self._agent_orders[e.id]
+        self.tape.record(self.t, self.book.mid())
 
     def _reduce(self, ctx: Context, oid: int, qty: int) -> None:
         o = ctx.orders[oid]

@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 import pytest
 from scripted import limit, make, market
 
@@ -257,3 +258,18 @@ def test_self_trade_books_both_sides():
     ]
     assert ctx.position == 0 and ctx.orders == {}
 
+
+def test_tape_follows_the_book_mid():
+    seen = []
+
+    class Watcher(Agent):
+        def on_book(self, ctx):
+            seen.append((ctx.t, ctx.book.mid()))
+
+    sim = Simulator(ZeroIntelligence(CSTParams.sky_perfect()), [Watcher()], seed=5)
+    sim.seed(1000, 1001)
+    sim.run(60)
+    t, mid = zip(*[(t, m) for t, m in seen if m is not None], strict=True)
+    assert list(sim.tape.at(t)) == list(mid)
+    assert len(sim.tape.t) < len(seen)
+    assert np.all(np.diff(sim.tape.t) > 0)
