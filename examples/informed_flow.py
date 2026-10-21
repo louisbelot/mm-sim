@@ -45,7 +45,7 @@ def session(args):
     sums = {}
     for who in ("noise", "informed"):
         fills = [f for f in ctx.account.fills if (f.counterparty != 0) == (who == "informed")]
-        m = markouts(fills, sim.tape, H, sim.end) if fills else np.empty((0, len(H)))
+        m = markouts(fills, sim.tape, H, sim.end)
         sums[who] = (np.nansum(m, axis=0), np.nansum(m**2, axis=0), (~np.isnan(m)).sum(axis=0))
     return ctx.pnl(), len(ctx.account.fills), sums
 
