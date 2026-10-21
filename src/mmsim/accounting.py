@@ -15,6 +15,7 @@ class Fill:
     maker: bool
     fee: float
     mid: float | None
+    counterparty: int = 0
 
 
 class Account:
@@ -28,7 +29,15 @@ class Account:
         self.fills: list[Fill] = []
 
     def fill(
-        self, t: float, oid: int, side: Side, price: int, qty: int, maker: bool, mid: float | None
+        self,
+        t: float,
+        oid: int,
+        side: Side,
+        price: int,
+        qty: int,
+        maker: bool,
+        mid: float | None,
+        counterparty: int = 0,
     ) -> Fill:
         fee = (self.maker_fee if maker else self.taker_fee) * qty
         sign = 1 if side == Side.BUY else -1
@@ -36,7 +45,7 @@ class Account:
         self.cash -= sign * price * qty + fee
         self.fees += fee
         self.volume += qty
-        f = Fill(t, oid, side, price, qty, maker, fee, mid)
+        f = Fill(t, oid, side, price, qty, maker, fee, mid, counterparty)
         self.fills.append(f)
         return f
 

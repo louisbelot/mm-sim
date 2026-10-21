@@ -226,3 +226,34 @@ def test_cst_session_keeps_book_and_accounts_consistent():
     sells = sum(f.qty for f in ctx.account.fills if f.side == Side.SELL)
     assert ctx.position == buys - sells
     assert len(ctx.history) == 301
+
+
+def test_fills_know_their_counterparty():
+    sim = make([(1.0, market(Side.SELL, 1))], Recorder(lambda ctx: ctx.buy(100, 1)))
+    sim.run(2.0)
+    assert [f.counterparty for f in sim.contexts[0].account.fills] == [sim.flow.owner]
+
+    buyer = Recorder(lambda ctx: ctx.buy(100, 1))
+    seller = Recorder(lambda ctx: ctx.sell(100, 1, tif=Tif.IOC))
+    sim = make([], buyer, seller)
+    sim.run(1.0)
+    a, b = sim.contexts
+    assert [(f.maker, f.counterparty) for f in a.account.fills] == [(True, b.owner)]
+    assert [(f.maker, f.counterparty) for f in b.account.fills] == [(False, a.owner)]
+
+
+def test_self_trade_books_both_sides():
+    def cross(ctx):
+        ctx.buy(100, 1)
+        ctx.sell(100, 1)
+
+    sim = make([], Recorder(cross))
+    sim.run(1.0)
+    ctx = sim.contexts[0]
+    fills = ctx.account.fills
+    assert [(f.side, f.maker, f.counterparty) for f in fills] == [
+        (Side.BUY, True, ctx.owner),
+        (Side.SELL, False, ctx.owner),
+    ]
+    assert ctx.position == 0 and ctx.orders == {}
+

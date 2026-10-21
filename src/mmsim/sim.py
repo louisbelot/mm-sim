@@ -238,11 +238,15 @@ class Simulator:
     def _dispatch(self, events: list[Event]) -> None:
         for e in events:
             if e.type == EventType.TRADE:
-                for oid, side, maker in ((e.maker, e.side.opposite, True), (e.id, e.side, False)):
-                    ctx = self._agent_orders.get(oid)
+                maker, taker = self._agent_orders.get(e.maker), self._agent_orders.get(e.id)
+                for ctx, oid, side, is_maker, other in (
+                    (maker, e.maker, e.side.opposite, True, taker),
+                    (taker, e.id, e.side, False, maker),
+                ):
                     if ctx is not None:
+                        who = self.flow.owner if other is None else other.owner
                         fill = ctx.account.fill(
-                            self.t, oid, side, e.price, e.qty, maker, self._pre_mid
+                            self.t, oid, side, e.price, e.qty, is_maker, self._pre_mid, who
                         )
                         self._reduce(ctx, oid, e.qty)
                         self._queue(ctx.agent.on_fill, ctx, fill)
