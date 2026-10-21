@@ -96,8 +96,9 @@ def main():
 
     print("markouts of the touch quoter with informed flow, ticks per lot")
     curves = {who: pooled(touch, who) for who in ("noise", "informed")}
-    for who, (mean, se, n) in curves.items():
-        print(f"  {who} ({n} fills):", " ".join(f"{h:g}:{m:+.2f}" for h, m in zip(H, mean)))
+    for who, (mean, _, n) in curves.items():
+        cells = " ".join(f"{h:g}:{m:+.2f}" for h, m in zip(H, mean, strict=True))
+        print(f"  {who} ({n} fills): {cells}")
 
     ink, muted, grid, surface = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
     blue, orange = "#2a78d6", "#eb6834"

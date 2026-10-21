@@ -55,9 +55,7 @@ left.legend(loc="upper left", frameon=False, labelcolor=INK)
 
 for (q, b), color in zip(paths.items(), (AQUA, BLUE, ORANGE), strict=True):
     right.plot(t, b, color=color, linewidth=2)
-    right.annotate(
-        f"q = {q}", (t[0], b[0]), xytext=(4, 6), textcoords="offset points", color=INK
-    )
+    right.annotate(f"q = {q}", (t[0], b[0]), xytext=(4, 6), textcoords="offset points", color=INK)
 right.axhline(m.base, color=MUTED, linewidth=1, linestyle=":")
 right.annotate(
     "terminal quote (1/gamma) ln(1 + gamma/k)",
