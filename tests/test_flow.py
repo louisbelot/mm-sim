@@ -11,9 +11,6 @@ from mmsim.flow import CSTParams, ZeroIntelligence, prob_fill_first, prob_mid_up
 SKY = CSTParams.sky_perfect()
 LAM1, MU, THETA1 = SKY.lam[0], SKY.mu, SKY.theta[0]
 
-# Cont, Stoikov and Talreja (2010), Table 3, Laplace transform results:
-# P(next mid move is up) with a one-tick spread. Rows are b, the lots at the
-# bid; columns are a, the lots at the ask.
 CST_TABLE3 = [
     [0.500, 0.336, 0.259, 0.216, 0.188],
     [0.664, 0.500, 0.407, 0.348, 0.307],
@@ -46,14 +43,12 @@ def test_mid_up_is_antisymmetric():
 
 
 def race_of_market_orders(first, second):
-    """P(`first` buys arrive before `second` sells) when both arrive at the same rate."""
     n = first + second - 1
     return sum(comb(n, k) for k in range(first, n + 1)) / 2**n
 
 
 @pytest.mark.parametrize("a,b", [(1, 1), (1, 3), (4, 2), (5, 5)])
 def test_pure_market_order_limit(a, b):
-    # No limit orders and no cancels: queues only shrink, one lot per market order.
     assert prob_mid_up(a, b, 0.0, 1.0, 0.0) == pytest.approx(race_of_market_orders(a, b))
     assert prob_fill_first(a, b, 0.0, 1.0, 0.0) == pytest.approx(race_of_market_orders(b, a))
 
@@ -65,7 +60,6 @@ def test_truncation_does_not_matter():
 
 
 def one_tick_book(a, b, ids):
-    """a lots at the ask (101), b at the bid (100), two lots on each deeper level."""
     book = Book()
     for _ in range(b):
         book.submit(next(ids), Side.BUY, 100, 1)
@@ -92,8 +86,6 @@ def test_simulated_mid_moves_match_exact(a, b):
 
 
 def test_long_run_rates_and_invariants():
-    # Limit order arrivals do not depend on the state, so their count over T
-    # minutes is Poisson with mean 2 * sum(lam) * T.
     rng, ids, book, flow = random.Random(5), itertools.count(1), Book(), ZeroIntelligence(SKY)
     flow.seed(book, 1000, 1001, ids)
     t, horizon, limits, events = 0.0, 2000.0, 0, 0

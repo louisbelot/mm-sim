@@ -4,8 +4,6 @@ from scipy.optimize import brentq, minimize_scalar
 
 from mmsim import avellaneda as av
 
-# Avellaneda and Stoikov (2008), Tables 1 to 3, each from 1000 simulations:
-# average spread, mean and std of profit, mean and std of final inventory.
 PAPER = {
     (0.1, "inventory"): (1.49, 65.0, 6.6, 0.08, 2.9),
     (0.1, "symmetric"): (1.49, 68.4, 12.7, 0.26, 8.4),
@@ -22,8 +20,6 @@ def test_reproduces_paper_tables(gamma, strategy):
     n = 20_000
     run = av.simulate(gamma, strategy, n_paths=n, seed=7)
 
-    # The paper's figures are 1000-path estimates themselves, so the tolerance
-    # covers both sampling errors, plus the rounding of the published table.
     def se_mean(sd):
         return sd * np.sqrt(1 / 1000 + 1 / n)
 
@@ -38,9 +34,6 @@ def test_reproduces_paper_tables(gamma, strategy):
 
 
 def test_reservation_price_is_the_frozen_inventory_indifference_price():
-    # Holding q shares to T without trading, exponential utility gives
-    # -v = exp(-gamma x - gamma q s + gamma^2 q^2 sigma^2 (T - t) / 2)  (paper, eq. 6).
-    # The reservation bid and ask make buying or selling one more share neutral.
     gamma, sigma, s, tau = 0.1, 2.0, 100.0, 0.7
 
     def log_minus_v(x, q):

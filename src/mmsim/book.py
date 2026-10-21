@@ -1,12 +1,3 @@
-"""Limit order book with price-time priority.
-
-A pure-Python port of the matching rules in Lemypoo/orderbook, minus self-trade
-prevention. Commands and the event stream are the same as in the C++ engine, so
-the simulator can switch to it later without touching agent code.
-
-Prices are integer ticks and quantities are integer lots.
-"""
-
 from __future__ import annotations
 
 import dataclasses
@@ -51,24 +42,15 @@ class Reason(IntEnum):
     UNKNOWN_ORDER = 2
     BAD_QTY = 3
     BAD_PRICE = 4
-    BAD_FLAGS = 5  # market + post-only, or post-only that is not GTC
+    BAD_FLAGS = 5
     USER = 6
-    UNFILLED = 7  # IOC or market remainder
+    UNFILLED = 7
     FOK = 8
     POST_ONLY = 9
 
 
 @dataclass(frozen=True, slots=True)
 class Event:
-    """One entry of the event stream. Field meaning by type:
-
-    ACCEPTED  id, side, price, qty    (price 0 for market orders)
-    REJECTED  id, reason              (side too, when a submit is rejected)
-    TRADE     id = taker, maker, side = taker side, price = maker price, qty
-    CANCELED  id, side, qty removed, reason
-    MODIFIED  id, side, price, qty    (new price and leaves quantity)
-    """
-
     type: EventType
     id: int
     side: Side = Side.BUY
@@ -89,8 +71,6 @@ class Order:
 
 
 class Level:
-    """Resting orders at one price, oldest first."""
-
     __slots__ = ("price", "qty", "orders")
 
     def __init__(self, price: int) -> None:
@@ -99,16 +79,13 @@ class Level:
         self.orders: OrderedDict[int, Order] = OrderedDict()
 
 
-# Levels are keyed by sign * price, so bids are stored negated. The best level
-# on either side is then the smallest key, and matching is the same code for
-# both sides: a taker crosses a level iff key <= sign * limit price.
 _SIGN = (-1, 1)
 
 
 class Book:
     def __init__(self) -> None:
         self._levels: tuple[dict[int, Level], dict[int, Level]] = ({}, {})
-        self._keys: tuple[list[int], list[int]] = ([], [])  # sorted, best first
+        self._keys: tuple[list[int], list[int]] = ([], [])
         self._orders: dict[int, Order] = {}
 
     def submit(
@@ -123,7 +100,6 @@ class Book:
         tif: Tif = Tif.GTC,
         post_only: bool = False,
     ) -> list[Event]:
-        """Enters a new order. The price is ignored for market orders."""
         if qty <= 0:
             return [Event(EventType.REJECTED, oid, side, reason=Reason.BAD_QTY)]
         if kind == OrderType.LIMIT and price <= 0:
@@ -147,12 +123,6 @@ class Book:
         return [Event(EventType.CANCELED, oid, o.side, qty=o.qty, reason=Reason.USER)]
 
     def modify(self, oid: int, price: int, qty: int) -> list[Event]:
-        """Sets a resting order's price and leaves quantity.
-
-        Shrinking at the same price keeps time priority. Any other change sends the
-        order to the back of the queue at its new price, where it can trade like a
-        new GTC order that keeps its post-only flag.
-        """
         if qty <= 0:
             return [Event(EventType.REJECTED, oid, reason=Reason.BAD_QTY)]
         if price <= 0:
@@ -188,7 +158,6 @@ class Book:
         return (bid + ask) / 2
 
     def levels(self, side: Side) -> Iterator[Level]:
-        """Live levels of one side, best first. Read them, don't modify them."""
         levels = self._levels[side]
         return (levels[k] for k in self._keys[side])
 
@@ -196,7 +165,6 @@ class Book:
         return self._levels[side].get(_SIGN[side] * price)
 
     def depth(self, side: Side, n: int) -> list[tuple[int, int, int]]:
-        """(price, qty, order count) for the n best levels."""
         out = []
         for lvl in self.levels(side):
             if len(out) == n:
@@ -205,7 +173,6 @@ class Book:
         return out
 
     def orders(self, side: Side) -> list[Order]:
-        """Copies of the resting orders, best price first, then time."""
         return [dataclasses.replace(o) for lvl in self.levels(side) for o in lvl.orders.values()]
 
     def find(self, oid: int) -> Order | None:
@@ -213,7 +180,6 @@ class Book:
         return dataclasses.replace(o) if o is not None else None
 
     def ahead(self, oid: int) -> int:
-        """Quantity in front of a resting order in its price queue."""
         o = self._orders[oid]
         qty = 0
         for other in self._levels[o.side][_SIGN[o.side] * o.price].orders.values():
@@ -229,7 +195,6 @@ class Book:
         return oid in self._orders
 
     def audit(self) -> str:
-        """Cross-checks every structure. Returns the first broken invariant, or ""."""
         seen = 0
         for side in Side:
             keys, levels = self._keys[side], self._levels[side]
@@ -271,8 +236,6 @@ class Book:
             out.append(Event(EventType.CANCELED, t.id, t.side, qty=t.qty, reason=Reason.FOK))
             return
 
-        # Always trade against the head of the best level: each step either
-        # removes that order or uses up the taker.
         while t.qty and keys and (market or keys[0] <= limit):
             lvl = levels[keys[0]]
             resting = lvl.orders
@@ -324,7 +287,6 @@ class Book:
 def _fillable(
     keys: list[int], levels: dict[int, Level], limit: int, market: bool, qty: int
 ) -> bool:
-    """Read-only dry run of matching, so a killed fill-or-kill needs no rollback."""
     avail = 0
     for key in keys:
         if not market and key > limit:

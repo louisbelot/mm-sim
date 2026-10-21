@@ -1,8 +1,3 @@
-"""Avellaneda-Stoikov (2008) section 3.3, rerun: tables 1 to 3 and figures 1 and 2.
-
-python examples/as_replication.py  ->  prints the tables, writes docs/as_replication.png
-"""
-
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -76,7 +71,7 @@ right.hist(
 )
 right.legend(loc="upper left", frameon=False, labelcolor=INK)
 right.set_xlim(0, 130)
-right.set_ylim(0, 1.35 * counts.max())  # room for the legend above the bars
+right.set_ylim(0, 1.35 * counts.max())
 right.set_xlabel("terminal profit")
 right.set_ylabel(f"paths (of {N:,})")
 right.set_title("Profit distribution, gamma = 0.1", loc="left", color=INK)

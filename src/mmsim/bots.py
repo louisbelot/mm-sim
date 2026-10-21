@@ -1,5 +1,3 @@
-"""Market-making bots."""
-
 from __future__ import annotations
 
 import math
@@ -11,13 +9,6 @@ from .sim import Agent, Context
 
 
 class Quoter(Agent):
-    """Keeps one post-only order on each side, at the prices `targets` picks.
-
-    A quote whose target has not moved is left alone, so it keeps its place in
-    the queue. A side is dropped while a fill there would take |position| past
-    max_position. Subclasses only choose prices.
-    """
-
     def __init__(self, size: int = 1, max_position: int | None = None) -> None:
         self.size = size
         self.max_position = max_position
@@ -56,12 +47,6 @@ class Quoter(Agent):
 
 
 class SymmetricQuoter(Quoter):
-    """Bid at floor(mid - half_spread), ask at ceil(mid + half_spread).
-
-    The mid is everyone else's, so the quotes follow the market instead of the
-    bot's own orders. half_spread = 0.5 joins the best bid and ask.
-    """
-
     def __init__(self, half_spread: float = 0.5, size: int = 1, max_position: int | None = None):
         super().__init__(size, max_position)
         self.half_spread = half_spread
@@ -74,17 +59,6 @@ class SymmetricQuoter(Quoter):
 
 
 class AvellanedaStoikov(Quoter):
-    """Avellaneda-Stoikov quotes on the live book.
-
-    Quotes the paper's spread around r = s - q gamma sigma^2 tau, with q the
-    position in lots and tau the time left in the run, or `horizon` if that is
-    shorter. Units are ticks, lots and the flow's time unit. Model prices are
-    rounded away from r to whole ticks and then kept passive: in the model a
-    quote can sit through the mid, but on a book that would be a market order,
-    so a bid stops one tick below everyone else's ask (and the ask one tick
-    above their bid).
-    """
-
     def __init__(
         self,
         gamma: float,

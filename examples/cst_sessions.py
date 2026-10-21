@@ -1,12 +1,3 @@
-"""Market making on the Cont-Stoikov-Talreja book: joining the touch vs Avellaneda-Stoikov.
-
-Each session is a 30-minute warm-up and then 390 minutes of trading, one lot per
-quote, with no fees. AS uses sigma = 1 tick per sqrt(minute) and k = 3.6 per
-tick, both measured on this flow (see DEVLOG), and tau = time left in the session.
-
-python examples/cst_sessions.py  ->  prints a table, writes docs/cst_sessions.png
-"""
-
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 

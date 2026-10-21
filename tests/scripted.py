@@ -1,5 +1,3 @@
-"""Deterministic stand-in for the background flow, for exact simulator tests."""
-
 from collections import deque
 
 from mmsim.book import OrderType, Side
@@ -7,8 +5,6 @@ from mmsim.sim import Simulator
 
 
 class ScriptedFlow:
-    """Stands in for the Poisson flow: runs `cmd(book, ids)` at fixed times."""
-
     owner = 0
 
     def __init__(self, script):

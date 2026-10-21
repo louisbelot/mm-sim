@@ -1,16 +1,3 @@
-"""Event-driven market simulator.
-
-One book, one background flow and any number of agents, in continuous time.
-The flow's Poisson clock drives background events and agents act from
-callbacks and timers. Every change to the book comes back as the book's own
-events, which update accounts and open orders and trigger fill callbacks.
-
-Agent actions reach the book instantly; latency comes later. Callbacks never
-nest: a fill caused by an agent's own order is delivered after its current
-callback returns, but the account and open orders are already up to date when
-the order call returns.
-"""
-
 from __future__ import annotations
 
 import heapq
@@ -28,13 +15,11 @@ from .flow import ZeroIntelligence
 
 
 class Agent:
-    """Base class for trading agents. Override the hooks you need."""
-
     def on_start(self, ctx: Context) -> None:
         pass
 
     def on_book(self, ctx: Context) -> None:
-        """Called after every background event."""
+        ...
 
     def on_fill(self, ctx: Context, fill: Fill) -> None:
         pass
@@ -52,14 +37,12 @@ class LiveOrder:
 
 class Sample(NamedTuple):
     t: float
-    mid: float  # mid of everyone else's quotes, the mark for pnl
+    mid: float
     position: int
     pnl: float
 
 
 class Context:
-    """An agent's handle on the market: clock, quotes, orders and account."""
-
     def __init__(self, sim: Simulator, agent: Agent, owner: int, account: Account) -> None:
         self._sim = sim
         self.agent = agent
@@ -75,7 +58,6 @@ class Context:
 
     @property
     def end(self) -> float:
-        """When the current run stops."""
         return self._sim.end
 
     @property
@@ -88,7 +70,6 @@ class Context:
 
     @property
     def bid(self) -> int | None:
-        """Best bid among everyone else's orders."""
         return _best_of_others(self._sim.book, Side.BUY, self.owner)
 
     @property
@@ -97,14 +78,12 @@ class Context:
 
     @property
     def mid(self) -> float | None:
-        """Mid of everyone else's quotes, so an agent never chases its own orders."""
         bid, ask = self.bid, self.ask
         if bid is None or ask is None:
             return None
         return (bid + ask) / 2
 
     def mark(self) -> float:
-        """The current mid, or the last one seen while a side of the book is empty."""
         mid = self.mid
         if mid is not None:
             self._mark = mid
@@ -123,7 +102,6 @@ class Context:
         tif: Tif = Tif.GTC,
         post_only: bool = False,
     ) -> int:
-        """Sends an order and returns its id."""
         return self._sim._submit(self, side, price, qty, kind, tif, post_only)
 
     def buy(self, price: int, qty: int = 1, **kw) -> int:
@@ -133,7 +111,6 @@ class Context:
         return self.submit(Side.SELL, price, qty, **kw)
 
     def cancel(self, oid: int) -> None:
-        """Cancels one of our orders. Ids that are no longer live are ignored."""
         if oid in self.orders:
             self._sim._act(self._sim.book.cancel, oid)
 
@@ -146,11 +123,9 @@ class Context:
             self.cancel(oid)
 
     def set_timer(self, delay: float) -> None:
-        """Calls on_timer after `delay` time units."""
         self._sim._schedule(self, delay)
 
     def stop(self) -> None:
-        """Ends the current run after this event."""
         self._sim.stopped = True
 
     def _record(self, t: float) -> None:
@@ -194,13 +169,11 @@ class Simulator:
         self.flow.seed(self.book, bid, ask, self._ids)
 
     def warm_up(self, duration: float) -> None:
-        """Runs the background flow alone, before any agent starts."""
         if self._started:
             raise RuntimeError("warm_up has to come before the first run")
         self._loop(self.t + duration)
 
     def run(self, duration: float) -> None:
-        """Runs for `duration` time units. The first call starts the agents."""
         self.end = self.t + duration
         self.stopped = False
         if not self._started:
@@ -235,8 +208,6 @@ class Simulator:
             self._drain()
 
     def _advance(self, t: float) -> None:
-        # The book is constant between events, so samples up to t see the state
-        # from before the event at t.
         while self._next_sample <= t:
             for ctx in self.contexts:
                 ctx._record(self._next_sample)
@@ -304,9 +275,6 @@ class Simulator:
         self._pending.append((fn, args))
 
     def _drain(self) -> None:
-        # Callbacks run one at a time, and only after the events that queued
-        # them are fully booked. Anything an agent does inside a callback just
-        # adds to the queue that this loop is already draining.
         if self._busy:
             return
         self._busy = True

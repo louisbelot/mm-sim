@@ -7,12 +7,6 @@ from mmsim.book import Book, OrderType, Side, Tif
 
 
 def commands(rng, ref, n):
-    """Random commands aimed at the orders that are live in the reference book.
-
-    Buys centre on 99 and sells on 101. Over the 30 seeds below, 24% of accepted
-    limit orders trade, 8% of commands are rejected and the book holds 24 orders
-    on average.
-    """
     next_id = 1
     for _ in range(n):
         ids = ref.ids()

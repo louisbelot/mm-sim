@@ -11,7 +11,6 @@ ACC, REJ, TRADE, CXL, MOD = (
 
 
 def book_with(*orders):
-    """Book with resting limit orders given as (id, side, price, qty)."""
     b = Book()
     for oid, side, px, qty in orders:
         b.submit(oid, side, px, qty)

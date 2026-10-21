@@ -1,9 +1,3 @@
-"""Deliberately naive order book, used as the oracle in the differential test.
-
-It shares only the event types with mmsim.book. Resting orders sit in one flat
-list, and every take sorts the crossing orders from scratch.
-"""
-
 from dataclasses import dataclass
 
 from mmsim.book import Event, EventType, OrderType, Reason, Side, Tif

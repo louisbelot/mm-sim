@@ -35,7 +35,7 @@ def test_resting_order_fills_against_market_orders():
     assert order.qty == 1 and ctx.position == 1 and ctx.account.cash == -100
     f = agent.fills[0]
     assert (f.t, f.oid, f.side, f.price, f.qty, f.maker) == (1.0, oid, Side.BUY, 100, 1, True)
-    assert f.mid == 101  # book mid before the trade, with our bid at 100 in it
+    assert f.mid == 101
 
     sim.run(1.0)
     assert ctx.orders == {} and ctx.position == 2
@@ -108,7 +108,7 @@ def test_modify_and_cancel_track_open_orders():
         oid = ctx.buy(100, 4)
         ctx.modify(oid, 101, 2)
         assert ctx.orders[oid].price == 101 and ctx.orders[oid].qty == 2
-        ctx.modify(oid, 102, 2)  # crosses the ask at 102 and fills
+        ctx.modify(oid, 102, 2)
         assert oid not in ctx.orders and ctx.position == 2
         other = ctx.sell(105, 1)
         ctx.cancel_all()
@@ -164,8 +164,6 @@ def test_warm_up_runs_flow_without_agents():
 
 
 class QueueRacer(Agent):
-    """Joins the back of the bid queue and waits: filled, or the ask queue empties first."""
-
     def __init__(self):
         self.filled = None
 
@@ -185,7 +183,6 @@ class QueueRacer(Agent):
 
 @pytest.mark.parametrize("a,b", [(1, 1), (3, 1), (2, 3)])
 def test_queue_race_matches_exact(a, b):
-    """The agent's order is the b-th lot in the bid queue, with a lots at the ask."""
     sky = CSTParams.sky_perfect()
     n, fills = 1500, 0
     for rep in range(n):

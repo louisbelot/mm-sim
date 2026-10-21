@@ -1,18 +1,3 @@
-"""Zero-intelligence order flow from Cont, Stoikov and Talreja (2010).
-
-Every event is an independent Poisson arrival whose rate depends only on its
-distance i, in ticks, from the opposite best quote:
-
-    limit buy at i ticks below the best ask (sell: above the best bid)   lam(i)
-    market buy or sell for one lot                                       mu
-    cancel of each resting order i ticks from the opposite quote         theta(i)
-
-Orders are one lot each. The book is then a continuous-time Markov chain, and
-`ZeroIntelligence.step` simulates it exactly (Gillespie): the time to the next
-event is exponential with the total rate, and the event is picked with
-probability proportional to its own rate.
-"""
-
 from __future__ import annotations
 
 import random
@@ -32,18 +17,12 @@ _LIMIT, _MARKET, _CANCEL = range(3)
 
 @dataclass(frozen=True)
 class CSTParams:
-    lam: tuple[float, ...]  # limit order rate at distance 1, 2, ... ticks
-    theta: tuple[float, ...]  # cancel rate per order; the last entry covers all larger distances
-    mu: float  # market order rate, per side
+    lam: tuple[float, ...]
+    theta: tuple[float, ...]
+    mu: float
 
     @classmethod
     def sky_perfect(cls, depth: int = 10) -> CSTParams:
-        """Table 2 of the paper: Sky Perfect Communications on the Tokyo Stock Exchange.
-
-        Rates are per minute, in units of the average limit order size. lam was
-        measured for i <= 5 and is extended with the paper's power-law fit
-        1.92 / i^0.52.
-        """
         measured = (1.85, 1.51, 1.09, 0.88, 0.77)
         lam = measured + tuple(1.92 / i**0.52 for i in range(6, depth + 1))
         return cls(lam=lam[:depth], theta=(0.71, 0.81, 0.68, 0.56, 0.47), mu=0.94)
@@ -53,24 +32,14 @@ class CSTParams:
 
 
 class ZeroIntelligence:
-    """Background trader that sends CST order flow into a book."""
-
     def __init__(self, params: CSTParams, owner: int = 0) -> None:
         self.params = params
         self.owner = owner
         self._cum_lam = list(accumulate(params.lam))
-        # Last seen best quotes. CST pins an empty side to the edge of its price
-        # grid; here limit orders keep using the last quote that side had.
         self._bid: int | None = None
         self._ask: int | None = None
 
     def seed(self, book: Book, bid: int, ask: int, ids: Iterator[int]) -> None:
-        """Puts max(1, round(lam(i) / theta(i))) lots on the i-th level of each side.
-
-        With a one-tick spread that is the queue size a level would settle at if it
-        stayed i ticks from the opposite quote. It is only a starting point: run a
-        warm-up before measuring anything.
-        """
         p = self.params
         for i, lam in enumerate(p.lam, start=1):
             n = max(1, round(lam / p.theta_at(i)))
@@ -81,14 +50,6 @@ class ZeroIntelligence:
     def step(
         self, book: Book, rng: random.Random, horizon: float, ids: Iterator[int]
     ) -> tuple[float, Callable[[], list[Event]]] | None:
-        """Draws the next background event without applying it.
-
-        Returns (time until the event, fire), where fire() applies the event to
-        the book and returns its events. The caller moves its clock first, so
-        anything it records in between still sees the old book. Returns None if
-        nothing happens within `horizon`; the caller then moves time forward by
-        `horizon` and asks again, which is exact because the chain is memoryless.
-        """
         p = self.params
         bid, ask = book.best_bid(), book.best_ask()
         if bid is not None:
@@ -133,39 +94,18 @@ class ZeroIntelligence:
 
 
 def prob_mid_up(a: int, b: int, lam: float, mu: float, theta: float, n_max: int = 100) -> float:
-    """P(next mid move is up), with a lots at the ask, b at the bid and a one-tick spread.
-
-    With a one-tick spread the mid moves when one of the two best queues empties.
-    Until then the queues are independent birth-death chains with births lam(1)
-    and deaths mu + theta(1) * n (CST, Lemma 2). The paper inverts a Laplace
-    transform; here the same probability is the solution of a linear system on
-    the two-dimensional chain, truncated at n_max lots per queue.
-    """
     n = np.arange(1, n_max + 1)
     h = _first_to_empty(lam, mu + theta * n, lam, mu + theta * n)
     return float(h[a - 1, b - 1])
 
 
 def prob_fill_first(a: int, b: int, lam: float, mu: float, theta: float, n_max: int = 100) -> float:
-    """P(a bid at the back of the queue fills before the ask queue empties), one-tick spread.
-
-    b counts the order itself, so b - 1 lots are ahead of it. The order never
-    cancels, so its queue shrinks at rate mu + theta * (lots ahead) and nothing
-    joins in front of it. The ask queue is the same chain as in `prob_mid_up`.
-    """
     n = np.arange(1, n_max + 1)
     h = _first_to_empty(lam, mu + theta * n, 0.0, mu + theta * (n - 1))
     return float(1 - h[a - 1, b - 1])
 
 
 def _first_to_empty(lam_x: float, death_x: np.ndarray, lam_y: float, death_y: np.ndarray):
-    """h[x-1, y-1] = P(X empties before Y) for independent birth-death chains.
-
-    Births are lam_x and lam_y (blocked at the truncation level), deaths in state
-    k are death_x[k-1] and death_y[k-1]. h solves the first-step equations
-    rate_out * h(x, y) = sum of rate * h(neighbour), with h = 1 once X is empty
-    and h = 0 once Y is.
-    """
     n = len(death_x)
     x, y = np.meshgrid(np.arange(1, n + 1), np.arange(1, n + 1), indexing="ij")
     idx = (x - 1) * n + (y - 1)

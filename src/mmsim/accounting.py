@@ -1,9 +1,3 @@
-"""Cash, inventory and mark-to-market P&L for one trader.
-
-Units follow the book: prices in ticks, sizes in lots, so cash is in tick-lots.
-Fees are ticks per lot, and a negative fee is a rebate.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,12 +9,12 @@ from .book import Side
 class Fill:
     t: float
     oid: int
-    side: Side  # our side of the trade
+    side: Side
     price: int
     qty: int
-    maker: bool  # our order was resting
-    fee: float  # what we paid, negative for a rebate
-    mid: float | None  # mid just before the trade, for markouts
+    maker: bool
+    fee: float
+    mid: float | None
 
 
 class Account:
@@ -47,5 +41,4 @@ class Account:
         return f
 
     def value(self, mark: float) -> float:
-        """Mark-to-market P&L: cash plus the position valued at `mark`."""
         return self.cash + self.position * mark
