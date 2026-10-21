@@ -98,3 +98,107 @@ Next: the Gueant-Lehalle-Fernandez-Tapia solution with inventory
 limits (exact quotes from a matrix exponential, compared with their closed-form
 approximation and with AS), then informed traders and markouts on
 the CST book.
+
+## 2026-10-21: GLFT, informed traders and markouts
+
+The Gueant-Lehalle-Fernandez-Tapia model solved exactly, a bot that quotes it,
+then informed traders and the markout tooling to see what they cost.
+
+Built:
+
+- `glft.py`: `Model(sigma, A, k, gamma, Q, mu, xi)` with the tridiagonal matrix
+  M, v(tau) = exp(-M tau) v(T), quotes at any time to the close or in the
+  long-horizon limit, and the paper's closed-form approximation. It covers both
+  extensions in the paper: a drift mu (diagonal gets -k mu q) and a price impact
+  xi per fill (off-diagonal scaled by exp(-k xi / 2), terminal v_q = exp(-k xi
+  q^2 / 2), quotes shifted by xi / 2). The paper only treats them one at a time;
+  the HJB check below confirms they combine as expected.
+- `bots.GLFT`: quotes the stationary table for the current inventory, rounds
+  away from the mid, keeps quotes passive, drops the side that would break Q.
+- `Fill.counterparty`: the owner of the other order (the background flow is 0).
+  Self-trades book both sides with the right maker flags.
+- `Simulator.tape`: every change in the full book mid, keeping only the last
+  value of each instant. `markout.py` has `markouts` (side times mid at t + h
+  minus price, NaN past the end of the session) and `curve` (qty-weighted mean
+  and standard error per horizon).
+- `informed.py`: `Fundamental`, a Brownian value sampled lazily and exactly at
+  whatever times it is asked for, and `InformedTrader`, who wakes at Poisson
+  times and takes the touch when V is beyond it.
+- Two examples and charts: `glft_quotes.py` (paper example) and
+  `informed_flow.py` (2000 sessions, about 90 seconds).
+
+Checks (all measured today):
+
+- 135 tests, 17 s for the whole suite.
+- The quotes match `scipy.linalg.expm` to 1e-11 relative on the paper's example,
+  and a Radau solve of the nonlinear HJB system for theta = log value (derived
+  separately, not from the linear system) to 1e-6 ticks in four cases: plain,
+  drift, impact, and drift plus impact with the order-book calibration.
+- Near the close the quote slopes in time are (2q + 1) gamma sigma^2 / 2, the
+  Avellaneda-Stoikov expansion (paper footnote 8), to 0.07% at tau = 1e-4, for
+  every q whose neighbours are both interior. The quotes at q = Q - 1 differ at
+  first order because v_Q has only one neighbour, which is why the test stops one
+  short of the bound.
+- Long-horizon quotes equal the ones built from the ground state of M (numpy
+  eigh, Q = 12) to 1e-9, and the t = 0 quotes for T = 600 are within 4e-7 ticks
+  of them.
+- Paper example: stationary spread 6.6261 against the closed form 6.626; closed
+  form within 0.002 ticks for |q| <= 10, off by 0.85 at q = 29.
+- Exact Monte Carlo of the paper's model (fills by thinning, mid integrated out
+  since fills do not depend on it: E[exp(-gamma q dS)] = exp(gamma^2 sigma^2
+  q^2 dt / 2)), 20,000 paths: certainty equivalent 63.93 +- 0.08 against
+  ln(v_0(0)) / k = 63.90. Shifting all quotes by -0.3 and +0.3 ticks with the
+  same random numbers gives 63.04 and 63.15.
+- A Bernoulli-per-step version of that Monte Carlo was biased low: 0.43 ticks
+  at dt = 0.05, 0.28 at 0.025, 0.20 at 0.0125. Switching to thinning removed the
+  bias rather than chasing it with smaller steps.
+- Informed traders: every informed fill is on the right side of V at that
+  instant (checked over six sessions). With a constant V of 104 and asks at 102
+  (5 lots), 103 and 104, the trader buys exactly 6 lots and stops.
+- `Fundamental` sampled on a 2-point or a 50-point random grid gives the same
+  N(0, sigma^2 T) increment over 3000 seeds.
+- Summed to the close, markouts equal account value at the last mid (300 random
+  fills).
+- Experiment (200 sessions per row, one informed trader at 1 order a minute, V
+  at 1 tick per sqrt(minute), all bots capped at 5 lots): joining the touch goes
+  from +86.9 to -73.2 ticks a session, AS gamma 0.001 from 74.7 to 8.7, GLFT
+  gamma 0.3 from 62.5 to 32.6, GLFT gamma 1 from 18.3 to 13.5. Markouts of the
+  touch quoter: +0.54 at the fill against informed flow, -2.96 after 30 minutes
+  (19,691 fills); against noise flow +0.58 rising to +1.01 (47,441 fills).
+
+Design notes and things that went wrong:
+
+- The first plan was an eigendecomposition of M. For the order-book bot (gamma =
+  1, Q = 10) v spans 18 orders of magnitude and eigenvectors are only good to
+  1e-16 of their largest entry, so the tails would be noise. -tau M is a
+  Metzler matrix; shifted by its smallest diagonal it is nonnegative, and a
+  Taylor series plus repeated squaring of a nonnegative matrix never cancels.
+  Each squaring is renormalised by its largest entry since only ratios matter.
+  The eigenvalues are still used, for the spectral gap that decides how long
+  "infinite" is (80 / gap).
+- The paper's figures 1 to 3 do not fit Q = 30: the exact bid at q = 29 is 6.13
+  ticks, above the top of their axis (5.5), and the spread there is 7.26 against
+  their 6.64. With Q = 40 or more and the window [-30, 30], everything fits. I
+  read that as the figures plotting the middle of a wider bound, and the test
+  uses Q = 50.
+- The noise markouts rising over 30 minutes looked like a bug. It is the position
+  cap: a touch quoter at -5 lots only shows a bid, so its noise fills are buys
+  made while informed buying is still pulling the price up. Rerunning without the
+  cap (40 sessions) gives a flat 0.60 to 0.54.
+- xi measured from markouts (0.72 ticks) made GLFT sit a tick behind the touch
+  whenever flat; 13 fills a session. The continuous model has no idea the book
+  has ticks.
+- A first draft of the informed test asserted the informed trader's P&L marked
+  at the final V was positive. It failed on a seed: each trade has positive edge
+  when it is made, but the inventory it accumulates then rides the Brownian
+  motion, which has no sign. The test now checks the edge at the time of each
+  trade.
+- The first test sessions all shared flow seed 0 by accident; fixed in its own
+  commit.
+- The `charts` commit went in with two ruff errors in the experiment script
+  (an unused loop variable and a zip without strict). A `;` in the shell chain
+  let the commit run after the lint failure. Fixed in the next commit.
+
+Next: Glosten-Milgrom and Kyle as small closed-form demos of why spreads exist,
+then queue-position modelling, since the xi result says the tick grid and the
+queue matter more than the continuous models admit.
