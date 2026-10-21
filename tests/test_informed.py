@@ -48,7 +48,9 @@ def test_buys_until_the_ask_reaches_the_value():
 def session(seed):
     value = Fundamental(1.0, seed=seed)
     informed = InformedTrader(value, 1.0, seed=seed)
-    sim = Simulator(ZeroIntelligence(CSTParams.sky_perfect()), [SymmetricQuoter(), informed])
+    sim = Simulator(
+        ZeroIntelligence(CSTParams.sky_perfect()), [SymmetricQuoter(), informed], seed=seed
+    )
     sim.seed(10_000, 10_001)
     sim.warm_up(30)
     sim.run(390)
