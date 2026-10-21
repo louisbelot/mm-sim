@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 
-from . import avellaneda
+from . import avellaneda, glft
 from .accounting import Fill
 from .book import Side
 from .sim import Agent, Context
@@ -84,3 +84,21 @@ class AvellanedaStoikov(Quoter):
             tau = min(tau, self.horizon)
         bid, ask = avellaneda.quotes(s, ctx.position, tau, self.gamma, self.sigma, self.k)
         return min(math.floor(bid), ctx.ask - 1), max(math.ceil(ask), ctx.bid + 1)
+
+
+class GLFT(Quoter):
+    def __init__(self, model: glft.Model, *, size: int = 1) -> None:
+        super().__init__(size, model.Q * size)
+        self.model = model
+        self.bids, self.asks = model.quotes(math.inf)
+
+    def targets(self, ctx: Context) -> tuple[int | None, int | None]:
+        s = ctx.mid
+        if s is None:
+            return None, None
+        Q = self.model.Q
+        i = Q + min(max(round(ctx.position / self.size), -Q), Q)
+        db, da = self.bids[i], self.asks[i]
+        bid = None if math.isnan(db) else min(math.floor(s - db), ctx.ask - 1)
+        ask = None if math.isnan(da) else max(math.ceil(s + da), ctx.bid + 1)
+        return bid, ask

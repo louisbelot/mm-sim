@@ -1,10 +1,12 @@
+import math
 from types import SimpleNamespace
 
 from scripted import limit, make, market
 
 from mmsim.book import Side
-from mmsim.bots import AvellanedaStoikov, SymmetricQuoter
+from mmsim.bots import GLFT, AvellanedaStoikov, SymmetricQuoter
 from mmsim.flow import CSTParams, ZeroIntelligence
+from mmsim.glft import Model
 from mmsim.sim import Simulator
 
 
@@ -97,3 +99,32 @@ def test_as_bot_leans_against_its_inventory():
     ctx = sim.contexts[0]
     assert ctx.position == 1
     assert quotes(ctx) == [(Side.BUY, 98), (Side.SELL, 100)]
+
+
+BOOK = Model(sigma=1.0, A=2.1, k=3.6, gamma=1.0, Q=3)
+
+
+def glft_targets(position, size=1):
+    ctx = SimpleNamespace(mid=100.5, bid=99, ask=102, position=position)
+    return GLFT(BOOK, size=size).targets(ctx)
+
+
+def test_glft_quotes_by_hand():
+    bids, asks = BOOK.quotes(float("inf"))
+    assert glft_targets(0) == (99, 102)
+    assert glft_targets(2) == (math.floor(100.5 - bids[5]), 101)
+    assert glft_targets(-2) == (100, math.ceil(100.5 + asks[1]))
+    assert glft_targets(3)[0] is None and glft_targets(-3)[1] is None
+    assert glft_targets(4, size=2) == glft_targets(2)
+
+
+def test_glft_on_cst_flow_respects_its_bound():
+    bot = GLFT(BOOK)
+    sim = Simulator(ZeroIntelligence(CSTParams.sky_perfect()), [bot], seed=3)
+    sim.seed(1000, 1001)
+    sim.warm_up(30)
+    sim.run(390)
+    ctx = sim.contexts[0]
+    assert sim.book.audit() == ""
+    assert max(abs(s.position) for s in ctx.history) <= 3
+    assert len(ctx.account.fills) > 50
