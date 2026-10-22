@@ -9,9 +9,10 @@ from .sim import Agent, Context
 
 
 class Quoter(Agent):
-    def __init__(self, size: int = 1, max_position: int | None = None) -> None:
+    def __init__(self, size: int = 1, max_position: int | None = None, keep: int = 0) -> None:
         self.size = size
         self.max_position = max_position
+        self.keep = keep
         self._oids: dict[Side, int | None] = {Side.BUY: None, Side.SELL: None}
 
     def targets(self, ctx: Context) -> tuple[int | None, int | None]:
@@ -39,16 +40,24 @@ class Quoter(Agent):
     def _quote(self, ctx: Context, side: Side, px: int | None) -> None:
         oid = self._oids[side]
         live = ctx.orders.get(oid)
-        if live is not None and live.price == px:
-            return
+        if live is not None and px is not None:
+            behind = px - live.price if side == Side.BUY else live.price - px
+            if 0 <= behind <= self.keep:
+                return
         if live is not None:
             ctx.cancel(oid)
         self._oids[side] = None if px is None else ctx.submit(side, px, self.size, post_only=True)
 
 
 class SymmetricQuoter(Quoter):
-    def __init__(self, half_spread: float = 0.5, size: int = 1, max_position: int | None = None):
-        super().__init__(size, max_position)
+    def __init__(
+        self,
+        half_spread: float = 0.5,
+        size: int = 1,
+        max_position: int | None = None,
+        keep: int = 0,
+    ) -> None:
+        super().__init__(size, max_position, keep)
         self.half_spread = half_spread
 
     def targets(self, ctx: Context) -> tuple[int | None, int | None]:
@@ -68,8 +77,9 @@ class AvellanedaStoikov(Quoter):
         horizon: float | None = None,
         size: int = 1,
         max_position: int | None = None,
+        keep: int = 0,
     ) -> None:
-        super().__init__(size, max_position)
+        super().__init__(size, max_position, keep)
         self.gamma = gamma
         self.sigma = sigma
         self.k = k
@@ -87,8 +97,8 @@ class AvellanedaStoikov(Quoter):
 
 
 class GLFT(Quoter):
-    def __init__(self, model: glft.Model, *, size: int = 1) -> None:
-        super().__init__(size, model.Q * size)
+    def __init__(self, model: glft.Model, *, size: int = 1, keep: int = 0) -> None:
+        super().__init__(size, model.Q * size, keep)
         self.model = model
         self.bids, self.asks = model.quotes(math.inf)
 

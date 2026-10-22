@@ -1,10 +1,11 @@
 import math
 from types import SimpleNamespace
 
+import pytest
 from scripted import limit, make, market
 
 from mmsim.book import Side
-from mmsim.bots import GLFT, AvellanedaStoikov, SymmetricQuoter
+from mmsim.bots import GLFT, AvellanedaStoikov, Quoter, SymmetricQuoter
 from mmsim.flow import CSTParams, ZeroIntelligence
 from mmsim.glft import Model
 from mmsim.sim import Simulator
@@ -41,6 +42,40 @@ def test_requotes_when_the_market_moves_and_keeps_queue_otherwise():
     assert bot._oids[Side.BUY] == first[Side.BUY]
     assert bot._oids[Side.SELL] != first[Side.SELL]
     assert len(ctx.orders) == 2
+
+
+class Fixed(Quoter):
+    def __init__(self, keep):
+        super().__init__(keep=keep)
+        self.px = (98, 103)
+
+    def targets(self, ctx):
+        return self.px
+
+
+@pytest.mark.parametrize("keep", [0, 1])
+def test_keep_holds_priority_only_behind_the_target(keep):
+    bot = Fixed(keep)
+    script = [(t, limit(Side.BUY, 50)) for t in (1.0, 2.0, 3.0)]
+    sim = make(script, bot)
+    ctx = sim.contexts[0]
+    sim.run(0.5)
+    first = dict(bot._oids)
+
+    bot.px = (99, 102)
+    sim.run(1.0)
+    assert (bot._oids == first) == (keep == 1)
+    assert quotes(ctx) == (
+        [(Side.BUY, 98), (Side.SELL, 103)] if keep else [(Side.BUY, 99), (Side.SELL, 102)]
+    )
+
+    bot.px = (97, 104)
+    sim.run(1.0)
+    assert quotes(ctx) == [(Side.BUY, 97), (Side.SELL, 104)]
+
+    bot.px = (99, 102)
+    sim.run(1.0)
+    assert quotes(ctx) == [(Side.BUY, 99), (Side.SELL, 102)]
 
 
 def test_requotes_after_a_fill():
