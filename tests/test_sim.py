@@ -273,3 +273,53 @@ def test_tape_follows_the_book_mid():
     assert list(sim.tape.at(t)) == list(mid)
     assert len(sim.tape.t) < len(seen)
     assert np.all(np.diff(sim.tape.t) > 0)
+
+
+def test_fills_remember_their_place_in_the_queue():
+    def start(ctx):
+        ctx.buy(99, 1)
+        ctx.buy(99, 2)
+
+    agent = Recorder(start)
+    sim = make([(1.0, market(Side.SELL, 3)), (2.0, market(Side.SELL, 4))], agent)
+    sim.run(0.5)
+    ctx = sim.contexts[0]
+    first, second = sorted(ctx.orders)
+    assert (ctx.orders[first].ahead, ctx.orders[second].ahead) == (5, 6)
+    sim.run(1.0)
+    assert (ctx.ahead(first), ctx.ahead(second)) == (2, 3)
+    sim.run(1.0)
+    assert [(f.oid, f.qty, f.ahead, f.left) for f in agent.fills] == [
+        (first, 1, 5, 1),
+        (second, 1, 6, 1),
+    ]
+
+
+def test_level_swept_through_leaves_nothing():
+    agent = Recorder(lambda ctx: ctx.buy(99, 1))
+    sim = make([(1.0, market(Side.SELL, 9))], agent)
+    sim.run(2.0)
+    (f,) = agent.fills
+    assert (f.ahead, f.left) == (5, 0)
+
+
+def test_modify_keeps_the_place_only_when_shrinking_in_place():
+    def start(ctx):
+        oid = ctx.buy(99, 3)
+        ctx.buy(99, 1)
+        ctx.modify(oid, 99, 2)
+        assert ctx.orders[oid].ahead == 5
+        ctx.modify(oid, 99, 4)
+        assert ctx.orders[oid].ahead == 6
+        ctx.modify(oid, 100, 4)
+        assert ctx.orders[oid].ahead == 0
+
+    sim = make([], Recorder(start))
+    sim.run(1.0)
+
+
+def test_taker_fills_have_no_queue():
+    agent = Recorder(lambda ctx: ctx.buy(102, 1))
+    sim = make([], agent)
+    sim.run(1.0)
+    assert [(f.maker, f.ahead, f.left) for f in agent.fills] == [(False, None, None)]

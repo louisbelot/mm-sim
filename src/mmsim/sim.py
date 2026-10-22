@@ -34,6 +34,7 @@ class LiveOrder:
     side: Side
     price: int
     qty: int
+    ahead: int = 0
 
 
 class Sample(NamedTuple):
@@ -110,6 +111,9 @@ class Context:
 
     def sell(self, price: int, qty: int = 1, **kw) -> int:
         return self.submit(Side.SELL, price, qty, **kw)
+
+    def ahead(self, oid: int) -> int:
+        return self._sim.book.ahead(oid)
 
     def cancel(self, oid: int) -> None:
         if oid in self.orders:
@@ -242,32 +246,44 @@ class Simulator:
         for e in events:
             if e.type == EventType.TRADE:
                 maker, taker = self._agent_orders.get(e.maker), self._agent_orders.get(e.id)
-                for ctx, oid, side, is_maker, other in (
-                    (maker, e.maker, e.side.opposite, True, taker),
-                    (taker, e.id, e.side, False, maker),
-                ):
-                    if ctx is not None:
-                        who = self.flow.owner if other is None else other.owner
-                        fill = ctx.account.fill(
-                            self.t, oid, side, e.price, e.qty, is_maker, self._pre_mid, who
-                        )
-                        self._reduce(ctx, oid, e.qty)
-                        self._queue(ctx.agent.on_fill, ctx, fill)
+                if maker is not None:
+                    self._fill(maker, e.maker, e.side.opposite, e, taker)
+                if taker is not None:
+                    self._fill(taker, e.id, e.side, e, maker)
                 continue
             ctx = self._agent_orders.get(e.id)
             if ctx is None:
                 continue
             match e.type:
                 case EventType.ACCEPTED:
-                    ctx.orders[e.id] = LiveOrder(e.side, e.price, e.qty)
+                    ctx.orders[e.id] = LiveOrder(e.side, e.price, e.qty, self._joined(e.id))
                 case EventType.MODIFIED:
                     o = ctx.orders[e.id]
+                    if e.price != o.price or e.qty > o.qty:
+                        o.ahead = self._joined(e.id)
                     o.price, o.qty = e.price, e.qty
                 case EventType.CANCELED:
                     self._reduce(ctx, e.id, e.qty)
                 case EventType.REJECTED if e.id not in ctx.orders:
                     del self._agent_orders[e.id]
         self.tape.record(self.t, self.book.mid())
+
+    def _fill(self, ctx: Context, oid: int, side: Side, e: Event, other: Context | None) -> None:
+        maker = oid == e.maker
+        ahead = left = None
+        if maker:
+            ahead = ctx.orders[oid].ahead
+            lvl = self.book.level(side, e.price)
+            left = 0 if lvl is None else lvl.qty
+        who = self.flow.owner if other is None else other.owner
+        fill = ctx.account.fill(
+            self.t, oid, side, e.price, e.qty, maker, self._pre_mid, who, ahead=ahead, left=left
+        )
+        self._reduce(ctx, oid, e.qty)
+        self._queue(ctx.agent.on_fill, ctx, fill)
+
+    def _joined(self, oid: int) -> int:
+        return self.book.ahead(oid) if oid in self.book else 0
 
     def _reduce(self, ctx: Context, oid: int, qty: int) -> None:
         o = ctx.orders[oid]

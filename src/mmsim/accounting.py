@@ -16,6 +16,8 @@ class Fill:
     fee: float
     mid: float | None
     counterparty: int = 0
+    ahead: int | None = None
+    left: int | None = None
 
 
 class Account:
@@ -38,6 +40,8 @@ class Account:
         maker: bool,
         mid: float | None,
         counterparty: int = 0,
+        ahead: int | None = None,
+        left: int | None = None,
     ) -> Fill:
         fee = (self.maker_fee if maker else self.taker_fee) * qty
         sign = 1 if side == Side.BUY else -1
@@ -45,7 +49,7 @@ class Account:
         self.cash -= sign * price * qty + fee
         self.fees += fee
         self.volume += qty
-        f = Fill(t, oid, side, price, qty, maker, fee, mid, counterparty)
+        f = Fill(t, oid, side, price, qty, maker, fee, mid, counterparty, ahead, left)
         self.fills.append(f)
         return f
 
