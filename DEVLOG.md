@@ -322,7 +322,7 @@ Built:
 
 Checks (all measured today):
 
-- 189 tests, about 30 s for the whole suite.
+- 187 tests, about 28 s for the whole suite.
 - Zero latency changes nothing: six fixed sessions (two bots, three seeds,
   informed flow) give the same P&L, fills, positions and fill times before and
   after every commit, and the latency sweep's zero row equals the keep = 1 row
