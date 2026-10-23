@@ -17,19 +17,19 @@ class ScriptedFlow:
 
     def step(self, book, rng, horizon, ids):
         if self.script and self.script[0][0] - self.now <= horizon:
-            t, cmd = self.script.popleft()
+            t, make_cmd = self.script.popleft()
             dt, self.now = t - self.now, t
-            return dt, lambda: cmd(book, ids)
+            return dt, make_cmd(next(ids))
         self.now += horizon
         return None
 
 
 def market(side, qty):
-    return lambda book, ids: book.submit(next(ids), side, 0, qty, kind=OrderType.MARKET)
+    return lambda oid: lambda book: book.submit(oid, side, 0, qty, kind=OrderType.MARKET)
 
 
 def limit(side, px, qty=1):
-    return lambda book, ids: book.submit(next(ids), side, px, qty)
+    return lambda oid: lambda book: book.submit(oid, side, px, qty)
 
 
 def make(script, *agents, **kw):

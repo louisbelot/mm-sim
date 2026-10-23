@@ -49,7 +49,7 @@ class ZeroIntelligence:
 
     def step(
         self, book: Book, rng: random.Random, horizon: float, ids: Iterator[int]
-    ) -> tuple[float, Callable[[], list[Event]]] | None:
+    ) -> tuple[float, Callable[[Book], list[Event]]] | None:
         p = self.params
         bid, ask = book.best_bid(), book.best_ask()
         if bid is not None:
@@ -83,14 +83,13 @@ class ZeroIntelligence:
         kind, arg = actions[bisect_right(cum, rng.random() * cum[-1], 0, len(cum) - 1)]
         if kind == _CANCEL:
             oid = rng.choice(arg)
-            return dt, lambda: book.cancel(oid)
+            return dt, lambda b: b.cancel(oid)
+        oid = next(ids)
         if kind == _MARKET:
-            return dt, lambda: book.submit(
-                next(ids), arg, 0, 1, owner=self.owner, kind=OrderType.MARKET
-            )
+            return dt, lambda b: b.submit(oid, arg, 0, 1, owner=self.owner, kind=OrderType.MARKET)
         i = 1 + bisect_right(self._cum_lam, rng.random() * lam, 0, len(self._cum_lam) - 1)
         px = self._ask - i if arg == Side.BUY else self._bid + i
-        return dt, lambda: book.submit(next(ids), arg, px, 1, owner=self.owner)
+        return dt, lambda b: b.submit(oid, arg, px, 1, owner=self.owner)
 
 
 def prob_mid_up(a: int, b: int, lam: float, mu: float, theta: float, n_max: int = 100) -> float:

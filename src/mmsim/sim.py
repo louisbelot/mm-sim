@@ -198,10 +198,10 @@ class Simulator:
             stop = min(next_timer, end)
             step = self.flow.step(self.book, self.rng, stop - self.t, self._ids)
             if step is not None:
-                dt, fire = step
+                dt, cmd = step
                 self._advance(self.t + dt)
                 self._pre_mid = self.book.mid()
-                self._dispatch(fire())
+                self._dispatch(cmd(self.book))
                 if self._started:
                     for ctx in self.contexts:
                         self._queue(ctx.agent.on_book, ctx)
