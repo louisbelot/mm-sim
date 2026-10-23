@@ -287,3 +287,103 @@ Design notes and things that went wrong:
 Next: latency in the loop (delayed market data and order acknowledgements, so
 a bot quotes on a stale book and its cancels can arrive after the fill), then
 plugging in the C++ engine.
+
+## 2026-10-23: Latency in the loop and Hawkes order flow
+
+Two things the simulator assumed away: that a bot sees the book and reaches it
+instantly, and that market orders arrive independently.
+
+Built:
+
+- Commands as data. `flow.step` now returns a function of the book instead of a
+  closure over it, with order ids drawn when the event is drawn. The same
+  command can then be applied to more than one book.
+- `Latency(feed, entry, response, jitter)` per agent, following hftbacktest's
+  split. Each leg is a FIFO `Link`; jitter is exponential and the FIFO clamp
+  keeps messages in order. Everything delayed (orders in flight, fill and ack
+  reports, feed updates, timers) goes through one heap keyed by time and a
+  sequence number.
+- The agent's view is now separate from the exchange's. `ctx.orders` holds
+  orders from the moment they are sent, with `acked` and `canceling`;
+  `ctx.position` moves when fill reports arrive. The exchange side keeps its own
+  record of each resting agent order (owner, price, quantity, queue position at
+  entry) and books fills into the account at exchange time. `Fill.stale` marks a
+  fill on an order whose cancel was already in flight.
+- Delayed feed by replication: a lagged agent gets a deep copy of the book at
+  the start of the run and every command is replayed on it `feed` later.
+- `hawkes.py`: multivariate exponential Hawkes. Ogata thinning, log-likelihood
+  and its gradient, maximum likelihood fit, compensator and time-rescaling
+  residuals. Decayed sums are computed in blocks so nothing overflows.
+- `HawkesFlow`: CST limit orders and cancels, Hawkes market orders, simulated by
+  thinning inside `step` with its own clock.
+- `InformedTrader` waits for a two-sided book before starting the value process.
+- `examples/latency_cost.py` (6800 sessions, 8 minutes) and
+  `examples/hawkes_flow.py` (1600 sessions plus a fit), with charts.
+
+Checks (all measured today):
+
+- 189 tests, about 30 s for the whole suite.
+- Zero latency changes nothing: six fixed sessions (two bots, three seeds,
+  informed flow) give the same P&L, fills, positions and fill times before and
+  after every commit, and the latency sweep's zero row equals the keep = 1 row
+  from 2026-10-22 (GLFT 58.2, touch -44.9). The README usage example still
+  prints (27.0, 2, 208).
+- Scripted latency tests: an order reaches the book after `entry`, the ack and
+  fill reports after `response`, a cancel sent 0.05 before a market order loses
+  (stale fill, then a reject) and one sent 0.15 before wins, double cancels send
+  one message, rejected submits leave the view when the report arrives.
+- Feed replica: over an hour of CST flow the lagged agent's view at its k-th
+  update equals the exchange book at the instant of the k-th flow event, five
+  levels on both sides, and its timestamps are exactly 0.05 later.
+- A 300-minute GLFT session with every leg delayed and jittered, then a quiet
+  minute to drain: no events left, view position equals the account, the bot's
+  view of its orders equals what rests on the exchange, and the replica equals
+  the book order for order.
+- Three injected bugs (no replay of agent commands, stale never set, FIFO clamp
+  removed) each fail two of the latency tests.
+- Hawkes: log-likelihood equals the O(N^2) double sum to 1e-11 relative; the
+  analytic gradient matches central differences; blocked decay sums match the
+  naive sums to 1e-11 for beta T up to 200,000; univariate mean rate and the
+  variance of counts in 5-minute windows match the closed form
+  (Var N(w) = Lambda w + 2 c (w / kappa - (1 - exp(-kappa w)) / kappa^2)) within
+  6%; the rescaled gaps pass a KS test under the true model and fail under a
+  Poisson model with the same rates (p < 1e-6); the fit recovers the branching
+  matrix to 0.04 on 20,000 minutes; refitting on HawkesFlow's own market orders
+  recovers it to 0.06.
+- Results in the README: GLFT against informed flow goes 58.2, 49.0, 37.4,
+  22.4, 0.7, -33.3 ticks a session at 0, 1, 2, 5, 10 and 30 seconds one-way.
+  10 s on the feed alone costs 37.6, on entry alone 36.4, on responses alone
+  5.4. With Hawkes market orders at the same mean rate GLFT makes -63.0 (se 5.3)
+  without any informed trader, against +67.0 under Poisson.
+
+Design notes and things that went wrong:
+
+- The old simulator ran a bot's order inside `ctx.submit`. Keeping that path
+  for zero-latency links, instead of pushing everything through the heap with
+  delay 0, is what keeps old sessions identical: an extra heap entry would change
+  the horizons the flow sees and so its random draws.
+- Events other than trades are routed to whoever sent the command, not looked
+  up by order id. A cancel that arrives after the fill has to go back to the
+  bot, and by then the exchange has forgotten the order.
+- I thought about rebuilding the lagged book from the event stream the way an
+  ITCH feed handler would. Replaying commands on a copy is shorter and exact
+  because matching is deterministic; the event-stream version belongs to the
+  C++ engine.
+- With feed latency only, the stale flag stays at zero even though the loss is
+  as large as with entry latency. The flag only sees cancel races; decisions on
+  old data are invisible to it.
+- First version of `fit` used numerical gradients and took over two minutes on
+  40,000 events. The analytic gradient needs a second decayed sum,
+  sum (t - t_l) exp(-beta (t - t_l)), carried through the same blocks. The
+  blocks started at e^50 and were widened to e^300 for speed; values below about
+  1e-190 then underflow to zero, which the test now allows.
+- A Hawkes session crashed when a burst emptied the ask side right at the
+  start, so the informed trader started its value at `None`. Fixed in
+  `InformedTrader`, with a test.
+- The Hawkes loss is large enough that I checked the book's static shape for an
+  artifact first: spread, depth and one-sided time are the same under both
+  flows.
+
+Next: a quoting rule that reads the market-order intensity off the trades it
+sees and leans away from the side that was just hit, then the C API on the C++
+engine so it can replace the Python book here.
