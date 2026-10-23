@@ -103,7 +103,6 @@ class Context:
         self.agent = agent
         self.owner = owner
         self.account = account
-        self.latency = latency
         self.orders: dict[int, LiveOrder] = {}
         self.history: list[Sample] = []
         self._position = 0
