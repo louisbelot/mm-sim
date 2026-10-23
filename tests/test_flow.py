@@ -3,10 +3,15 @@ import math
 import random
 from math import comb
 
+import numpy as np
 import pytest
 
 from mmsim.book import Book, EventType, Side
-from mmsim.flow import CSTParams, ZeroIntelligence, prob_fill_first, prob_mid_up
+from mmsim.bots import GLFT
+from mmsim.flow import CSTParams, HawkesFlow, ZeroIntelligence, prob_fill_first, prob_mid_up
+from mmsim.glft import Model
+from mmsim.hawkes import Hawkes, fit
+from mmsim.sim import Latency, Simulator
 
 SKY = CSTParams.sky_perfect()
 LAM1, MU, THETA1 = SKY.lam[0], SKY.mu, SKY.theta[0]
@@ -133,3 +138,38 @@ def test_market_orders_take_one_lot():
             assert ev[0].qty == 1
             assert sum(e.qty for e in ev if e.type == EventType.TRADE) == 1
     assert seen > 0
+
+
+def test_hawkes_flow_rate_and_refit():
+    h = Hawkes.symmetric(0.94, 0.6, 0.1, 6.0)
+    flow = HawkesFlow(SKY, h)
+    book, ids, rng = Book(), itertools.count(1), random.Random(1)
+    flow.seed(book, 1000, 1001, ids)
+    T = 3000.0
+    while (step := flow.step(book, rng, T - flow.t, ids)) is not None:
+        step[1](book)
+    assert flow.t == pytest.approx(T) and book.audit() == ""
+
+    times = np.array([t for t, _ in flow.markets])
+    marks = np.array([int(s) for _, s in flow.markets])
+    assert abs(len(times) / T - 1.88) < 4 * math.sqrt(1.88 / 0.3**2 / T)
+    g = fit(times, marks, T, 2)
+    assert np.allclose(g.branching, h.branching, atol=0.06)
+    assert np.allclose(g.mu, h.mu, rtol=0.15)
+
+
+def test_hawkes_flow_keeps_time_with_the_simulator():
+    bot = GLFT(Model(1.0, 2.1, 3.6, 0.3, 5))
+    flow = HawkesFlow(SKY, Hawkes.symmetric(0.94, 0.6, 0.1, 6.0))
+    lat = {bot: Latency(feed=0.01, entry=0.01, response=0.01)}
+    sim = Simulator(flow, [bot], seed=4, latency=lat)
+    sim.seed(1000, 1001)
+    sim.warm_up(10)
+    sim.run(120)
+    assert flow.t == pytest.approx(sim.t) and sim.book.audit() == ""
+    assert len(sim.contexts[0].account.fills) > 10
+
+
+def test_hawkes_flow_needs_two_dimensions():
+    with pytest.raises(ValueError):
+        HawkesFlow(SKY, Hawkes.make(1.0, 0.5, 1.0))

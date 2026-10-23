@@ -11,6 +11,7 @@ from scipy import sparse
 from scipy.sparse.linalg import spsolve
 
 from .book import Book, Event, OrderType, Side
+from .hawkes import Hawkes
 
 _LIMIT, _MARKET, _CANCEL = range(3)
 
@@ -50,6 +51,18 @@ class ZeroIntelligence:
     def step(
         self, book: Book, rng: random.Random, horizon: float, ids: Iterator[int]
     ) -> tuple[float, Callable[[Book], list[Event]]] | None:
+        actions, weights = self._menu(book)
+        cum = list(accumulate(weights))
+        dt = rng.expovariate(cum[-1])
+        if dt > horizon:
+            return None
+        k = bisect_right(cum, rng.random() * cum[-1], 0, len(cum) - 1)
+        return dt, self._fire(actions[k], rng, ids)
+
+    def _market_rate(self, side: Side) -> float:
+        return self.params.mu
+
+    def _menu(self, book: Book) -> tuple[list[tuple], list[float]]:
         p = self.params
         bid, ask = book.best_bid(), book.best_ask()
         if bid is not None:
@@ -64,10 +77,10 @@ class ZeroIntelligence:
         weights = [lam, lam]
         if ask is not None:
             actions.append((_MARKET, Side.BUY))
-            weights.append(p.mu)
+            weights.append(self._market_rate(Side.BUY))
         if bid is not None:
             actions.append((_MARKET, Side.SELL))
-            weights.append(p.mu)
+            weights.append(self._market_rate(Side.SELL))
         for side in Side:
             for lvl in book.levels(side):
                 mine = [o.id for o in lvl.orders.values() if o.owner == self.owner]
@@ -75,21 +88,65 @@ class ZeroIntelligence:
                     i = self._ask - lvl.price if side == Side.BUY else lvl.price - self._bid
                     actions.append((_CANCEL, mine))
                     weights.append(p.theta_at(i) * len(mine))
+        return actions, weights
 
-        cum = list(accumulate(weights))
-        dt = rng.expovariate(cum[-1])
-        if dt > horizon:
-            return None
-        kind, arg = actions[bisect_right(cum, rng.random() * cum[-1], 0, len(cum) - 1)]
+    def _fire(self, action: tuple, rng: random.Random, ids: Iterator[int]):
+        kind, arg = action
         if kind == _CANCEL:
             oid = rng.choice(arg)
-            return dt, lambda b: b.cancel(oid)
+            return lambda b: b.cancel(oid)
         oid = next(ids)
         if kind == _MARKET:
-            return dt, lambda b: b.submit(oid, arg, 0, 1, owner=self.owner, kind=OrderType.MARKET)
+            return lambda b: b.submit(oid, arg, 0, 1, owner=self.owner, kind=OrderType.MARKET)
+        lam = self._cum_lam[-1]
         i = 1 + bisect_right(self._cum_lam, rng.random() * lam, 0, len(self._cum_lam) - 1)
         px = self._ask - i if arg == Side.BUY else self._bid + i
-        return dt, lambda b: b.submit(oid, arg, px, 1, owner=self.owner)
+        return lambda b: b.submit(oid, arg, px, 1, owner=self.owner)
+
+
+class HawkesFlow(ZeroIntelligence):
+    def __init__(self, params: CSTParams, hawkes: Hawkes, owner: int = 0) -> None:
+        if hawkes.d != 2:
+            raise ValueError("market orders need two dimensions: buys and sells")
+        super().__init__(params, owner)
+        self.hawkes = hawkes
+        self.t = 0.0
+        self.markets: list[tuple[float, Side]] = []
+        self._s = np.zeros((2, 2))
+
+    def _market_rate(self, side: Side) -> float:
+        return self.hawkes.mu[side] + self._s[side].sum()
+
+    def _advance(self, dt: float) -> None:
+        self._s *= np.exp(-self.hawkes.beta * dt)
+        self.t += dt
+
+    def step(
+        self, book: Book, rng: random.Random, horizon: float, ids: Iterator[int]
+    ) -> tuple[float, Callable[[Book], list[Event]]] | None:
+        actions, weights = self._menu(book)
+        markets = [k for k, (kind, _) in enumerate(actions) if kind == _MARKET]
+        elapsed = 0.0
+        while True:
+            bound = sum(weights)
+            dt = rng.expovariate(bound)
+            if elapsed + dt > horizon:
+                self._advance(horizon - elapsed)
+                return None
+            self._advance(dt)
+            elapsed += dt
+            for k in markets:
+                weights[k] = self._market_rate(actions[k][1])
+            cum = list(accumulate(weights))
+            u = rng.random() * bound
+            if u >= cum[-1]:
+                continue
+            k = bisect_right(cum, u, 0, len(cum) - 1)
+            kind, side = actions[k]
+            if kind == _MARKET:
+                self._s[:, side] += self.hawkes.alpha[:, side]
+                self.markets.append((self.t, side))
+            return elapsed, self._fire(actions[k], rng, ids)
 
 
 def prob_mid_up(a: int, b: int, lam: float, mu: float, theta: float, n_max: int = 100) -> float:
