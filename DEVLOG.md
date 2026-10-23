@@ -202,3 +202,88 @@ Design notes and things that went wrong:
 Next: Glosten-Milgrom and Kyle as small closed-form demos of why spreads exist,
 then queue-position modelling, since the xi result says the tick grid and the
 queue matter more than the continuous models admit.
+
+## 2026-10-22: Glosten-Milgrom, Kyle and queue position
+
+Two information models that explain why spreads and price impact exist, then
+queue position: tracking it, measuring what it does to fills, and a quoting
+rule that holds priority.
+
+Built:
+
+- `glosten.py`: the closed-form Glosten-Milgrom quotes for a two-point value,
+  and a grid version where insiders see V plus Gaussian noise and stay out when
+  their estimate is inside the quotes. Quotes are fixed points
+  (ask = E[V | buy at ask]) found with brentq; `update` is Bayes on buy, sell or
+  no trade; `simulate` runs a session against a true value.
+- `kyle.py`: the N-auction Kyle equilibrium by backward recursion (a cubic for
+  lambda_n at each step), the insider's expected profit for any linear strategy
+  against the equilibrium lambdas, and a vectorised Monte Carlo.
+- Queue position in the simulator: `LiveOrder.ahead` (quantity in front when the
+  order joined its level), `ctx.ahead(oid)`, and `Fill.ahead` and `Fill.left`
+  (quantity still resting at the fill price after the incoming order). Trade
+  booking moved into `Simulator._fill`.
+- `Quoter(keep=k)`: leave a live quote alone when it is at most k ticks behind
+  the new target. All three bots pass it through.
+- Two examples and charts: `why_spreads.py` and `queue_value.py` (2400
+  sessions, about 100 seconds).
+
+Checks (all measured today):
+
+- 162 tests, 20 s for the whole suite.
+- Glosten-Milgrom: the grid solver on a two-point grid with zero noise equals
+  the closed form to 1e-9 for three (mu, alpha, eta) sets. Every ordering of
+  four buys and two sells gives the same belief, equal to the net-flow formula.
+  The posterior mean after the next trade averages back to the current mean,
+  no-trade included, to 1e-10. Over 600 sessions with V drawn from the prior the
+  market maker's P&L is zero within 4 standard errors and the insiders' is
+  positive by more than 8.
+- Kyle: N = 1 matches the closed forms. lambda_n equals the Kalman gain given
+  beta_n to 1e-10 relative, for N = 2, 5 and 40 with T = 3. The value function
+  equals the profit computed forward from the strategy to 1e-12. Bumping any
+  beta_n by 5% either way lowers the profit (N = 6). N = 4000 is within 0.2% of
+  the continuous-time lambda and profit. 200,000 Monte Carlo paths match Sigma_n
+  to 2%.
+- Kyle with Sigma0 = sigma_u = 1: insider profit 0.5, 0.7307, 0.8860, 0.9869,
+  0.9988 for N = 1, 4, 16, 256, 4096. The last auction's lambda converges to
+  about 0.853, not 1.
+- Glosten-Milgrom sessions (200 per alpha, 150 trades): spread 1.75 to 0.95,
+  5.18 to 0.38 and 8.84 to 0.18 for 10%, 30% and 50% informed; market maker
+  P&L -5.2 (se 7.5), -2.8 (3.7), -1.9 (2.5).
+- Queue tests are scripted: two of the bot's orders behind a 5-lot order,
+  checked through two market orders, a sweep, three kinds of modify and a taker
+  fill.
+- The keep = 0 rows of the queue experiment reproduce the informed-flow table
+  from 2026-10-21 to the decimal, which says the queue bookkeeping did not
+  change any behaviour.
+- With informed flow, keep = 1 takes GLFT gamma 0.3 from 32.6 (se 1.8) to 58.2
+  (se 1.9) ticks a session and the touch quoter from -73.2 to -44.9. Without it,
+  +4.5 and -1.1. Markout at the fill rises from 0.52 to 0.73 for GLFT.
+- Fills that emptied their level: GLFT markout at the fill 0.36 against 0.57.
+  Orders that started alone at a level (ahead = 0) emptied it 67 to 73% of the
+  time they filled.
+
+Design notes and things that went wrong:
+
+- First Kyle draft had beta = lambda Sigma / sigma_u^2 instead of
+  lambda sigma_u^2 / Sigma, which made 1 - beta lambda dt negative and Sigma_0
+  negative. The N = 1 closed form caught it right away.
+- Solving the cubic with brentq on (0, 1 / (2 alpha_n)) needs no case analysis:
+  f(0) = -1 and f at the right end is positive, and Kyle proves the root is
+  unique there. The final auction (alpha_N = 0) is a square root.
+- The Sigma_t = Sigma0 (1 - t) check first used a relative tolerance and failed
+  near the close, where the discrete solution stays a fixed 0.004 above a target
+  that goes to zero. It now uses an absolute tolerance of 0.2% of Sigma0.
+- Glosten-Milgrom with noise exactly zero on a fine grid has discontinuous quote
+  equations, so the grid tests use noisy insiders and the zero-noise check uses
+  two points, where the equation is continuous between them.
+- I expected queue position at entry to sort the 30-minute markouts. It barely
+  does at this sample size; what separates good fills from bad is whether the
+  fill emptied the level. That is what the README reports.
+- Why keep helps: most one-tick moves of a target come from the spread
+  flickering open and shut. Chasing them means stepping alone into new levels,
+  which are the first thing an informed market order takes out.
+
+Next: latency in the loop (delayed market data and order acknowledgements, so
+a bot quotes on a stale book and its cancels can arrive after the fill), then
+plugging in the C++ engine.
