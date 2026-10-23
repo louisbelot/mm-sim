@@ -8,7 +8,7 @@ from mmsim import glosten as gm
 from mmsim import kyle
 
 INK, MUTED, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
-BLUE, ORANGE, AQUA, PURPLE = "#2a78d6", "#eb6834", "#1baf7a", "#8a5cd1"
+BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
 
 v = np.linspace(60, 140, 321)
 prior = np.exp(-0.5 * ((v - 100) / 10) ** 2)
