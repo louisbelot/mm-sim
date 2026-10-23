@@ -6,9 +6,11 @@ an event-driven simulator where bots quote against that flow, the
 Avellaneda-Stoikov and Gueant-Lehalle-Fernandez-Tapia inventory models (each
 checked against its paper), informed traders with a private view of the
 fundamental value, markout analysis to measure what they cost a market maker,
-the Glosten-Milgrom and Kyle models of why spreads and price impact exist, and
-queue-position tracking with a measurement of what priority is worth. The C++ [orderbook](https://github.com/louisbelot/orderbook) engine and
-real NASDAQ data come next.
+the Glosten-Milgrom and Kyle models of why spreads and price impact exist,
+queue-position tracking with a measurement of what priority is worth, per-agent
+latency on market data and order entry, and Hawkes processes for clustered
+order flow. The C++ [orderbook](https://github.com/louisbelot/orderbook) engine
+and real NASDAQ data come next.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -297,6 +299,159 @@ trader. Without informed flow it is close to neutral (+4.5 for GLFT, -1.1 for
 the touch quoter), and at keep = 2 the bot starts missing fills that were worth
 having.
 
+## Latency
+
+So far a bot saw every change to the book the moment it happened, and its
+orders reached the book the moment it sent them. `Latency` takes that away. It
+uses the split hftbacktest uses, three legs per agent: `feed` (market data from
+the exchange to the bot), `entry` (orders from the bot to the matching engine)
+and `response` (acks and fill reports back to the bot), plus an optional
+`jitter`, an extra exponential delay with that mean on every leg. Each leg is
+first in, first out, like a TCP session, so jitter can bunch messages up but
+never reorders them.
+
+```python
+from mmsim.sim import Latency
+
+lag = Latency(feed=0.1, entry=0.05, response=0.05)  # minutes, like the rest of the clock
+sim = Simulator(flow, [bot, insider], latency={bot: lag})
+```
+
+With latency, what the bot knows and what the exchange knows come apart.
+`ctx.orders` is the bot's own view: an order is in it from the moment it is
+sent, `acked` once the acceptance comes back and `canceling` once a cancel is on
+its way. `ctx.position` changes when a fill report arrives. The exchange books
+the fill in `ctx.account` when it happens and `Fill.t` is that time, so P&L and
+markouts measure what actually happened. A fill on an order whose cancel was
+already in flight is marked `stale`: the bot lost the race to cancel.
+
+The delayed feed is a replica. A bot with feed latency gets its own copy of the
+book, and every command that reaches the exchange (background flow, other
+agents, its own orders) is replayed on that copy `feed` later. The matching
+engine is deterministic, so the same commands in the same order give the same
+book. A test runs an hour of flow and checks that at every update the lagged
+copy equals the exchange book from `feed` earlier, five levels deep on both
+sides. `ctx.book`, `ctx.bid`, `ctx.ask` and `ctx.mid` all read the copy. With
+no latency the bot reads the exchange book directly and nothing is queued, and
+the sessions behind the earlier tables come out the same, fill for fill.
+
+![what latency costs](docs/latency_cost.png)
+
+The clock is in minutes and the CST flow changes the book about 38 times a
+minute, once every 1.6 seconds; the mid moves every 24 seconds. Seconds of
+latency would be absurd on a real exchange, where a liquid book changes every
+few microseconds, but what matters is latency against the time between book
+events, and 10 seconds here is about six of them. Both bots run with keep = 1
+against the informed trader from before, 200 sessions of 390 minutes per row,
+the same latency on all three legs:
+
+| one-way latency | GLFT, gamma 0.3 | stale fills | GLFT, noise only | join the touch |
+|-----------------|-----------------|-------------|------------------|----------------|
+| 0               | 58.2 (1.9)      | 0           | 67.0 (1.3)       | -44.9 (5.3)    |
+| 0.5 s           | 54.1 (1.9)      | 1.4%        | 65.5 (1.2)       | -40.9 (5.3)    |
+| 1 s             | 49.0 (2.1)      | 2.9%        | 63.3 (1.5)       | -41.6 (5.1)    |
+| 2 s             | 37.4 (1.9)      | 5.4%        | 60.4 (1.4)       | -51.6 (5.5)    |
+| 5 s             | 22.4 (2.0)      | 11.2%       | 53.2 (1.4)       | -64.7 (5.2)    |
+| 10 s            | 0.7 (2.6)       | 17.5%       | 47.6 (1.3)       | -60.6 (5.5)    |
+| 20 s            | -19.5 (3.2)     | 24.5%       | 38.4 (1.7)       | -64.3 (5.2)    |
+| 30 s            | -33.3 (3.8)     | 28.9%       | 36.5 (1.8)       | -58.4 (5.0)    |
+
+Mean P&L per session in ticks (standard error). The zero row is the keep = 1
+row of the queue table, rerun through the new code. Against informed flow GLFT
+gives up about 10 ticks per second of latency over the first two seconds, then
+about 4 per second, and is at break-even by ten seconds. Without informed flow the same ten seconds cost 19 ticks, so most
+of the damage is adverse selection made worse. The stale fills are the bad
+ones: up to 10 seconds of latency, five minutes later they are down 0.24 to
+0.59 ticks per lot while the rest are up about 0.40. At 30 seconds one GLFT session in five goes past its 5-lot
+limit at some point, because the fills that take it over are still on their way
+when it decides to keep quoting. The touch quoter is already losing to the
+informed trader, and the extra 15 to 20 ticks it loses is two to three standard
+errors.
+
+Which leg matters? GLFT again, with 10 seconds on one leg at a time:
+
+| 10 s on          | informed flow | noise only  | stale fills, informed |
+|------------------|---------------|-------------|-----------------------|
+| nothing          | 58.2 (1.9)    | 67.0 (1.3)  | 0                     |
+| feed             | 20.6 (2.6)    | 56.1 (1.4)  | 0                     |
+| entry            | 21.8 (2.2)    | 51.9 (1.5)  | 21.9%                 |
+| response         | 52.8 (1.8)    | 63.5 (1.4)  | 0                     |
+| feed 5, entry 5  | 24.9 (2.3)    | 55.4 (1.2)  | 11.4%                 |
+| all three        | 0.7 (2.6)     | 47.6 (1.3)  | 17.5%                 |
+
+Feed and entry latency cost the same, and splitting ten seconds between them
+costs about as much as putting it all on one. What matters is the time from a
+change in the market to the bot's order acting on it, which is what trading
+firms call tick-to-trade. Only entry latency produces stale fills: with a slow
+feed the cancel goes out late but lands at once, so the loss is just as large
+and the stale flag never sees it. Counting lost cancel races measures half the
+problem. Response latency is cheap here, since it only delays when the bot
+learns about its own fills and skews for them.
+
+## Clustered order flow: Hawkes processes
+
+In the CST model every market order is an independent Poisson arrival. Real
+market orders come in bursts: one buy makes the next buy more likely for a
+while. A Hawkes process captures that with an intensity that jumps at each
+event and decays back,
+
+```
+lambda_i(t) = mu_i + sum_j sum_{t_k of type j, t_k < t} alpha_ij exp(-beta_ij (t - t_k))
+```
+
+`hawkes.py` has the multivariate process with exponential kernels. The
+branching matrix alpha / beta holds the expected number of type-i events each
+type-j event triggers directly; when its spectral radius is below one the
+process is stationary with mean rates (I - alpha / beta)^-1 mu. `simulate` uses
+Ogata's thinning, `loglik` and `fit` do maximum likelihood with an analytic
+gradient, and `residuals` applies the time-rescaling theorem: under the right
+model the compensator increments between consecutive events are i.i.d. Exp(1),
+which gives a goodness-of-fit test for any candidate model.
+
+`HawkesFlow` keeps the CST limit orders and cancels and replaces the market
+orders with a two-dimensional Hawkes process (buys, sells). `Hawkes.symmetric`
+sets the base rate so the long-run rate per side stays at the CST value of 0.94
+a minute. Here each market order triggers 0.6 more on its own side and 0.1 on
+the other, with a decay time of 10 seconds (beta = 6 per minute).
+
+![Hawkes market orders](docs/hawkes_flow.png)
+
+Fitting the model back on 2000 minutes of the simulated flow (3570 market
+orders) gives a branching matrix of [[0.604, 0.113], [0.106, 0.600]] against
+the true [[0.6, 0.1], [0.1, 0.6]]. The rescaled gaps under that fit pass a
+Kolmogorov-Smirnov test against Exp(1) (statistic 0.012, p = 0.69); under a
+Poisson fit with the same rates the statistic is 0.40 and the p-value is zero
+to machine precision. The middle panel is the QQ plot of the two.
+
+The book looks the same either way: the spread is one tick 79% of the time
+against 76%, the mean bid depth is 15.5 lots against 15.6, and the book is
+one-sided 0.15% of the time. Only the timing changes. 200 sessions of 390
+minutes per row, keep = 1, no latency:
+
+| strategy        | market orders | informed flow | mean P&L (se) | sd P&L | fills | mean abs q | markout 0 / 5 min |
+|-----------------|---------------|---------------|---------------|--------|-------|------------|-------------------|
+| join the touch  | Poisson       | no            | 85.8 (4.0)    | 56.0   | 184   | 2.64       | 0.69 / 0.65       |
+| join the touch  | Poisson       | yes           | -44.9 (5.3)   | 74.4   | 256   | 3.09       | 0.73 / 0.46       |
+| join the touch  | Hawkes        | no            | -22.8 (6.9)   | 98.1   | 240   | 2.95       | 0.76 / 0.19       |
+| join the touch  | Hawkes        | yes           | -98.1 (7.7)   | 109.1  | 331   | 3.10       | 0.76 / 0.19       |
+| GLFT, gamma 0.3 | Poisson       | no            | 67.0 (1.3)    | 18.9   | 150   | 0.70       | 0.68 / 0.51       |
+| GLFT, gamma 0.3 | Poisson       | yes           | 58.2 (1.9)    | 26.9   | 221   | 0.84       | 0.73 / 0.41       |
+| GLFT, gamma 0.3 | Hawkes        | no            | -63.0 (5.3)   | 74.5   | 220   | 1.26       | 0.77 / -0.08      |
+| GLFT, gamma 0.3 | Hawkes        | yes           | -73.9 (5.1)   | 71.5   | 298   | 1.23       | 0.77 / -0.05      |
+
+With the same number of market orders, clustering alone turns GLFT from +67 to
+-63 ticks a session, with no informed trader anywhere. The fills look as good
+as ever at the instant they happen (0.77 ticks) and are worth nothing five
+minutes later. Clustered flow is predictable flow: a market sell that hits the
+bot's bid is likely to be followed by more sells within seconds, and they walk
+the price down through the level the bot just bought at. The bot then requotes
+at the new touch and gets hit again. The standard deviation of one-minute mid
+moves goes from 0.85 to 1.17 ticks. Clustering hurts more than the informed
+trader does here, which says that a quoting model that treats fills as
+independent Poisson events is missing the thing that matters most. A bot that
+reads the intensity off the trades it sees and widens on the side that was just
+hit is the natural next step.
+
 ## Install
 
 ```
@@ -378,9 +533,9 @@ eq.lam[0], eq.Sigma[-1], eq.profit                     # (0.901, 0.074, 0.886)
 ```
 
 `python examples/as_replication.py`, `cst_sessions.py`, `glft_quotes.py`,
-`informed_flow.py`, `why_spreads.py` and `queue_value.py` redraw the six charts.
-`informed_flow.py` and `queue_value.py` run 2000 and 2400 sessions and take
-90 to 100 seconds each here.
+`informed_flow.py`, `why_spreads.py`, `queue_value.py`, `latency_cost.py` and
+`hawkes_flow.py` redraw the eight charts. The session experiments run 1600 to
+6800 sessions on all cores; `latency_cost.py` is the longest at 8 minutes here.
 
 ## Notes
 
@@ -419,7 +574,10 @@ everyone else's quotes. A bot that quoted around the full book's mid would be
 quoting around its own orders, and those quotes would stay put when the market
 moved. Callbacks never nest: all the events from one book change are booked
 before any callback runs, and orders a bot sends from a callback are queued
-behind it.
+behind it. Timers, orders in flight, fill reports and delayed feed updates all
+wait in one heap keyed by time and a sequence number, so two things due at the
+same instant happen in the order they were scheduled. The background flow draws
+its next event with the time to the top of the heap as its horizon.
 
 **Avellaneda-Stoikov on a book.** The model allows a quote on the far side of
 the mid; on a book that is a market order. The bot rounds the model's prices
