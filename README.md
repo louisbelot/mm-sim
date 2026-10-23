@@ -5,8 +5,9 @@ price-time priority, background order flow from the Cont-Stoikov-Talreja model,
 an event-driven simulator where bots quote against that flow, the
 Avellaneda-Stoikov and Gueant-Lehalle-Fernandez-Tapia inventory models (each
 checked against its paper), informed traders with a private view of the
-fundamental value, and markout analysis to measure what they cost a market
-maker. The C++ [orderbook](https://github.com/louisbelot/orderbook) engine and
+fundamental value, markout analysis to measure what they cost a market maker,
+the Glosten-Milgrom and Kyle models of why spreads and price impact exist, and
+queue-position tracking with a measurement of what priority is worth. The C++ [orderbook](https://github.com/louisbelot/orderbook) engine and
 real NASDAQ data come next.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
@@ -164,6 +165,138 @@ fill rate is about 40 times lower. It drops from 83 fills a session to 13 and
 makes 4 to 5 ticks with or without the informed traders. On a tick grid, leaning
 on inventory did far more than widening.
 
+## Why spreads exist: Glosten-Milgrom and Kyle
+
+The models above get their spread from inventory risk and an assumed fill-rate
+curve. The two classic information models get one from a risk-neutral market
+maker that holds no inventory risk at all.
+
+In Glosten and Milgrom (1985) a competitive market maker meets one trader at a
+time. With probability alpha the trader is informed; otherwise the trader buys
+or sells with probability eta each, whatever the price. The market maker sets
+the ask to E[V | the next trader buys] and the bid to E[V | the next trader
+sells], so it breaks even on average: what it loses to insiders it gets back
+from everyone else. With V either lo or hi and P(V = hi) = mu,
+
+```
+ask = lo + (hi - lo) mu (alpha + u) / (mu alpha + u)      u = (1 - alpha) eta
+bid = lo + (hi - lo) mu u / ((1 - mu) alpha + u)
+```
+
+and with an even prior the spread is exactly alpha (hi - lo). Each trade updates
+the belief, and only the net number of buys matters: with eta = 1/2 every buy
+multiplies the odds by (1 + alpha) / (1 - alpha).
+
+`glosten.py` also solves a version on a grid of values, with insiders who see V
+plus Gaussian noise and stay out when their estimate is inside the quotes (close
+to Das 2005). The quotes are then fixed points, ask = E[V | a buy at that ask],
+found by root-finding, and a no-trade is information too. With a two-point grid
+and noise near zero it reproduces the closed form to 1e-9.
+
+![Glosten-Milgrom and Kyle](docs/why_spreads.png)
+
+`examples/why_spreads.py` draws V from a normal prior (sd 10; insiders' noise sd
+5, eta 0.4) and runs 200 sessions of 150 trades for each alpha:
+
+| informed | first spread | spread after 150 trades | market maker P&L per session (se) | insiders' P&L per session |
+|----------|--------------|-------------------------|-----------------------------------|---------------------------|
+| 10%      | 1.75         | 0.95                    | -5.2 (7.5)                        | 81.6                      |
+| 30%      | 5.18         | 0.38                    | -2.8 (3.7)                        | 58.3                      |
+| 50%      | 8.84         | 0.18                    | -1.9 (2.5)                        | 32.9                      |
+
+More insiders make a wider spread at the open and a faster collapse, because
+the price learns faster. As a group the insiders earn the most when they are
+rare. The market maker's P&L is zero within its standard error in every row, so
+the uninformed pay for all of it.
+
+Kyle (1985) has one insider who knows V ~ N(p0, Sigma0), noise traders who send
+N(0, sigma_u^2 dt) to each of N auctions, and market makers who set the price to
+E[V | order flow so far]. In equilibrium the insider trades beta_n (V - p) dt and
+the price moves lambda_n per unit of net order flow. With one auction
+lambda = sqrt(Sigma0) / (2 sigma_u) and the insider makes sqrt(Sigma0) sigma_u / 2.
+For N auctions `kyle.solve` runs Kyle's backward recursion, where each step
+solves a cubic for lambda_n on (0, 1 / (2 alpha_n)) given the next period's
+value-function coefficient alpha_n. The recursion is homogeneous in Sigma, so it
+runs once with Sigma_N = 1 and again rescaled to hit Sigma0. With
+Sigma0 = sigma_u = 1:
+
+| N    | lambda, first auction | lambda, last auction | Sigma_N | insider profit |
+|------|-----------------------|----------------------|---------|----------------|
+| 1    | 0.5000                | 0.5000               | 0.5000  | 0.5000         |
+| 4    | 0.7648                | 0.6642               | 0.2206  | 0.7307         |
+| 16   | 0.9012                | 0.7707               | 0.0742  | 0.8860         |
+| 256  | 0.9881                | 0.8437               | 0.0056  | 0.9869         |
+| 4096 | 0.9989                | 0.8530               | 0.0004  | 0.9988         |
+
+As N grows the solution converges to continuous time: lambda constant at 1,
+Sigma falling linearly to 0, and a profit of 1, twice the one-shot value. The
+insider trades just slowly enough that the price only reaches V at the close.
+The last auction stays different (lambda about 0.85 of the continuous value)
+because there is no later auction to save information for.
+
+The checks do not reuse the recursion. lambda_n equals the Kalman gain of the
+market makers' filter given beta_n, to 1e-10. The value function
+alpha_0 Sigma0 + delta_0 equals the insider's expected profit computed forward
+from the strategy. Moving any single beta_n by 5% either way lowers that profit,
+so the strategy is a best response. A Monte Carlo of 200,000 paths matches
+Sigma_n to 2% and the profit within 4 standard errors, and its price changes are
+uncorrelated with each other and with the remaining pricing error.
+
+## Queue position
+
+The simulator records where each order joined its queue. `LiveOrder.ahead` is
+the quantity in front of the order when it joined its level, and
+`ctx.ahead(oid)` gives the live value. A modify keeps the old number only when
+it shrinks the order in place, the same rule the book uses for time priority.
+Maker fills carry `ahead` and `left`, the quantity still resting at the fill
+price once the incoming order is done. `left == 0` means the fill emptied the
+level and the price went through it.
+
+![queue position](docs/queue_value.png)
+
+The left panel is exact. In the CST model with a one-tick spread, the
+probability that an order at the best bid fills before the ask queue empties
+falls quickly with the lots in front of it: against two lots at the ask it is
+0.70 at the front, 0.47 two lots back and 0.25 ten lots back. It is the same
+linear system as `prob_fill_first`, which a simulator test already checks.
+
+In the simulator (200 sessions of 390 minutes per row, the informed traders from
+the previous section), the fills that emptied their level are the bad ones. For
+the GLFT bot the markout at the fill is 0.36 ticks when the fill took out the
+level and 0.57 when it left a queue behind, with or without informed flow. Most
+of those fills come from orders that stepped alone into a new price level
+(`ahead == 0`); those get hit first and the level empties 67 to 73% of the
+time. Position further back in the queue makes little difference to the longer
+markouts compared to the noise in these runs.
+
+That points to a policy. `Quoter` takes `keep`: a live quote stays put when it
+sits at most `keep` ticks behind the new target, so the bot holds its place
+instead of chasing every one-tick move. A quote never stays ahead of its target,
+so the bot never quotes more aggressively than its model asks.
+
+| strategy        | informed flow | keep | mean P&L (se) | sd P&L | fills | markout at fill |
+|-----------------|---------------|------|---------------|--------|-------|-----------------|
+| join the touch  | no            | 0    | 86.9 (4.0)    | 56.3   | 252   | 0.57            |
+| join the touch  | no            | 1    | 85.8 (4.0)    | 56.0   | 184   | 0.69            |
+| join the touch  | no            | 2    | 75.8 (4.4)    | 61.6   | 143   | 0.75            |
+| join the touch  | yes           | 0    | -73.2 (5.1)   | 72.6   | 336   | 0.57            |
+| join the touch  | yes           | 1    | -44.9 (5.3)   | 74.4   | 256   | 0.73            |
+| join the touch  | yes           | 2    | -31.1 (5.2)   | 73.7   | 204   | 0.81            |
+| GLFT, gamma 0.3 | no            | 0    | 62.5 (1.3)    | 17.9   | 202   | 0.52            |
+| GLFT, gamma 0.3 | no            | 1    | 67.0 (1.3)    | 18.9   | 150   | 0.68            |
+| GLFT, gamma 0.3 | no            | 2    | 57.3 (1.3)    | 18.6   | 111   | 0.77            |
+| GLFT, gamma 0.3 | yes           | 0    | 32.6 (1.8)    | 25.7   | 285   | 0.52            |
+| GLFT, gamma 0.3 | yes           | 1    | 58.2 (1.9)    | 26.9   | 221   | 0.73            |
+| GLFT, gamma 0.3 | yes           | 2    | 51.0 (2.2)    | 30.5   | 172   | 0.84            |
+
+The keep = 0 rows reproduce the informed-trader table exactly, rerun after the
+queue changes. Against informed flow, keep = 1 takes GLFT from 32.6 to 58.2
+ticks a session. It trades less, each fill is worth about 0.2 ticks more at the
+instant it happens, and it takes about a quarter fewer fills from the informed
+trader. Without informed flow it is close to neutral (+4.5 for GLFT, -1.1 for
+the touch quoter), and at keep = 2 the bot starts missing fills that were worth
+having.
+
 ## Install
 
 ```
@@ -228,9 +361,26 @@ curve(fills, markouts(fills, sim.tape, [0, 1, 5, 30], sim.end))
 # mean markout per lot 0.50, 0.42, 0.23, 0.11 over 271 fills
 ```
 
-`python examples/as_replication.py`, `cst_sessions.py`, `glft_quotes.py` and
-`informed_flow.py` redraw the four charts. The last one runs 2000 sessions and
-takes about 90 seconds here.
+```python
+import numpy as np
+
+from mmsim import glosten as gm
+from mmsim import kyle
+
+gm.binary_quotes(0.5, 0.3, 90.0, 110.0)   # (97.0, 103.0): the spread is alpha (hi - lo)
+v = np.linspace(60, 140, 321)
+prior = np.exp(-0.5 * ((v - 100) / 10) ** 2)
+prior /= prior.sum()
+gm.quotes(gm.Model(0.3, noise=5.0, eta=0.4), v, prior)   # (97.41, 102.59)
+
+eq = kyle.solve(16, Sigma0=1.0, sigma_u=1.0)
+eq.lam[0], eq.Sigma[-1], eq.profit                     # (0.901, 0.074, 0.886)
+```
+
+`python examples/as_replication.py`, `cst_sessions.py`, `glft_quotes.py`,
+`informed_flow.py`, `why_spreads.py` and `queue_value.py` redraw the six charts.
+`informed_flow.py` and `queue_value.py` run 2000 and 2400 sessions and take
+90 to 100 seconds each here.
 
 ## Notes
 
