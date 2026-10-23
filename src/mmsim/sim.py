@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import heapq
 import itertools
 import math
@@ -32,12 +33,13 @@ class Agent:
 
 @dataclass(frozen=True)
 class Latency:
+    feed: float = 0.0
     entry: float = 0.0
     response: float = 0.0
     jitter: float = 0.0
 
     def __post_init__(self) -> None:
-        if min(self.entry, self.response, self.jitter) < 0:
+        if min(self.feed, self.entry, self.response, self.jitter) < 0:
             raise ValueError("latencies cannot be negative")
 
 
@@ -106,6 +108,8 @@ class Context:
         self.history: list[Sample] = []
         self._position = 0
         self._mark = math.nan
+        self._view: Book | None = None
+        self._feed = Link(latency.feed, latency.jitter, rng)
         self._entry = Link(latency.entry, latency.jitter, rng)
         self._response = Link(latency.response, latency.jitter, rng)
 
@@ -119,7 +123,7 @@ class Context:
 
     @property
     def book(self) -> Book:
-        return self._sim.book
+        return self._sim.book if self._view is None else self._view
 
     @property
     def position(self) -> int:
@@ -295,6 +299,8 @@ class Simulator:
             if self._record_every is not None:
                 self._next_sample = self.t
             for ctx in self.contexts:
+                if not ctx._feed.instant:
+                    ctx._view = copy.deepcopy(self.book)
                 self._queue(ctx.agent.on_start, ctx)
             self._drain()
         self._loop(self.end)
@@ -345,9 +351,12 @@ class Simulator:
             elif sender is not None:
                 self._book_event(sender, e)
         self.tape.record(self.t, self.book.mid())
-        if self._started and sender is None:
+        if self._started:
             for ctx in self.contexts:
-                self._queue(ctx.agent.on_book, ctx)
+                if ctx._view is not None:
+                    self._at(ctx._feed.arrival(self.t), self._replay, ctx, cmd, sender is None)
+                elif sender is None:
+                    self._queue(ctx.agent.on_book, ctx)
         self._drain()
 
     def _book_event(self, ctx: Context, e: Event) -> None:
@@ -395,6 +404,11 @@ class Simulator:
             ctx._report(e, info)
         else:
             self._at(ctx._response.arrival(self.t), ctx._report, e, info)
+
+    def _replay(self, ctx: Context, cmd: Command, notify: bool) -> None:
+        cmd(ctx._view)
+        if notify:
+            self._queue(ctx.agent.on_book, ctx)
 
     def _joined(self, oid: int) -> int:
         return self.book.ahead(oid) if oid in self.book else 0

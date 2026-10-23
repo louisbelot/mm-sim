@@ -2,7 +2,7 @@ import math
 import random
 
 import pytest
-from scripted import ScriptedFlow, make, market
+from scripted import ScriptedFlow, limit, make, market
 
 from mmsim.book import Side
 from mmsim.bots import GLFT
@@ -103,6 +103,36 @@ def test_rejected_submit_leaves_the_view_after_the_report():
     assert ctx.orders == {} and sim._agent_orders == {}
 
 
+def test_delayed_feed_shows_the_old_book():
+    seen = []
+
+    class Watcher(Agent):
+        def on_start(self, ctx):
+            ctx.set_timer(1.2)
+
+        def on_timer(self, ctx):
+            seen.append(("timer", ctx.t, ctx.bid, ctx.book.best_bid()))
+
+        def on_book(self, ctx):
+            seen.append(("book", ctx.t, ctx.bid, ctx.book.best_bid()))
+
+    bot = Watcher()
+    sim = make([(1.0, limit(Side.BUY, 100))], bot, latency={bot: Latency(feed=0.3)})
+    sim.run(2.0)
+    assert seen == [("timer", 1.2, 99, 99), ("book", 1.3, 100, 100)]
+    assert sim.book.best_bid() == 100
+
+
+def test_own_orders_show_up_on_the_feed_late():
+    bot = Bidder(px=101)
+    sim = make([], bot, latency={bot: Latency(feed=0.5, entry=0.1)})
+    ctx = sim.contexts[0]
+    sim.run(0.3)
+    assert sim.book.best_bid() == 101 and ctx.book.best_bid() == 99
+    sim.run(0.5)
+    assert ctx.book.best_bid() == 101 and ctx.bid == 99
+
+
 def test_negative_latency_is_an_error():
     with pytest.raises(ValueError):
         Latency(entry=-1e-3)
@@ -120,9 +150,38 @@ def test_link_is_fifo_and_adds_its_mean_delay():
     assert min(d) >= 0.2 and abs(mean - 0.3) < 4 * 0.1 / math.sqrt(n)
 
 
+class Tops(Agent):
+    def __init__(self):
+        self.seen = []
+
+    def on_book(self, ctx):
+        b = ctx.book
+        self.seen.append((ctx.t, b.depth(Side.BUY, 5), b.depth(Side.SELL, 5)))
+
+
+def test_lagged_view_replays_the_exchange_book():
+    lagged, now = Tops(), Tops()
+    sim = Simulator(
+        ZeroIntelligence(CSTParams.sky_perfect()),
+        [lagged, now],
+        seed=3,
+        latency={lagged: Latency(feed=0.05)},
+    )
+    sim.seed(1000, 1001)
+    sim.run(60)
+    n = len(lagged.seen)
+    assert n > 1000 and len(now.seen) - n < 10
+    for (t1, *view), (t0, *book) in zip(lagged.seen, now.seen[:n], strict=True):
+        assert t1 == pytest.approx(t0 + 0.05) and view == book
+
+
+def snapshot(book):
+    return [(o.id, o.owner, o.side, o.price, o.qty) for side in Side for o in book.orders(side)]
+
+
 def test_session_with_latency_settles_consistent():
     bot = GLFT(Model(1.0, 2.1, 3.6, 0.3, 5), keep=1)
-    lat = Latency(entry=0.01, response=0.01, jitter=0.01)
+    lat = Latency(feed=0.02, entry=0.01, response=0.01, jitter=0.01)
     sim = Simulator(ZeroIntelligence(CSTParams.sky_perfect()), [bot], seed=8, latency={bot: lat})
     sim.seed(1000, 1001)
     sim.warm_up(30)
@@ -135,7 +194,8 @@ def test_session_with_latency_settles_consistent():
     sim.run(1.0)
     assert sim._events == []
     assert ctx.position == ctx.account.position
-    assert sim.book.audit() == ""
+    assert sim.book.audit() == "" and ctx.book.audit() == ""
+    assert snapshot(ctx.book) == snapshot(sim.book)
     mine = [o for side in Side for o in sim.book.orders(side) if o.owner == ctx.owner]
     resting = {o.id: (o.side, o.price, o.qty) for o in mine}
     assert resting == {oid: (o.side, o.price, o.qty) for oid, o in ctx.orders.items()}
