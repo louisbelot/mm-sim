@@ -38,11 +38,13 @@ class InformedTrader(Agent):
         self.rng = random.Random(seed)
 
     def on_start(self, ctx: Context) -> None:
-        if self.value.t is None:
-            self.value.start(ctx.t, ctx.book.mid())
+        self._begin(ctx)
         ctx.set_timer(self.rng.expovariate(self.rate))
 
     def on_timer(self, ctx: Context) -> None:
+        if not self._begin(ctx):
+            ctx.set_timer(self.rng.expovariate(self.rate))
+            return
         v = self.value.at(ctx.t)
         bid, ask = ctx.book.best_bid(), ctx.book.best_ask()
         if ask is not None and v > ask + self.edge:
@@ -50,3 +52,11 @@ class InformedTrader(Agent):
         elif bid is not None and v < bid - self.edge:
             ctx.submit(Side.SELL, 0, self.size, kind=OrderType.MARKET)
         ctx.set_timer(self.rng.expovariate(self.rate))
+
+    def _begin(self, ctx: Context) -> bool:
+        if self.value.t is None:
+            mid = ctx.book.mid()
+            if mid is None:
+                return False
+            self.value.start(ctx.t, mid)
+        return True

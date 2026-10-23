@@ -45,6 +45,16 @@ def test_buys_until_the_ask_reaches_the_value():
     assert sim.book.best_ask() == 104
 
 
+def test_value_starts_once_the_book_has_two_sides():
+    value = Fundamental(0.0)
+    sim = make([(1.0, limit(Side.SELL, 104))], InformedTrader(value, rate=20.0, seed=2))
+    sim.book.cancel(2)
+    sim.run(3.0)
+    (t, v), *_ = value.path
+    assert 1.0 <= t < 1.5 and v == 101.5
+    assert sim.contexts[0].account.fills == []
+
+
 def session(seed):
     value = Fundamental(1.0, seed=seed)
     informed = InformedTrader(value, 1.0, seed=seed)
