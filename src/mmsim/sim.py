@@ -27,6 +27,9 @@ class Agent:
     def on_fill(self, ctx: Context, fill: Fill) -> None:
         pass
 
+    def on_trade(self, ctx: Context, p: Print) -> None:
+        pass
+
     def on_timer(self, ctx: Context) -> None:
         pass
 
@@ -80,6 +83,13 @@ class _Resting:
     price: int
     qty: int
     ahead: int
+
+
+class Print(NamedTuple):
+    t: float
+    side: Side
+    price: int
+    qty: int
 
 
 class Sample(NamedTuple):
@@ -339,7 +349,14 @@ class Simulator:
 
     def _execute(self, sender: Context | None, cmd: Command) -> None:
         self._pre_mid = self.book.mid()
-        for e in cmd(self.book):
+        events = cmd(self.book)
+        if self._started:
+            prints = _prints(self.t, events)
+            for ctx in self.contexts:
+                if ctx._view is None:
+                    for p in prints:
+                        self._queue(ctx.agent.on_trade, ctx, p)
+        for e in events:
             if e.type == EventType.TRADE:
                 maker = self._agent_orders.get(e.maker)
                 taker = self._agent_orders.get(e.id)
@@ -353,7 +370,8 @@ class Simulator:
         if self._started:
             for ctx in self.contexts:
                 if ctx._view is not None:
-                    self._at(ctx._feed.arrival(self.t), self._replay, ctx, cmd, sender is None)
+                    at = ctx._feed.arrival(self.t)
+                    self._at(at, self._replay, ctx, cmd, self.t, sender is None)
                 elif sender is None:
                     self._queue(ctx.agent.on_book, ctx)
         self._drain()
@@ -404,8 +422,9 @@ class Simulator:
         else:
             self._at(ctx._response.arrival(self.t), ctx._report, e, info)
 
-    def _replay(self, ctx: Context, cmd: Command, notify: bool) -> None:
-        cmd(ctx._view)
+    def _replay(self, ctx: Context, cmd: Command, t: float, notify: bool) -> None:
+        for p in _prints(t, cmd(ctx._view)):
+            self._queue(ctx.agent.on_trade, ctx, p)
         if notify:
             self._queue(ctx.agent.on_book, ctx)
 
@@ -429,6 +448,20 @@ class Simulator:
             fn, args = self._pending.popleft()
             fn(*args)
         self._busy = False
+
+
+def _prints(t: float, events: list[Event]) -> list[Print]:
+    out: list[Print] = []
+    taker = None
+    for e in events:
+        if e.type != EventType.TRADE:
+            continue
+        if e.id == taker:
+            out[-1] = out[-1]._replace(price=e.price, qty=out[-1].qty + e.qty)
+        else:
+            out.append(Print(t, e.side, e.price, e.qty))
+            taker = e.id
+    return out
 
 
 def _best_of_others(book: Book, side: Side, owner: int) -> int | None:
