@@ -387,3 +387,79 @@ Design notes and things that went wrong:
 Next: a quoting rule that reads the market-order intensity off the trades it
 sees and leans away from the side that was just hit, then the C API on the C++
 engine so it can replace the Python book here.
+
+## 2026-10-23: Leaning on Hawkes flow, P&L attribution
+
+The Hawkes run this morning left GLFT losing 63 ticks a session to clustered
+market orders with no informed trader anywhere. This entry gives the bots a way
+to read the clustering off the tape, and adds the attribution needed to see
+what that changes.
+
+Built:
+
+- Public trade prints. `Agent.on_trade(ctx, Print)` with one print per
+  aggressive order (time, aggressor side, worst price, total quantity). Prints
+  are queued before the fills and the book update from the same command, so a
+  bot's signal is current when it requotes. Agents with feed latency get them
+  from the replica book when the command is replayed there, stamped with the
+  exchange time. Nothing is printed during warm-up.
+- `Hawkes.forecast(h)`: the d x d^2 matrix that maps the excitation above its
+  stationary level to the expected excess count of each event type over the
+  next h (or infinite) minutes, from the linear ODE the expectation follows.
+  `Hawkes.stationary_state()` is the mean of the decayed sums.
+- `Tracker`: decayed sums updated event by event, starting from the stationary
+  state so a bot that joins mid-session has no opinion yet.
+- `FlowLean`: shift = kappa (excess buys - excess sells). `FlowLean.fit`
+  regresses the mid change over the next h minutes on the forecast at each
+  market order. Any `Quoter` takes a `signal` and quotes around `fair(ctx)`,
+  the mid plus the shift. `SymmetricQuoter` now clamps its quotes to stay
+  passive like the other two, since a shifted mid can otherwise cross.
+- `attribution.py`: spread, adverse and inventory terms per session for a
+  chosen horizon, plus fees, adding up exactly to the account value at the
+  closing tape mid.
+- `examples/flow_lean.py`: 4800 sessions (strategy table and a kappa sweep) and
+  the chart, about 6 minutes.
+
+Checks (all measured today):
+
+- 208 tests. Eight fixed sessions (two flows, two bots, two seeds, one seed
+  with every latency leg on and jitter) give the same P&L, position, fill
+  count and sum of fill times after every commit. The rows without a lean in
+  the new table equal the Hawkes table from this morning to the decimal.
+- Forecast: the univariate closed form x (1 - e^-(beta - alpha) h) /
+  (beta - alpha) and its infinite-horizon limit; mean counts of 20,000
+  simulated two-dimensional paths with unequal betas match the forecast from an
+  empty start within 4 standard errors, and differ from the stationary count by
+  more than 10. Two injected bugs (wrong row map in M, transposed stationary
+  state) each fail that test.
+- Tracker intensity equals the event sum from `Hawkes.intensity` plus the
+  decayed starting state to 1e-12 relative.
+- `FlowLean.fit` recovers a planted 0.4-tick permanent impact within 10% and
+  gives |kappa| < 0.1 on a random walk.
+- Attribution: a hand-worked two-fill example, the markout identity, the
+  no-mid case, and the sum against the account in sessions with a maker rebate
+  at three horizons.
+- Results: the lean is worth 38.3 (se 9.0) ticks a session to the touch quoter
+  and 28.9 (se 6.4) to GLFT on Hawkes flow, paired by seed. It costs GLFT 11.7
+  (se 1.8) on Poisson flow. Most of the gain shows up in the inventory term
+  (-93.1 to -52.2 for GLFT), not in the first-minute adverse term.
+
+Design notes and things that went wrong:
+
+- I wanted the lean to work for any quoter, so it is a fair-value shift rather
+  than a change to GLFT's model. GLFT has a drift parameter, but the drift here
+  is state-dependent and decays in seconds; resolving the HJB per state was more
+  machinery than the first-order shift needs.
+- First version of the quoter test failed because `SymmetricQuoter` had no
+  passive clamp. A two-tick down shift put its ask on the bid, the post-only
+  order was rejected and the bot quoted one side.
+- The kappa regression is over every market order, but fills cluster in
+  bursts, which is where the forecast is largest and the move after it is
+  largest too. The sweep shows GLFT wants about 1.5 times the fitted kappa. A
+  fit conditioned on the bot's own fills, or on the forecast being large, is
+  the obvious next try.
+- The print that fills the bot is often the first of a burst. Nothing before it
+  predicts it, so the first-minute adverse term barely moves with the lean.
+
+Next: replace the unconditional kappa with a fit weighted the way fills are,
+then move to the C API on the C++ engine so it can replace the Python book.
