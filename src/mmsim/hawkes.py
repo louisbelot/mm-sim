@@ -5,6 +5,7 @@ import random
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.linalg import expm
 from scipy.optimize import minimize
 
 _SPAN = 300.0
@@ -103,6 +104,44 @@ class Hawkes:
     def residuals(self, times: np.ndarray, marks: np.ndarray) -> list[np.ndarray]:
         big = self.compensator(times, marks, times)
         return [np.diff(big[marks == i, i], prepend=0.0) for i in range(self.d)]
+
+    def stationary_state(self) -> np.ndarray:
+        return self.branching * self.mean_rate()[None, :]
+
+    def forecast(self, horizon: float = math.inf) -> np.ndarray:
+        d = self.d
+        S = np.kron(np.eye(d), np.ones(d))
+        M = np.diag(self.alpha.ravel()) @ S[np.tile(np.arange(d), d)] - np.diag(self.beta.ravel())
+        if math.isinf(horizon):
+            return -S @ np.linalg.inv(M)
+        return S @ np.linalg.solve(M, expm(M * horizon) - np.eye(d * d))
+
+
+class Tracker:
+    def __init__(self, model: Hawkes, horizon: float = math.inf) -> None:
+        self.model = model
+        self.t: float | None = None
+        self.s = model.stationary_state()
+        self._rest = self.s.copy()
+        self._w = model.forecast(horizon)
+
+    def _decayed(self, t: float) -> np.ndarray:
+        if self.t is None:
+            return self.s
+        if t < self.t:
+            raise ValueError("events have to arrive in time order")
+        return self.s * np.exp(-self.model.beta * (t - self.t))
+
+    def update(self, t: float, mark: int) -> None:
+        self.s = self._decayed(t)
+        self.s[:, mark] += self.model.alpha[:, mark]
+        self.t = t
+
+    def intensity(self, t: float) -> np.ndarray:
+        return self.model.mu + self._decayed(t).sum(axis=1)
+
+    def excess(self, t: float) -> np.ndarray:
+        return self._w @ (self._decayed(t) - self._rest).ravel()
 
 
 def decayed_at(t: np.ndarray, at, beta: float) -> tuple[np.ndarray, np.ndarray]:

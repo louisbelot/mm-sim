@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 from scipy import stats
 
-from mmsim.hawkes import Hawkes, _score, decayed_at, fit
+from mmsim.hawkes import Hawkes, Tracker, _score, decayed_at, fit
 
 PAIR = Hawkes.make([0.4, 0.2], [[1.2, 0.3], [0.8, 0.5]], [[3.0, 1.0], [2.0, 4.0]])
 
@@ -116,3 +116,43 @@ def test_explosive_process_has_no_mean_rate():
         Hawkes.make([1.0, 1.0], [[0.8, 0.4], [0.4, 0.8]], 1.0).mean_rate()
     with pytest.raises(ValueError):
         Hawkes.make([1.0], [[-0.1]], 1.0)
+
+
+def test_univariate_forecast_closed_form():
+    h = Hawkes.make([1.0], [[2.0]], 5.0)
+    assert h.forecast()[0, 0] == pytest.approx(1 / 3)
+    assert h.forecast(0.4)[0, 0] == pytest.approx((1 - math.exp(-3 * 0.4)) / 3)
+
+
+def test_forecast_of_counts_from_an_empty_start():
+    T, n = 1.5, 20_000
+    rng = random.Random(7)
+    counts = np.array([np.bincount(PAIR.simulate(T, rng)[1], minlength=2) for _ in range(n)])
+    stationary = PAIR.mean_rate() * T
+    predicted = stationary + PAIR.forecast(T) @ -PAIR.stationary_state().ravel()
+    se = counts.std(axis=0) / math.sqrt(n)
+    assert np.all(np.abs(counts.mean(axis=0) - predicted) < 4 * se)
+    assert np.all(stationary - predicted > 10 * se)
+
+
+def test_tracker_intensity_matches_the_event_sum():
+    times, marks = PAIR.simulate(60.0, random.Random(3))
+    tr = Tracker(PAIR)
+    for t, m in zip(times, marks, strict=True):
+        tr.update(t, m)
+    at = times[-1] + 0.37
+    rest = (PAIR.stationary_state() * np.exp(-PAIR.beta * (at - times[0]))).sum(axis=1)
+    expected = PAIR.intensity(times, marks, np.array([at]))[0] + rest
+    assert tr.intensity(at) == pytest.approx(expected, rel=1e-12)
+
+
+def test_tracker_excess_is_zero_at_rest_and_follows_the_last_side():
+    h = Hawkes.symmetric(0.94, 0.6, 0.1, 6.0)
+    tr = Tracker(h)
+    assert np.allclose(tr.excess(5.0), 0)
+    tr.update(5.0, 1)
+    e = tr.excess(5.0)
+    assert e[1] > e[0] > 0
+    assert np.all(tr.excess(6.0) < e)
+    with pytest.raises(ValueError):
+        tr.update(4.0, 0)
