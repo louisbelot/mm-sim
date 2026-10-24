@@ -8,8 +8,10 @@ checked against its paper), informed traders with a private view of the
 fundamental value, markout analysis to measure what they cost a market maker,
 the Glosten-Milgrom and Kyle models of why spreads and price impact exist,
 queue-position tracking with a measurement of what priority is worth, per-agent
-latency on market data and order entry, and Hawkes processes for clustered
-order flow. The C++ [orderbook](https://github.com/louisbelot/orderbook) engine
+latency on market data and order entry, Hawkes processes for clustered
+order flow, a quoting signal that reads the Hawkes intensity off the public
+trade tape, and an exact split of P&L into spread, adverse selection and
+inventory. The C++ [orderbook](https://github.com/louisbelot/orderbook) engine
 and real NASDAQ data come next.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
@@ -448,9 +450,104 @@ the price down through the level the bot just bought at. The bot then requotes
 at the new touch and gets hit again. The standard deviation of one-minute mid
 moves goes from 0.85 to 1.17 ticks. Clustering hurts more than the informed
 trader does here, which says that a quoting model that treats fills as
-independent Poisson events is missing the thing that matters most. A bot that
-reads the intensity off the trades it sees and widens on the side that was just
-hit is the natural next step.
+independent Poisson events is missing the thing that matters most.
+
+## Leaning on the flow
+
+If market orders cluster, the trades a bot has just seen tell it something about
+the next few seconds. Cartea, Jaimungal and Ricci (2014) build this into the
+market maker's control problem: market orders excite each other and push the
+mid, and a market maker who ignores that short-term drift gets picked off. The
+version here is the first-order one: estimate the drift and quote around the mid
+plus that drift instead of the mid.
+
+Every agent now gets `on_trade` with a `Print` (time, aggressor side, worst
+price, quantity) for each aggressive order, before its fills and its book update
+from the same event, and through its feed latency if it has one. `Tracker` in
+`hawkes.py` keeps the decayed sums of a fitted Hawkes model up to date from
+those prints, so it knows the current intensity of market buys and sells. What
+it needs is the expected number of extra market orders still to come. With
+x = s - s_bar the excitation above its stationary level, the expectation obeys
+the linear ODE dx/dt = M x, where M = -diag(beta) plus the alpha-weighted map
+from x to the excess intensities. The expected excess count over the next h
+minutes is then S M^-1 (exp(M h) - I) x, with S summing x into intensities;
+`Hawkes.forecast(h)` builds that matrix once. In one dimension it reduces to
+x (1 - e^-(beta - alpha) h) / (beta - alpha), which a test checks, and in two
+dimensions with unequal betas it matches the mean counts of 20,000 simulated
+paths from an empty start.
+
+`FlowLean` multiplies the expected net excess (buys minus sells) by kappa, the
+mid move per expected order, and any `Quoter` given a `signal` quotes around the
+mid plus that shift. `FlowLean.fit` gets kappa by regressing the mid change over
+the next h minutes on the forecast at each market order, without an intercept.
+It recovers a planted permanent impact of 0.4 ticks to within 10% and finds
+nothing in a random walk. Fitted on 2000 minutes of background flow (the same
+Hawkes fit as above), kappa is 0.30, 0.26, 0.19 and 0.12 ticks per order for
+h = 0.25, 0.5, 1 and 2 minutes. The bots use h = 0.5.
+
+![Leaning on Hawkes flow](docs/flow_lean.png)
+
+200 sessions of 390 minutes per row, same seeds as the Hawkes table, so the rows
+without a lean are that table again:
+
+| strategy        | lean | market orders | informed flow | mean P&L (se) | fills | spread | adverse, 1 min | inventory |
+|-----------------|------|---------------|---------------|---------------|-------|--------|----------------|-----------|
+| join the touch  | no   | Hawkes        | no            | -22.8 (6.9)   | 240   | 197.0  | -119.9         | -100.0    |
+| join the touch  | yes  | Hawkes        | no            | 15.4 (6.6)    | 143   | 161.7  | -98.0          | -48.3     |
+| GLFT, gamma 0.3 | no   | Hawkes        | no            | -63.0 (5.3)   | 220   | 195.6  | -165.6         | -93.1     |
+| GLFT, gamma 0.3 | yes  | Hawkes        | no            | -34.1 (4.7)   | 184   | 167.8  | -149.9         | -52.2     |
+| join the touch  | no   | Hawkes        | yes           | -98.1 (7.7)   | 331   | 271.5  | -145.1         | -224.5    |
+| join the touch  | yes  | Hawkes        | yes           | 20.1 (6.9)    | 197   | 224.8  | -134.3         | -70.6     |
+| GLFT, gamma 0.3 | no   | Hawkes        | yes           | -73.9 (5.1)   | 298   | 264.8  | -205.6         | -133.1    |
+| GLFT, gamma 0.3 | yes  | Hawkes        | yes           | -39.1 (4.9)   | 258   | 237.7  | -192.3         | -84.6     |
+| GLFT, gamma 0.3 | no   | Poisson       | no            | 67.0 (1.3)    | 150   | 110.8  | -19.3          | -24.5     |
+| GLFT, gamma 0.3 | yes  | Poisson       | no            | 55.3 (1.2)    | 126   | 97.4   | -21.8          | -20.4     |
+
+Paired over the same seeds, the lean is worth 38.3 ticks a session (se 9.0) to
+the touch quoter and 28.9 (se 6.4) to GLFT on Hawkes flow, and 34.8 (se 7.1) to
+GLFT with the informed trader as well. The touch quoter goes from losing to
+making money in both cases. GLFT gets back about half of what clustering took
+from it.
+
+The attribution columns say where the gain comes from. Spread capture goes
+down, because the bot fills less (184 fills against 220 for GLFT). The adverse
+move in the first minute after a fill barely changes. Most of the gain is in the
+inventory term: without the lean the bot keeps buying into a burst of sells and
+carries that position while the burst runs on. With it, the bot's bid has
+already stepped back and its ask has come down, so it sheds the position into
+the same burst instead. The first-minute loss stays because the print that
+fills the bot is often the first order of a burst, and nothing before it
+predicted it.
+
+The middle panel scales kappa by 0 to 3. The touch quoter peaks at the fitted
+kappa (15.4) and falls off on both sides. GLFT keeps improving up to 1.5 times
+kappa (-24.3) and is flat beyond that. A regression over all market orders
+underweights the moments that matter to a market maker, since fills happen
+during bursts, so leaning harder than the unconditional fit is not surprising.
+
+The lean costs money where there is nothing to read: on Poisson flow the same
+fitted model sees bursts that predict nothing, and GLFT gives up 11.7 ticks a
+session (se 1.8). The signal has to be fitted on the flow it trades against.
+
+## P&L attribution
+
+`attribution.attribute(fills, tape, horizon, end)` splits a session's P&L
+exactly. For a fill of signed size q at price p, with m_0 the mid just before
+it, m_h the mid `horizon` minutes later (capped at the close) and m_T the
+closing mid,
+
+```
+q (m_T - p) = q (m_0 - p) + q (m_h - m_0) + q (m_T - m_h)
+                spread      adverse          inventory
+```
+
+Summed over fills and less fees, the three terms add up to the account value
+marked at the closing tape mid, to 1e-9 in a test with maker rebates. Spread
+plus adverse is the fill's markout at the horizon, which ties it to
+`markout.py`. The split depends on the horizon: everything that happens to the
+price within it counts as adverse selection, everything after it as the cost of
+holding inventory. When the book was one-sided before a fill there is no mid,
+and the fill gets no spread credit.
 
 ## Install
 
@@ -514,6 +611,11 @@ sim.run(390)
 fills = sim.contexts[0].account.fills
 curve(fills, markouts(fills, sim.tape, [0, 1, 5, 30], sim.end))
 # mean markout per lot 0.50, 0.42, 0.23, 0.11 over 271 fills
+
+from mmsim.attribution import attribute
+
+a = attribute(fills, sim.tape, 1.0, sim.end)
+a.spread, a.adverse, a.inventory, a.total   # (178.0, -63.0, -91.5, 23.5)
 ```
 
 ```python
@@ -533,9 +635,10 @@ eq.lam[0], eq.Sigma[-1], eq.profit                     # (0.901, 0.074, 0.886)
 ```
 
 `python examples/as_replication.py`, `cst_sessions.py`, `glft_quotes.py`,
-`informed_flow.py`, `why_spreads.py`, `queue_value.py`, `latency_cost.py` and
-`hawkes_flow.py` redraw the eight charts. The session experiments run 1600 to
-6800 sessions on all cores; `latency_cost.py` is the longest at 8 minutes here.
+`informed_flow.py`, `why_spreads.py`, `queue_value.py`, `latency_cost.py`,
+`hawkes_flow.py` and `flow_lean.py` redraw the nine charts. The session
+experiments run 1600 to 6800 sessions on all cores; `latency_cost.py` is the
+longest at 8 minutes here and `flow_lean.py` takes 6.
 
 ## Notes
 
