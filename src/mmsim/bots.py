@@ -2,21 +2,69 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 from . import avellaneda, glft
 from .accounting import Fill
 from .book import Side
-from .sim import Agent, Context
+from .hawkes import Hawkes, Tracker
+from .markout import Tape
+from .sim import Agent, Context, Print
+
+
+class FlowLean:
+    def __init__(self, model: Hawkes, kappa: float, horizon: float = math.inf) -> None:
+        self.kappa = kappa
+        self.tracker = Tracker(model, horizon)
+
+    @classmethod
+    def fit(
+        cls, model: Hawkes, times: np.ndarray, marks: np.ndarray, tape: Tape, horizon: float
+    ) -> FlowLean:
+        tr = Tracker(model, horizon)
+        x = np.empty(len(times))
+        for n, (t, m) in enumerate(zip(times, marks, strict=True)):
+            tr.update(t, m)
+            e = tr.excess(t)
+            x[n] = e[Side.BUY] - e[Side.SELL]
+        ok = times + horizon <= tape.t[-1]
+        y = tape.at(times[ok] + horizon) - tape.at(times[ok])
+        return cls(model, float(x[ok] @ y / (x[ok] @ x[ok])), horizon)
+
+    def observe(self, p: Print) -> None:
+        self.tracker.update(p.t, p.side)
+
+    def shift(self, t: float) -> float:
+        e = self.tracker.excess(t)
+        return self.kappa * float(e[Side.BUY] - e[Side.SELL])
 
 
 class Quoter(Agent):
-    def __init__(self, size: int = 1, max_position: int | None = None, keep: int = 0) -> None:
+    def __init__(
+        self,
+        size: int = 1,
+        max_position: int | None = None,
+        keep: int = 0,
+        signal: FlowLean | None = None,
+    ) -> None:
         self.size = size
         self.max_position = max_position
         self.keep = keep
+        self.signal = signal
         self._oids: dict[Side, int | None] = {Side.BUY: None, Side.SELL: None}
 
     def targets(self, ctx: Context) -> tuple[int | None, int | None]:
         raise NotImplementedError
+
+    def fair(self, ctx: Context) -> float | None:
+        mid = ctx.mid
+        if mid is None or self.signal is None:
+            return mid
+        return mid + self.signal.shift(ctx.t)
+
+    def on_trade(self, ctx: Context, p: Print) -> None:
+        if self.signal is not None:
+            self.signal.observe(p)
 
     def on_start(self, ctx: Context) -> None:
         self.requote(ctx)
@@ -56,15 +104,18 @@ class SymmetricQuoter(Quoter):
         size: int = 1,
         max_position: int | None = None,
         keep: int = 0,
+        signal: FlowLean | None = None,
     ) -> None:
-        super().__init__(size, max_position, keep)
+        super().__init__(size, max_position, keep, signal)
         self.half_spread = half_spread
 
     def targets(self, ctx: Context) -> tuple[int | None, int | None]:
-        mid = ctx.mid
+        mid = self.fair(ctx)
         if mid is None:
             return None, None
-        return math.floor(mid - self.half_spread), math.ceil(mid + self.half_spread)
+        bid = min(math.floor(mid - self.half_spread), ctx.ask - 1)
+        ask = max(math.ceil(mid + self.half_spread), ctx.bid + 1)
+        return bid, ask
 
 
 class AvellanedaStoikov(Quoter):
@@ -78,15 +129,16 @@ class AvellanedaStoikov(Quoter):
         size: int = 1,
         max_position: int | None = None,
         keep: int = 0,
+        signal: FlowLean | None = None,
     ) -> None:
-        super().__init__(size, max_position, keep)
+        super().__init__(size, max_position, keep, signal)
         self.gamma = gamma
         self.sigma = sigma
         self.k = k
         self.horizon = horizon
 
     def targets(self, ctx: Context) -> tuple[int | None, int | None]:
-        s = ctx.mid
+        s = self.fair(ctx)
         if s is None:
             return None, None
         tau = ctx.end - ctx.t
@@ -97,13 +149,20 @@ class AvellanedaStoikov(Quoter):
 
 
 class GLFT(Quoter):
-    def __init__(self, model: glft.Model, *, size: int = 1, keep: int = 0) -> None:
-        super().__init__(size, model.Q * size, keep)
+    def __init__(
+        self,
+        model: glft.Model,
+        *,
+        size: int = 1,
+        keep: int = 0,
+        signal: FlowLean | None = None,
+    ) -> None:
+        super().__init__(size, model.Q * size, keep, signal)
         self.model = model
         self.bids, self.asks = model.quotes(math.inf)
 
     def targets(self, ctx: Context) -> tuple[int | None, int | None]:
-        s = ctx.mid
+        s = self.fair(ctx)
         if s is None:
             return None, None
         Q = self.model.Q
