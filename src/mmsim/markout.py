@@ -23,7 +23,13 @@ class Tape:
         self.mid.append(mid)
 
     def at(self, t) -> np.ndarray:
-        i = np.searchsorted(self.t, t, side="right") - 1
+        return self._lookup(t, "right")
+
+    def before(self, t) -> np.ndarray:
+        return self._lookup(t, "left")
+
+    def _lookup(self, t, side: str) -> np.ndarray:
+        i = np.searchsorted(self.t, t, side=side) - 1
         if np.any(i < 0):
             raise ValueError("no mid on the tape that early")
         return np.asarray(self.mid)[i]

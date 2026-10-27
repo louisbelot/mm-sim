@@ -21,8 +21,11 @@ def test_tape_keeps_the_last_mid_of_each_instant():
     tp = tape()
     assert tp.t == [0, 1, 3]
     assert list(tp.at([0, 0.5, 1, 2.9, 3, 10])) == [100.5, 100.5, 101.5, 101.5, 100, 100]
+    assert list(tp.before([0.5, 1, 1.5, 3, 3.5])) == [100.5, 100.5, 101.5, 101.5, 100]
     with pytest.raises(ValueError):
         tp.at(-1)
+    with pytest.raises(ValueError):
+        tp.before(0)
 
 
 def test_markouts_by_hand():

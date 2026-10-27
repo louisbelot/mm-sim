@@ -31,6 +31,19 @@ class FlowLean:
         y = tape.at(times[ok] + horizon) - tape.at(times[ok])
         return cls(model, float(x[ok] @ y / (x[ok] @ x[ok])), horizon)
 
+    @classmethod
+    def from_impact(
+        cls,
+        model: Hawkes,
+        times: np.ndarray,
+        marks: np.ndarray,
+        tape: Tape,
+        horizon: float = math.inf,
+    ) -> FlowLean:
+        sign = np.where(marks == Side.BUY, 1.0, -1.0)
+        moved = tape.at(times) - tape.before(times)
+        return cls(model, float(sign @ moved / len(times)), horizon)
+
     def observe(self, p: Print) -> None:
         self.tracker.update(p.t, p.side)
 
