@@ -259,9 +259,10 @@ class Simulator:
         taker_fee: float = 0.0,
         record_every: float | None = 1.0,
         latency: Mapping[Agent, Latency] | None = None,
+        book: Callable[[], Book] = Book,
     ) -> None:
         latency = latency or {}
-        self.book = Book()
+        self.book = book()
         self.tape = Tape()
         self.flow = flow
         self.rng = random.Random(seed)
