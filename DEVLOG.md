@@ -463,3 +463,63 @@ Design notes and things that went wrong:
 
 Next: replace the unconditional kappa with a fit weighted the way fills are,
 then move to the C API on the C++ engine so it can replace the Python book.
+
+## 2026-10-27: The C++ engine as the book, and a tournament
+
+The orderbook repo now has a C API and a ctypes package, so the simulator can
+match on the real engine. The same day adds the first multi-bot comparison.
+
+Built:
+
+- `Simulator(book=...)` takes a book factory. The default is still the Python
+  book.
+- `NativeBook` subclasses the Python `Book` and sends submit, cancel and modify to
+  the engine. It then applies the returned events to an order-level view (rest
+  the taker if it was accepted, not canceled and has quantity left, reduce
+  makers on trades, remove canceled orders, rebuild the order on a modify that
+  loses priority). The C API gives depth by level and lookup by id but no
+  per-order queue, and the bots and the flow need owner and queue position, so
+  the view is what `ahead`, `levels` and `orders` read. `audit()` checks the view
+  against the engine's own audit, depth, order count and `find` for every order.
+  `deepcopy` (used for the feed-latency replica) builds a fresh engine book and
+  resubmits the resting orders in queue order.
+- `tournament.py`: `session` runs several bots in one session with seats shuffled
+  by seed and everyone marked at the closing tape mid, returning P&L, position,
+  fills and the spread/adverse/inventory split. `standings` ranks by mean, pairs
+  each bot with its solo run for the crowding cost, and counts wins (ties split).
+- `examples/tournament.py` and `examples/native_speed.py`.
+
+Checks (measured today):
+
+- 256 tests (was 208). 30 seeds of 2000 random commands give the same events
+  and resting orders as the reference book from `NativeBook`, with `audit`
+  every 100 commands. 12 whole sessions (four bot and flow combinations, three
+  seeds, one with all latency legs and jitter) give the same position, cash and
+  fills on the Python book and `NativeBook`, and equal resting books at the end.
+- Two injected bugs in the view (ignoring partial fills of a taker, keeping
+  priority when a modify raises the quantity) fail 42 and 31 of the 43 native
+  tests.
+- Speed: a 390-minute GLFT session takes 0.29 s on the Python book and 0.32 s
+  through the engine, 169 fills on both. The session cost is Python, not the
+  book.
+- Tournament, 100 sessions each: on Poisson flow every bot earns less in company
+  (touch 146 alone to 96, GLFT 69 to 15). On Hawkes flow the touch bot goes from
+  160 alone to -107 together and the leaning GLFT is the only positive row (3.9,
+  se 2.7), while GLFT and AS also do better in company than alone.
+
+Design notes and things that went wrong:
+
+- The orderbook repo is private, so mm-sim's CI cannot fetch it with the default
+  token. The native tests skip when the package or the shared library is
+  missing, which means CI covers only the Python path and the native checks run
+  locally.
+- First version of the tournament example crashed because `pool.map` returns a
+  one-shot iterator and I read it once per seed. Materialising the lists fixed
+  it.
+- Each bot reads the others' quotes as the market, since its own orders are the
+  only ones hidden from `ctx.bid` and `ctx.ask`. That is why crowding is not just
+  a split of the same fills: a tight competitor changes the spread another bot
+  measures. I have not separated that effect from queue sharing.
+
+Next: replay real ITCH flow as the background market on this engine, then fit the
+arrival intensities from it. After that the fill-weighted kappa for the lean.
