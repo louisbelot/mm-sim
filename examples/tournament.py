@@ -19,7 +19,6 @@ SESSIONS = 100
 SKY = CSTParams.sky_perfect()
 TRUE = Hawkes.symmetric(SKY.mu, 0.6, 0.1, 6.0)
 MODEL = Model(1.0, 2.1, 3.6, 0.3, 5)
-HORIZON = 0.5
 NAMES = ["join the touch", "AS, gamma 0.001", "GLFT", "GLFT + lean"]
 
 
@@ -40,7 +39,7 @@ def make(name, hk, kappa):
         case "GLFT":
             return GLFT(MODEL, keep=1)
         case "GLFT + lean":
-            return GLFT(MODEL, keep=1, signal=FlowLean(hk, kappa, HORIZON))
+            return GLFT(MODEL, keep=1, signal=FlowLean(hk, kappa))
 
 
 def play(args):
@@ -56,7 +55,7 @@ def calibrate():
     times = np.array([p.t for p in sim.prints])
     marks = np.array([int(p.side) for p in sim.prints])
     hk = fit(times, marks, 2000.0, 2)
-    return hk, FlowLean.fit(hk, times, marks, sim.tape, HORIZON).kappa
+    return hk, FlowLean.from_impact(hk, times, marks, sim.tape).kappa
 
 
 def table(label, flow, hk, kappa, pool):
@@ -116,7 +115,7 @@ def chart(rows, path):
 
 if __name__ == "__main__":
     hk, kappa = calibrate()
-    print(f"fitted lean kappa {kappa:.3f}")
+    print(f"lean kappa (impact per market order) {kappa:.3f}")
     with ProcessPoolExecutor() as pool:
         table("Poisson flow", poisson, hk, kappa, pool)
         rows = table("Hawkes flow", hawkes, hk, kappa, pool)

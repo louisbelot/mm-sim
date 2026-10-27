@@ -523,3 +523,131 @@ Design notes and things that went wrong:
 
 Next: replay real ITCH flow as the background market on this engine, then fit the
 arrival intensities from it. After that the fill-weighted kappa for the lean.
+
+## 2026-10-27: Calibrating the lean
+
+The plan was a kappa fitted the way fills are weighted, because the sweep on
+2026-10-23 said GLFT wanted about 1.5 times the regression kappa. Before
+building it I checked whether the gap was real. It was a timing bug plus a low
+draw of a noisy estimate, and fill weighting turned out not to matter. What
+replaces it is an estimate of the same quantity that is six times tighter, and
+two flows and two bots that show how far a fair-value shift gets you.
+
+Real NASDAQ data was first on the list, but this session's network could not
+reach NASDAQ's or LOBSTER's servers, so that is still next.
+
+Built:
+
+- `Simulator.prints`: every aggressive order as a `Print`, stamped on the
+  simulator's clock, from the first command on (warm-up included).
+- `HawkesFlow` no longer keeps a clock or a `markets` list. The examples fit
+  their Hawkes models and kappas from `sim.prints`.
+- `Tape.before(t)`, the last mid strictly before t, next to `Tape.at`.
+- `FlowLean.from_impact`: kappa is the average signed change in the mid across
+  each market order, with the forecast running to an infinite horizon.
+- `examples/flow_lean.py` rewritten: both estimators over 40 independent
+  2000-minute histories, a sweep of both bots at 1000 sessions per point on an
+  absolute kappa scale, the expected P&L of each calibration, and the strategy
+  table with the impact lean. About 20,000 sessions, 100 minutes on four cores.
+  It is split into `compute`, `report` and `chart` so the chart can be redrawn
+  from saved results.
+- `examples/tournament.py`: the leaning entrant uses `from_impact`.
+
+Checks (measured today):
+
+- 215 tests (was 213). 24 fixed sessions (Poisson and Hawkes flow, five bots,
+  half of them with every latency leg, jitter and an informed trader) give
+  bit-identical P&L, cash, fills and tapes before and after each library commit,
+  and the README usage example still prints (27.0, 2, 208).
+- The clock: on the 2000-minute history behind the old tables, 34.6% of
+  `HawkesFlow`'s market-order times were early against the simulator's and 54.5%
+  late, by up to 1.6e-12. 15.8% of orders read the pre-order mid off the tape.
+  Regression kappa at h = 0.5 with the flow's times and with the simulator's:
+  0.256 and 0.194 on seed 11, 0.288 and 0.275 on seed 12, 0.396 and 0.331 on
+  seed 13. The Hawkes fit itself does not notice (3570 orders, the same
+  branching matrix and KS statistic as before).
+- The new print test fails if prints are stamped one ulp early. Three injected
+  bugs in `from_impact` (reading the mid 1e-6 before the order, using the size
+  of each move without its sign, comparing the tape with itself) each fail one
+  of its two tests; the sign bug only fails the random-walk one, which is why
+  there are two.
+- 40 histories of 2000 minutes (143,320 market orders), the seed-11 Hawkes fit
+  throughout: regression kappa 0.384, 0.393, 0.388 and 0.374 at h = 0.25, 0.5, 1
+  and 2, standard deviations 0.11 to 0.17. Impact per order 0.369, sd 0.019. The
+  ratio of the half-minute mid change to the forecast is 0.36 to 0.42 in nine
+  deciles of the forecast out of ten. Measured from the mid just before the
+  order with a side intercept, the slope is 0.381 against 0.392 from the mid
+  after.
+- The full forecast is 1.361 times the half-minute one over the states seen in
+  the history (correlation 0.995), so the impact lean is 0.514 on the
+  half-minute scale.
+- Sweep on Hawkes flow, 1000 sessions per point, kappa 0 to 1.0 on the
+  half-minute scale. GLFT: -61.5, -49.5, -41.8, -31.0, -33.1, -24.9, -27.4, -31.4,
+  -36.0 (se 1.7 to 2.5), and -45.7 at 1.2 in a separate run. A cubic peaks at
+  0.57 with -27.2 (chi-squared 8.1 on 5 degrees of freedom). The touch quoter:
+  -34.6, 7.1, 10.7, 9.1, 13.7, -0.8, -3.1, -12.2, -23.4 (se 3.1 to 3.6). The first
+  200 seeds of GLFT's kappa = 0 point reproduce the Hawkes table (-62.98 against
+  -63.0).
+- GLFT with the impact lean from seed 11 (0.378, infinite horizon): -26.7 (se
+  1.7), 166 fills. Averaged over the 40 histories and read off the cubic, the
+  regression fit gives -30.9 (worst tenth -38.3) and the impact fit -27.5
+  (worst tenth -28.0).
+- The example's sweep sessions equal the exploratory runs to the last bit on
+  every cell checked (three seeds at two kappas), and its full run reproduces
+  every GLFT point.
+- Second flow (0.5 own, 0.2 cross, beta 3): impact 0.404, regression 0.143 on
+  seed 11, full forecast 1.486 times the half-minute one. GLFT at 0, 0.5, 1, 1.5
+  and 2 times the impact lean: 50.8, 52.7, 47.5, 43.1, 35.4 (se 1.1 to 1.3).
+  Attribution, lean minus none, 400 sessions: spread -14.1, adverse -1.5,
+  inventory +11.8 there, against -48.3, +33.3, +46.3 on the main flow.
+- Fill weighting: 219,312 market orders filled the GLFT bot over 1000 sessions.
+  Slope of the half-minute move from the pre-order mid on the forecast before
+  the order, with a side intercept: 0.640 on those orders, 0.619 on all 729,494.
+- With GLFT in the book the impact of a market order falls to 0.204 (from 0.369
+  without it) and rises back as the bot leans harder (0.233 at kappa 0.1, 0.266
+  at 0.2). The regression on the bot's own sessions gives 0.517 at h = 0.5 and
+  keeps rising with h (0.94 at 5 minutes) on the full book's mid. Leaning at 0.5,
+  over 200 sessions: 0.551 on the full book's mid and 0.752 on everyone else's.
+  GLFT's holding time by Little's law is 1.9 minutes.
+- Strategy table with the impact lean, 200 sessions per row: paired gains of
+  35.8 (se 10.2) for the touch quoter and 38.6 (6.3) for GLFT on Hawkes flow,
+  33.1 (6.6) for GLFT with the informed trader, -21.0 (1.9) for GLFT on Poisson
+  flow. The rows without a lean reproduce the Hawkes table's means.
+- Tournament, 100 sessions: on Hawkes flow the leaning GLFT makes 22.9 (se 2.6)
+  together and -19.3 alone, against 3.9 and -38.2 before. The solo runs of the
+  other three bots are unchanged.
+
+Design notes and things that went wrong:
+
+- The bug was two clocks. The flow kept its own by adding each thinning step,
+  the simulator added the step's total, and floating-point addition is not
+  associative. Keeping the flow's clock in step would have been possible
+  (subtraction is exact when the two values are within a factor of two, so
+  t + (stop - t) is stop in practice) but not guaranteed. The simulator owns
+  time, so it records the prints, and the flow does not need a clock at all.
+  The old test of the flow's clock compared it with `approx`, which is how the
+  drift survived.
+- The README's reading of the old numbers (kappa falling with the horizon, so
+  part of the impact must be transient; leaning harder than the fit because
+  fills come in bursts) explained noise. The population kappa is flat in h.
+- 200 sessions per point cannot find the top of a flat curve: at kappa 0.3 the
+  first 200 seeds give -38.3 and 1000 give -31.0. The sweep now runs 1000.
+- For a while I thought the answer was a fixed point: fit kappa on sessions
+  where the bot trades with that kappa. The first numbers agreed with the peak
+  (0.52), but they were read on the full book's mid, which includes the bot's
+  own requote at the same instant. On everyone else's mid the fit is 0.75 while
+  leaning at 0.5, and following it overshoots.
+- The touch quoter rounds fair minus and plus half a tick outward. At a one-tick
+  spread any positive shift moves its ask a tick back and any negative one its
+  bid, so at small kappa it follows only the sign of the forecast and kappa
+  matters once the shift passes a whole tick. The sweep shows exactly that: the
+  first 0.1 is worth 42 ticks, then the curve is flat to 0.4.
+- The impact lean is the right order of magnitude on both flows and the optimum
+  on neither by construction: GLFT wants 1.1 times it here, the touch quoter 0.2
+  to 0.8 times, GLFT on the second flow 0.2 to 0.5 times. On a tick grid GLFT
+  steps a whole tick back once the shift passes 0.09 ticks, and a shift of the
+  mid has no idea how often each side is about to be hit.
+
+Next: real ITCH data as the background flow, once the data can be fetched. Then
+quotes that use the intensity of market orders on each side, not just a shift
+of the mid, following Cartea, Jaimungal and Ricci.

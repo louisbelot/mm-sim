@@ -479,56 +479,150 @@ paths from an empty start.
 
 `FlowLean` multiplies the expected net excess (buys minus sells) by kappa, the
 mid move per expected order, and any `Quoter` given a `signal` quotes around the
-mid plus that shift. `FlowLean.fit` gets kappa by regressing the mid change over
-the next h minutes on the forecast at each market order, without an intercept.
-It recovers a planted permanent impact of 0.4 ticks to within 10% and finds
-nothing in a random walk. Fitted on 2000 minutes of background flow (the same
-Hawkes fit as above), kappa is 0.30, 0.26, 0.19 and 0.12 ticks per order for
-h = 0.25, 0.5, 1 and 2 minutes. The bots use h = 0.5.
+mid plus that shift.
+
+There are two ways to get kappa from a history of prints and mids.
+`FlowLean.fit` regresses the mid change over the next h minutes on the forecast
+at each market order, without an intercept. `FlowLean.from_impact` reads the
+average signed change in the mid across each market order straight off the tape
+(`Tape.before` gives the mid just before an order, `Tape.at` the mid after it).
+On background flow they measure nearly the same thing (0.39 and 0.37 per order
+in the population, below). The expected mid change is linear in the forecast
+(the ratio stays between 0.36 and 0.42 in nine deciles of the forecast out of
+ten) and the slope is the same at every horizon, which is what a permanent price
+impact per market order looks like. If the impact is permanent, the fair value
+is the mid plus the impact times all the excess orders still to come, not just
+those in the next half minute, so `from_impact` forecasts to an infinite
+horizon. For this model that forecast is 1.36 times the half-minute one, so the
+impact lean acts like kappa = 0.51 on the half-minute scale.
+
+An earlier version of this section fitted the regression on one 2000-minute
+history and reported 0.30, 0.26, 0.19 and 0.12 ticks per order for h = 0.25,
+0.5, 1 and 2. Those numbers were wrong twice over. The first problem was a bug:
+the market-order times came from a clock inside `HawkesFlow` that added up the
+same waiting times as the simulator in a different order and drifted from it by
+up to about 1e-12 minutes. A third of the orders were stamped early. About half
+of those had moved the mid, so for one order in six the regression read the mid
+from before the order and counted the order's own impact as part of the move it
+was meant to predict. The simulator now keeps the public tape itself
+(`Simulator.prints`, every aggressive order on its own clock, warm-up included)
+and the flow keeps no clock. Fixed, the same history gives 0.21, 0.19, 0.14 and
+0.08. The second problem is noise. Across 40 independent 2000-minute histories:
+
+| kappa from 2000 minutes                | the history above | mean of 40 | sd    | range          |
+|----------------------------------------|-------------------|------------|-------|----------------|
+| regression, h = 0.5, as first reported | 0.256             |            |       |                |
+| regression, h = 0.5                    | 0.194             | 0.393      | 0.110 | 0.202 to 0.657 |
+| impact per order                       | 0.378             | 0.369      | 0.019 | 0.335 to 0.433 |
+| impact, on the half-minute scale       | 0.514             | 0.502      | 0.025 | 0.456 to 0.589 |
+
+The regression lands anywhere from 0.2 to 0.66, and the history used for the old
+tables is a low draw. In the population it does not fall with the horizon either
+(0.38, 0.39, 0.39 and 0.37 for h = 0.25 to 2); the decline reported before was
+noise. The impact estimate is six times tighter from the same data.
 
 ![Leaning on Hawkes flow](docs/flow_lean.png)
 
-200 sessions of 390 minutes per row, same seeds as the Hawkes table, so the rows
-without a lean are that table again:
+The old sweep scaled that noisy kappa and ran 200 sessions per point, too few to
+find the top of a flat curve: at kappa = 0.3 the first 200 seeds give -38.3 and
+all 1000 give -31.0. The middle panel runs 1000 sessions per point on an absolute
+scale, Hawkes flow, no informed trader, mean P&L per session (se):
+
+| kappa           | 0           | 0.1         | 0.2         | 0.3         | 0.4         | 0.5         | 0.6         | 0.8         | 1.0         |
+|-----------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|
+| GLFT, gamma 0.3 | -61.5 (2.5) | -49.5 (2.3) | -41.8 (2.2) | -31.0 (2.0) | -33.1 (2.0) | -24.9 (1.8) | -27.4 (1.7) | -31.4 (1.8) | -36.0 (1.7) |
+| join the touch  | -34.6 (3.2) | 7.1 (3.2)   | 10.7 (3.1)  | 9.1 (3.3)   | 13.7 (3.2)  | -0.8 (3.4)  | -3.1 (3.3)  | -12.2 (3.6) | -23.4 (3.4) |
+
+GLFT gains quickly up to 0.3, has a flat top around 0.5 and gives ground back
+beyond 0.8. A cubic through the points (chi-squared 8.1 on 5 degrees of freedom)
+peaks at 0.57 with -27.2. Run with the impact lean fitted on the history above
+(0.378 per order, infinite horizon) over the same 1000 seeds, it makes -26.7 (se
+1.7), on the peak with nothing tuned. What each calibration costs it, read off
+the cubic and averaged over the 40 histories:
+
+| kappa fitted on 2000 minutes            | GLFT, mean P&L | worst tenth of histories |
+|-----------------------------------------|----------------|--------------------------|
+| regression                              | -30.9          | -38.3                    |
+| impact, infinite horizon                | -27.5          | -28.0                    |
+| the old tables (regression, clock bug)  | -36.1          |                          |
+
+The regression costs about 4 ticks a session on average and 11 in one history
+in ten.
+
+The touch quoter behaves differently. It rounds the fair value minus and plus
+half a tick outward, so at a one-tick spread any positive shift moves its ask a
+tick back and any negative one its bid. The first 0.1 of kappa is worth 42 ticks
+(-34.6 to 7.1), the curve is flat up to 0.4 (13.7), and it falls once the shift
+often passes a whole tick and steps a quote back two. The impact lean is past
+its top: -0.8 at 0.5.
+
+GLFT's peak is not a law either. On a second Hawkes flow with slower and more
+mutual excitation (0.5 own, 0.2 cross, beta = 3 per minute) the impact is 0.40
+per order and the regression on the same 2000 minutes says 0.14. GLFT makes
+50.8, 52.7, 47.5, 43.1 and 35.4 with the impact lean scaled by 0, 0.5, 1, 1.5
+and 2 (1000 sessions each, se 1.1 to 1.3): there the best lean is half the
+impact or less, and the whole signal is worth about 2 ticks. The attribution
+says why (lean against none, 400 sessions each). On the main flow the lean gives
+up 48 ticks of spread and gets back 33 of first-minute adverse selection and 46
+of inventory. On the second it gives up 14 of spread, gets back 12 of inventory
+and nothing of adverse selection: when a burst of sells also brings buys, the
+fills a shift steps away from are not the bad ones.
+
+So the impact gives the right order of magnitude, not the optimum: GLFT here
+wants about 1.1 times it, the touch quoter 0.2 to 0.8 times, GLFT on the second
+flow 0.2 to 0.5 times. On a tick grid GLFT steps a whole tick back once the shift
+passes 0.09 ticks, so a small expected drift buys a large change in queue
+position, and a shift of the mid has no idea how often each side is about to be
+hit. Cartea, Jaimungal and Ricci solve for the quotes with the intensity of
+market orders on each side in the state, which is the next thing to try.
+
+Two things I expected to explain the old gap did not. One was a regression
+weighted the way fills are, the plan in the devlog: over 219,000 market orders
+that filled the GLFT bot, conditioning on them moves the slope by 3% (0.64
+against 0.62 over all orders in the same sessions). The other was the bot moving
+the market it measures. With GLFT at the touch a market order moves the mid 0.20
+ticks on average instead of 0.37, because the bot's lot absorbs much of it, while
+a burst still moves the price about as far as before. A regression on the bot's
+own sessions sees that steeper response, and also the bot's own quoting. Leaning
+at 0.5, it gives 0.55 on the full book's mid, close to the peak, but that mid
+includes the bot's own requote at the same instant; on everyone else's mid, the
+one the bot is marked at, it gives 0.75, which overshoots.
+
+The bots below use the impact lean. 200 sessions of 390 minutes per row, same
+seeds as the Hawkes table, so the rows without a lean are that table again:
 
 | strategy        | lean | market orders | informed flow | mean P&L (se) | fills | spread | adverse, 1 min | inventory |
 |-----------------|------|---------------|---------------|---------------|-------|--------|----------------|-----------|
-| join the touch  | no   | Hawkes        | no            | -22.8 (6.9)   | 240   | 197.0  | -119.9         | -100.0    |
-| join the touch  | yes  | Hawkes        | no            | 15.4 (6.6)    | 143   | 161.7  | -98.0          | -48.3     |
+| join the touch  | no   | Hawkes        | no            | -22.8 (7.0)   | 240   | 197.0  | -119.9         | -100.0    |
+| join the touch  | yes  | Hawkes        | no            | 12.9 (7.8)    | 126   | 135.9  | -92.6          | -30.4     |
 | GLFT, gamma 0.3 | no   | Hawkes        | no            | -63.0 (5.3)   | 220   | 195.6  | -165.6         | -93.1     |
-| GLFT, gamma 0.3 | yes  | Hawkes        | no            | -34.1 (4.7)   | 184   | 167.8  | -149.9         | -52.2     |
+| GLFT, gamma 0.3 | yes  | Hawkes        | no            | -24.3 (3.7)   | 166   | 147.8  | -133.2         | -39.0     |
 | join the touch  | no   | Hawkes        | yes           | -98.1 (7.7)   | 331   | 271.5  | -145.1         | -224.5    |
-| join the touch  | yes  | Hawkes        | yes           | 20.1 (6.9)    | 197   | 224.8  | -134.3         | -70.6     |
+| join the touch  | yes  | Hawkes        | yes           | -7.3 (7.2)    | 180   | 197.4  | -112.8         | -92.0     |
 | GLFT, gamma 0.3 | no   | Hawkes        | yes           | -73.9 (5.1)   | 298   | 264.8  | -205.6         | -133.1    |
-| GLFT, gamma 0.3 | yes  | Hawkes        | yes           | -39.1 (4.9)   | 258   | 237.7  | -192.3         | -84.6     |
+| GLFT, gamma 0.3 | yes  | Hawkes        | yes           | -40.8 (4.2)   | 236   | 213.5  | -178.3         | -76.0     |
 | GLFT, gamma 0.3 | no   | Poisson       | no            | 67.0 (1.3)    | 150   | 110.8  | -19.3          | -24.5     |
-| GLFT, gamma 0.3 | yes  | Poisson       | no            | 55.3 (1.2)    | 126   | 97.4   | -21.8          | -20.4     |
+| GLFT, gamma 0.3 | yes  | Poisson       | no            | 46.0 (1.3)    | 121   | 92.0   | -27.2          | -18.7     |
 
-Paired over the same seeds, the lean is worth 38.3 ticks a session (se 9.0) to
-the touch quoter and 28.9 (se 6.4) to GLFT on Hawkes flow, and 34.8 (se 7.1) to
+Paired over the same seeds, the lean is worth 35.8 ticks a session (se 10.2) to
+the touch quoter and 38.6 (se 6.3) to GLFT on Hawkes flow, and 33.1 (se 6.6) to
 GLFT with the informed trader as well. The touch quoter goes from losing to
-making money in both cases. GLFT gets back about half of what clustering took
-from it.
+making money without the informed trader and close to even with it. GLFT still
+makes 67.0 on Poisson flow against -24.3 here, so clustering costs it about 90
+ticks a session even with the lean.
 
-The attribution columns say where the gain comes from. Spread capture goes
-down, because the bot fills less (184 fills against 220 for GLFT). The adverse
-move in the first minute after a fill barely changes. Most of the gain is in the
-inventory term: without the lean the bot keeps buying into a burst of sells and
-carries that position while the burst runs on. With it, the bot's bid has
-already stepped back and its ask has come down, so it sheds the position into
-the same burst instead. The first-minute loss stays because the print that
-fills the bot is often the first order of a burst, and nothing before it
-predicted it.
-
-The middle panel scales kappa by 0 to 3. The touch quoter peaks at the fitted
-kappa (15.4) and falls off on both sides. GLFT keeps improving up to 1.5 times
-kappa (-24.3) and is flat beyond that. A regression over all market orders
-underweights the moments that matter to a market maker, since fills happen
-during bursts, so leaning harder than the unconditional fit is not surprising.
+The attribution columns say where the gain comes from. Spread capture goes down,
+because the bot fills less (166 fills against 220 for GLFT). The first-minute
+adverse term improves by 32 ticks and the inventory term by 54. Without the lean
+the bot keeps buying into a burst of sells and carries that position while the
+burst runs on. With it, the bot's bid has already stepped back and its ask has
+come down, so it sheds the position into the same burst instead. Most of the
+first-minute loss stays, because the print that fills the bot is often the first
+order of a burst and nothing before it predicted it.
 
 The lean costs money where there is nothing to read: on Poisson flow the same
-fitted model sees bursts that predict nothing, and GLFT gives up 11.7 ticks a
-session (se 1.8). The signal has to be fitted on the flow it trades against.
+fitted model sees bursts that predict nothing, and GLFT gives up 21.0 ticks a
+session (se 1.9). The signal has to be fitted on the flow it trades against.
 
 ## P&L attribution
 
@@ -589,29 +683,31 @@ shuffled by seed. 100 sessions of 390 minutes, P&L in ticks:
 
 | Poisson flow    | together (se) | alone | crowding (se) | sd   | mean/sd | wins | fills |
 |-----------------|---------------|-------|---------------|------|---------|------|-------|
-| join the touch  | 95.9 (5.5)    | 146.1 | -50.3 (14.1)  | 55.3 | 1.74    | 0.74 | 245   |
-| AS, gamma 0.001 | 70.1 (1.3)    | 83.3  | -13.2 (3.0)   | 13.4 | 5.22    | 0.26 | 206   |
-| GLFT            | 14.6 (1.0)    | 68.9  | -54.2 (2.0)   | 9.6  | 1.53    | 0.00 | 48    |
-| GLFT + lean     | 8.5 (0.6)     | 54.6  | -46.0 (1.7)   | 5.7  | 1.49    | 0.00 | 26    |
+| join the touch  | 82.3 (5.6)    | 146.1 | -63.8 (14.5)  | 56.4 | 1.46    | 0.72 | 245   |
+| AS, gamma 0.001 | 66.3 (1.3)    | 83.3  | -17.0 (3.0)   | 13.5 | 4.91    | 0.28 | 205   |
+| GLFT            | 15.4 (0.9)    | 68.9  | -53.5 (2.0)   | 9.3  | 1.65    | 0.00 | 51    |
+| GLFT + lean     | 11.3 (0.6)    | 46.0  | -34.8 (1.9)   | 5.8  | 1.93    | 0.00 | 27    |
 
 | Hawkes flow     | together (se) | alone  | crowding (se) | sd    | mean/sd | wins | fills |
 |-----------------|---------------|--------|---------------|-------|---------|------|-------|
-| GLFT + lean     | 3.9 (2.7)     | -38.2  | 42.1 (7.6)    | 27.3  | 0.14    | 0.60 | 48    |
-| GLFT            | -53.6 (5.1)   | -71.7  | 18.1 (9.2)    | 50.6  | -1.06   | 0.00 | 65    |
-| AS, gamma 0.001 | -64.4 (6.9)   | -118.0 | 53.6 (23.9)   | 69.1  | -0.93   | 0.04 | 168   |
-| join the touch  | -106.8 (23.5) | 160.0  | -266.9 (39.0) | 234.9 | -0.45   | 0.36 | 204   |
+| GLFT + lean     | 22.9 (2.6)    | -19.3  | 42.2 (5.3)    | 26.4  | 0.87    | 0.67 | 42    |
+| GLFT            | -54.4 (6.4)   | -71.7  | 17.3 (9.2)    | 63.7  | -0.85   | 0.00 | 65    |
+| AS, gamma 0.001 | -67.7 (8.9)   | -118.0 | 50.3 (23.5)   | 89.0  | -0.76   | 0.00 | 166   |
+| join the touch  | -112.9 (25.4) | 160.0  | -273.0 (34.7) | 253.9 | -0.44   | 0.33 | 202   |
 
 ![bots alone and together on Hawkes flow](docs/tournament.png)
 
-On Poisson flow every bot makes less in company, and the two GLFT bots lose
-about four fifths of their profit. Nobody has an edge there, so competition only
-takes, and these two quote one tick behind the best price they see, which is now
-set by the touch bot and AS. On Hawkes flow the touch bot goes from 160 alone to
--107 in company, while the leaning bot is the only one above zero and GLFT and
-AS do better in company than alone. I have not
-isolated why. One candidate is that the touch bot, now sharing the front of the
-queue, takes the bursts that used to hit the others. The mean/sd column is per
-session, not annualised.
+The leaning bot uses the impact lean from "Leaning on the flow" above (0.378
+ticks per order, infinite horizon); the other bots' solo runs are the same as
+before. On Poisson flow every bot makes less in company, and the
+two GLFT bots lose about three quarters of their profit. Nobody has an edge
+there, so competition only takes, and these two quote one tick behind the best
+price they see, which is now set by the touch bot and AS. On Hawkes flow the
+touch bot goes from 160 alone to -113 in company, while the leaning bot is the
+only one above zero (22.9 together, -19.3 alone) and GLFT and AS also do better
+in company than alone. I have not isolated why. One candidate is that the touch
+bot, now sharing the front of the queue, takes the bursts that used to hit the
+others. The mean/sd column is per session, not annualised.
 
 ## Install
 
@@ -701,8 +797,10 @@ eq.lam[0], eq.Sigma[-1], eq.profit                     # (0.901, 0.074, 0.886)
 `python examples/as_replication.py`, `cst_sessions.py`, `glft_quotes.py`,
 `informed_flow.py`, `why_spreads.py`, `queue_value.py`, `latency_cost.py`,
 `hawkes_flow.py`, `flow_lean.py` and `tournament.py` redraw the ten charts. The session
-experiments run 1600 to 6800 sessions on all cores; `latency_cost.py` is the
-longest at 8 minutes here, `flow_lean.py` takes 6 and `tournament.py` 1.
+experiments run 1600 to 20,000 sessions on all cores. `flow_lean.py` is the
+longest: its 1000-session sweep makes it about 20,000 sessions, which took 100
+minutes on four cores. `latency_cost.py` takes 8 minutes here and
+`tournament.py` 1.
 
 ## Notes
 
@@ -744,7 +842,10 @@ before any callback runs, and orders a bot sends from a callback are queued
 behind it. Timers, orders in flight, fill reports and delayed feed updates all
 wait in one heap keyed by time and a sequence number, so two things due at the
 same instant happen in the order they were scheduled. The background flow draws
-its next event with the time to the top of the heap as its horizon.
+its next event with the time to the top of the heap as its horizon. The clock
+belongs to the simulator alone: the mid tape and the trade prints (`sim.tape`,
+`sim.prints`) are both stamped with it, so a print's time finds the mid its own
+order left behind.
 
 **Avellaneda-Stoikov on a book.** The model allows a quote on the far side of
 the mid; on a book that is a market order. The bot rounds the model's prices
