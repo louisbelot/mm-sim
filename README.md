@@ -11,8 +11,9 @@ queue-position tracking with a measurement of what priority is worth, per-agent
 latency on market data and order entry, Hawkes processes for clustered
 order flow, a quoting signal that reads the Hawkes intensity off the public
 trade tape, and an exact split of P&L into spread, adverse selection and
-inventory. The C++ [orderbook](https://github.com/louisbelot/orderbook) engine
-and real NASDAQ data come next.
+inventory. Sessions can run on the C++ [orderbook](https://github.com/louisbelot/orderbook)
+engine instead of the Python book, and several bots can compete in one session.
+Real NASDAQ data comes next.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -549,6 +550,69 @@ price within it counts as adverse selection, everything after it as the cost of
 holding inventory. When the book was one-sided before a fill there is no mid,
 and the fill gets no spread credit.
 
+## The C++ matching engine as the book
+
+`Simulator(..., book=NativeBook)` sends every order to the C++
+[orderbook](https://github.com/louisbelot/orderbook) engine through its C API
+and ctypes package. The engine decides every fill. `NativeBook` keeps an
+order-level view built from the engine's event stream, the way a feed handler
+builds a book from a market data feed, because the bots and the flow need
+per-order information (owner, queue position) that the C API only gives by id.
+`audit()` compares that view with the engine's own depth and order lookups.
+
+Two things pin it to the Python book. The same random command stream, with
+cancels, modifies, IOC, FOK, post-only and bad inputs, gives identical events
+and identical resting orders in the same queue order as the brute-force
+reference book (30 seeds of 2000 commands). And whole sessions (Poisson and
+Hawkes flow, three bots, with and without latency) give the same position, cash
+and fill list to the last bit on both books. Breaking the view's handling of
+partial fills or of priority on a modify fails 42 and 31 of the 43 tests.
+
+On a 390-minute GLFT session the Python book takes 0.29 s and the engine path
+0.32 s, with the same 169 fills. The session cost is the flow's event menu and
+the bots in Python, so the engine does not make a simulation faster. What it
+buys is that the matching logic being tested is the one that will replay ITCH
+data. `examples/native_speed.py` prints the timing.
+
+Setup: build the engine (`cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release`
+in the orderbook repo), `pip install -e path/to/orderbook/python`, and point
+`OB_LIBRARY` at the shared library if it is not in `build/`. Without it the
+native tests skip.
+
+## A tournament
+
+`tournament.session` puts several bots in one session against the same flow and
+marks everyone at the closing mid of the tape. `standings` ranks them and pairs
+each bot with its own solo run on the same seeds, so the cost of sharing the
+queue is measured against the same flow instead of guessed. Seat order is
+shuffled by seed. 100 sessions of 390 minutes, P&L in ticks:
+
+| Poisson flow    | together (se) | alone | crowding (se) | sd   | mean/sd | wins | fills |
+|-----------------|---------------|-------|---------------|------|---------|------|-------|
+| join the touch  | 95.9 (5.5)    | 146.1 | -50.3 (14.1)  | 55.3 | 1.74    | 0.74 | 245   |
+| AS, gamma 0.001 | 70.1 (1.3)    | 83.3  | -13.2 (3.0)   | 13.4 | 5.22    | 0.26 | 206   |
+| GLFT            | 14.6 (1.0)    | 68.9  | -54.2 (2.0)   | 9.6  | 1.53    | 0.00 | 48    |
+| GLFT + lean     | 8.5 (0.6)     | 54.6  | -46.0 (1.7)   | 5.7  | 1.49    | 0.00 | 26    |
+
+| Hawkes flow     | together (se) | alone  | crowding (se) | sd    | mean/sd | wins | fills |
+|-----------------|---------------|--------|---------------|-------|---------|------|-------|
+| GLFT + lean     | 3.9 (2.7)     | -38.2  | 42.1 (7.6)    | 27.3  | 0.14    | 0.60 | 48    |
+| GLFT            | -53.6 (5.1)   | -71.7  | 18.1 (9.2)    | 50.6  | -1.06   | 0.00 | 65    |
+| AS, gamma 0.001 | -64.4 (6.9)   | -118.0 | 53.6 (23.9)   | 69.1  | -0.93   | 0.04 | 168   |
+| join the touch  | -106.8 (23.5) | 160.0  | -266.9 (39.0) | 234.9 | -0.45   | 0.36 | 204   |
+
+![bots alone and together on Hawkes flow](docs/tournament.png)
+
+On Poisson flow every bot makes less in company, and the two GLFT bots lose
+about four fifths of their profit. Nobody has an edge there, so competition only
+takes, and these two quote one tick behind the best price they see, which is now
+set by the touch bot and AS. On Hawkes flow the touch bot goes from 160 alone to
+-107 in company, while the leaning bot is the only one above zero and GLFT and
+AS do better in company than alone. I have not
+isolated why. One candidate is that the touch bot, now sharing the front of the
+queue, takes the bursts that used to hit the others. The mean/sd column is per
+session, not annualised.
+
 ## Install
 
 ```
@@ -636,16 +700,16 @@ eq.lam[0], eq.Sigma[-1], eq.profit                     # (0.901, 0.074, 0.886)
 
 `python examples/as_replication.py`, `cst_sessions.py`, `glft_quotes.py`,
 `informed_flow.py`, `why_spreads.py`, `queue_value.py`, `latency_cost.py`,
-`hawkes_flow.py` and `flow_lean.py` redraw the nine charts. The session
+`hawkes_flow.py`, `flow_lean.py` and `tournament.py` redraw the ten charts. The session
 experiments run 1600 to 6800 sessions on all cores; `latency_cost.py` is the
-longest at 8 minutes here and `flow_lean.py` takes 6.
+longest at 8 minutes here, `flow_lean.py` takes 6 and `tournament.py` 1.
 
 ## Notes
 
 **Matching engine.** `book.py` ports the rules of the C++ engine: limit and
 market orders, IOC, FOK, post-only, and modify, which keeps time priority only
-when an order shrinks at the same price. It emits the same event stream, so the
-C++ engine can replace it later without touching the bots. Levels are keyed by
+when an order shrinks at the same price. It emits the same event stream as the
+C++ engine, which `NativeBook` swaps in without touching the bots. Levels are keyed by
 sign times price, with bids negated, so the best level of either side is the
 smallest key and one matching loop serves both. A differential test runs 30 seeds
 of 2000 random commands against a deliberately naive reference book (one flat
