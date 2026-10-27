@@ -1,7 +1,11 @@
 from scripted import limit, make, market
 
 from mmsim.book import OrderType, Side
-from mmsim.sim import Agent, Latency, Print
+from mmsim.bots import GLFT
+from mmsim.flow import CSTParams, HawkesFlow
+from mmsim.glft import Model
+from mmsim.hawkes import Hawkes
+from mmsim.sim import Agent, Latency, Print, Simulator
 
 
 class Tape(Agent):
@@ -77,3 +81,27 @@ def test_no_prints_during_warm_up():
     sim.warm_up(2.0)
     sim.run(1.0)
     assert bot.prints() == []
+    assert sim.prints == [Print(1.0, Side.SELL, 99, 1)]
+
+
+class Mids(Agent):
+    def __init__(self):
+        self.seen = []
+
+    def on_trade(self, ctx, p):
+        self.seen.append((p, ctx.book.mid()))
+
+
+def test_simulator_prints_are_on_its_clock():
+    watcher = Mids()
+    lagged = GLFT(Model(1.0, 2.1, 3.6, 0.3, 5), keep=1)
+    flow = HawkesFlow(CSTParams.sky_perfect(), Hawkes.symmetric(0.94, 0.6, 0.1, 6.0))
+    lat = {lagged: Latency(0.01, 0.01, 0.01, jitter=0.005)}
+    sim = Simulator(flow, [watcher, lagged], seed=3, latency=lat)
+    sim.seed(10_000, 10_001)
+    sim.warm_up(30)
+    sim.run(120)
+    live = [p for p in sim.prints if p.t >= 30]
+    assert len(sim.prints) > len(live) > 100
+    assert [p for p, _ in watcher.seen] == live
+    assert all(mid is None or sim.tape.at(p.t) == mid for p, mid in watcher.seen)

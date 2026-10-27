@@ -31,12 +31,11 @@ ROWS = [
 
 
 def history(T, seed):
-    flow = HawkesFlow(SKY, HAWKES)
-    sim = Simulator(flow, seed=seed)
+    sim = Simulator(HawkesFlow(SKY, HAWKES), seed=seed)
     sim.seed(10_000, 10_001)
     sim.warm_up(T)
-    times = np.array([t for t, _ in flow.markets])
-    marks = np.array([int(s) for _, s in flow.markets])
+    times = np.array([p.t for p in sim.prints])
+    marks = np.array([int(p.side) for p in sim.prints])
     return times, marks, sim.tape
 
 
@@ -65,8 +64,7 @@ def session(args):
 
 
 def trace(model, kappa, seed, T):
-    flow = HawkesFlow(SKY, HAWKES)
-    sim = Simulator(flow, seed=seed)
+    sim = Simulator(HawkesFlow(SKY, HAWKES), seed=seed)
     sim.seed(10_000, 10_001)
     sim.warm_up(T)
     grid = np.arange(0, T, 0.002)
@@ -74,13 +72,13 @@ def trace(model, kappa, seed, T):
     shift = np.empty(len(grid))
     k = 0
     for n, t in enumerate(grid):
-        while k < len(flow.markets) and flow.markets[k][0] <= t:
-            lean.tracker.update(*flow.markets[k])
+        while k < len(sim.prints) and sim.prints[k].t <= t:
+            lean.observe(sim.prints[k])
             k += 1
         shift[n] = lean.shift(t)
     burst = grid[np.argmax(np.abs(shift))]
     sel = (grid >= burst - 2.5) & (grid <= burst + 1.5)
-    prints = [(t - burst, int(side)) for t, side in flow.markets if -2.5 <= t - burst <= 1.5]
+    prints = [(p.t - burst, int(p.side)) for p in sim.prints if -2.5 <= p.t - burst <= 1.5]
     mids = sim.tape.at(grid[sel])
     return grid[sel] - burst, mids - mids[0], shift[sel], prints
 

@@ -75,12 +75,11 @@ def main():
         )
 
     T = 2000.0
-    flow = HawkesFlow(SKY, HAWKES)
-    sim = Simulator(flow, seed=11)
+    sim = Simulator(HawkesFlow(SKY, HAWKES), seed=11)
     sim.seed(10_000, 10_001)
     sim.warm_up(T)
-    times = np.array([t for t, _ in flow.markets])
-    marks = np.array([int(s) for _, s in flow.markets])
+    times = np.array([p.t for p in sim.prints])
+    marks = np.array([int(p.side) for p in sim.prints])
     fitted = fit(times, marks, T, 2)
     rates = np.bincount(marks, minlength=2) / T
     flat = Hawkes.make(rates, np.zeros((2, 2)), 1.0)

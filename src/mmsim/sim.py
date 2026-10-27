@@ -264,6 +264,7 @@ class Simulator:
         latency = latency or {}
         self.book = book()
         self.tape = Tape()
+        self.prints: list[Print] = []
         self.flow = flow
         self.rng = random.Random(seed)
         self._wire = random.Random(f"wire{seed}")
@@ -351,8 +352,9 @@ class Simulator:
     def _execute(self, sender: Context | None, cmd: Command) -> None:
         self._pre_mid = self.book.mid()
         events = cmd(self.book)
+        prints = _prints(self.t, events)
+        self.prints.extend(prints)
         if self._started:
-            prints = _prints(self.t, events)
             for ctx in self.contexts:
                 if ctx._view is None:
                     for p in prints:

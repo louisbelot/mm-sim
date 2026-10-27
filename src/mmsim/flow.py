@@ -110,8 +110,6 @@ class HawkesFlow(ZeroIntelligence):
             raise ValueError("market orders need two dimensions: buys and sells")
         super().__init__(params, owner)
         self.hawkes = hawkes
-        self.t = 0.0
-        self.markets: list[tuple[float, Side]] = []
         self._s = np.zeros((2, 2))
 
     def _market_rate(self, side: Side) -> float:
@@ -119,7 +117,6 @@ class HawkesFlow(ZeroIntelligence):
 
     def _advance(self, dt: float) -> None:
         self._s *= np.exp(-self.hawkes.beta * dt)
-        self.t += dt
 
     def step(
         self, book: Book, rng: random.Random, horizon: float, ids: Iterator[int]
@@ -145,7 +142,6 @@ class HawkesFlow(ZeroIntelligence):
             kind, side = actions[k]
             if kind == _MARKET:
                 self._s[:, side] += self.hawkes.alpha[:, side]
-                self.markets.append((self.t, side))
             return elapsed, self._fire(actions[k], rng, ids)
 
 

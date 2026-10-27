@@ -50,12 +50,11 @@ def play(args):
 
 
 def calibrate():
-    flow = HawkesFlow(SKY, TRUE)
-    sim = Simulator(flow, seed=11)
+    sim = Simulator(HawkesFlow(SKY, TRUE), seed=11)
     sim.seed(10_000, 10_001)
     sim.warm_up(2000.0)
-    times = np.array([t for t, _ in flow.markets])
-    marks = np.array([int(s) for _, s in flow.markets])
+    times = np.array([p.t for p in sim.prints])
+    marks = np.array([int(p.side) for p in sim.prints])
     hk = fit(times, marks, 2000.0, 2)
     return hk, FlowLean.fit(hk, times, marks, sim.tape, HORIZON).kappa
 

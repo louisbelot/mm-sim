@@ -145,20 +145,24 @@ def test_hawkes_flow_rate_and_refit():
     flow = HawkesFlow(SKY, h)
     book, ids, rng = Book(), itertools.count(1), random.Random(1)
     flow.seed(book, 1000, 1001, ids)
-    T = 3000.0
-    while (step := flow.step(book, rng, T - flow.t, ids)) is not None:
-        step[1](book)
-    assert flow.t == pytest.approx(T) and book.audit() == ""
+    T, t = 3000.0, 0.0
+    times, marks = [], []
+    while (step := flow.step(book, rng, T - t, ids)) is not None:
+        t += step[0]
+        ev = step[1](book)
+        if ev[0].type == EventType.ACCEPTED and ev[0].price == 0:
+            times.append(t)
+            marks.append(int(ev[0].side))
+    assert book.audit() == ""
 
-    times = np.array([t for t, _ in flow.markets])
-    marks = np.array([int(s) for _, s in flow.markets])
+    times, marks = np.array(times), np.array(marks)
     assert abs(len(times) / T - 1.88) < 4 * math.sqrt(1.88 / 0.3**2 / T)
     g = fit(times, marks, T, 2)
     assert np.allclose(g.branching, h.branching, atol=0.06)
     assert np.allclose(g.mu, h.mu, rtol=0.15)
 
 
-def test_hawkes_flow_keeps_time_with_the_simulator():
+def test_hawkes_flow_runs_under_the_simulator_with_latency():
     bot = GLFT(Model(1.0, 2.1, 3.6, 0.3, 5))
     flow = HawkesFlow(SKY, Hawkes.symmetric(0.94, 0.6, 0.1, 6.0))
     lat = {bot: Latency(feed=0.01, entry=0.01, response=0.01)}
@@ -166,7 +170,7 @@ def test_hawkes_flow_keeps_time_with_the_simulator():
     sim.seed(1000, 1001)
     sim.warm_up(10)
     sim.run(120)
-    assert flow.t == pytest.approx(sim.t) and sim.book.audit() == ""
+    assert sim.book.audit() == ""
     assert len(sim.contexts[0].account.fills) > 10
 
 
