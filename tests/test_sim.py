@@ -5,7 +5,7 @@ import pytest
 from scripted import limit, make, market
 
 from mmsim.book import Side, Tif
-from mmsim.flow import CSTParams, ZeroIntelligence, prob_fill_first
+from mmsim.flow import CSTParams, PairedFlow, ZeroIntelligence, prob_fill_first
 from mmsim.sim import Agent, Simulator
 
 
@@ -182,12 +182,13 @@ class QueueRacer(Agent):
             ctx.stop()
 
 
+@pytest.mark.parametrize("make", [ZeroIntelligence, PairedFlow])
 @pytest.mark.parametrize("a,b", [(1, 1), (3, 1), (2, 3)])
-def test_queue_race_matches_exact(a, b):
+def test_queue_race_matches_exact(a, b, make):
     sky = CSTParams.sky_perfect()
     n, fills = 1500, 0
     for rep in range(n):
-        sim = Simulator(ZeroIntelligence(sky), [racer := QueueRacer()], seed=rep, record_every=None)
+        sim = Simulator(make(sky), [racer := QueueRacer()], seed=rep, record_every=None)
         bg = iter(range(10**6, 10**7))
         for _ in range(b - 1):
             sim.book.submit(next(bg), Side.BUY, 100, 1)
