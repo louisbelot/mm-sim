@@ -523,3 +523,112 @@ Design notes and things that went wrong:
 
 Next: replay real ITCH flow as the background market on this engine, then fit the
 arrival intensities from it. After that the fill-weighted kappa for the lean.
+
+## 2026-10-28: Real NASDAQ flow, and calibrating the models from it
+
+The bots now quote against a real day of NASDAQ ITCH data (30 December 2019,
+NASDAQ's public sample), and the order flow models get their parameters from
+the same feed.
+
+Built:
+
+- `itch.py`: decodes the order messages of ITCH 5.0 (A, F, E, C, X, D, U, P, Q)
+  into `Msg` tuples with struct layouts that check the length of every message.
+  `extract` walks the 8.3 GB file once through mmap and copies each wanted
+  stock's messages, found by its stock locate code, to its own file
+  (`python -m mmsim.itch FILE SYM... --out data`). 68 s for six symbols.
+- `replay.py`: `ReplayBook` is a `Book` where the real orders live under negative
+  ids and follow the feed exactly, and the bot's orders share their queues. A
+  real execution fills every bot order with priority over the executed order (a
+  better price, or earlier at the same price), up to the executed size. A real
+  add at or through a bot quote fills it. A bot that takes liquidity fills
+  against the displayed real orders without removing them. `best` and `mid`
+  read only real orders, so the tape and the markouts use the market's mid.
+  `ItchFlow` is a flow like `ZeroIntelligence`, so `Simulator`, latency, the
+  tournament code and every bot run on it unchanged. Executions with the same
+  nanosecond timestamp are one batch and one aggressor, with one aggressor id per
+  side. `on_grid` converts prices to cents and drops orders off the cent grid
+  with their later messages, turning a replace across the grid into a delete or
+  an add.
+- `calibrate.py`: Cont-Stoikov-Talreja estimates over a time window: lambda(i)
+  counted at the distance from the opposite best quote at the moment of the add,
+  theta(i) as cancelled shares per minute over the mean resting shares at i
+  (queues sampled on a one-second grid), mu as market shares per minute over the
+  mean limit order size. A replace counts as a cancel and an add. `cst()` gives
+  `CSTParams`, `hawkes(unit)` fits the bivariate Hawkes process on market order
+  times, in seconds by default, and converts back to minutes.
+- `examples/itch_replay.py`: calibration report, real tape against the Poisson
+  and Hawkes models on CSCO, real tape across six symbols, and the chart.
+
+Checks (all measured today):
+
+- 287 tests (was 256).
+- The C++ engine as the reference: `ob-replay --itch` wrote the ITCH for its
+  example session (790 bytes, now `tests/data/session.itch`), and replaying it
+  gives the same final book and the same 1200 traded shares at a value of
+  120,600 cents that `ob-itch` reports. By hand, the top five CSCO levels at
+  noon match `ob-itch --until 12:00` in price, size and order count (5700 x
+  47.58 | 47.59 x 200 at the top). The 11281 vs 11284 live orders are the three
+  $0.0001 stub bids that `on_grid` drops.
+- Twelve random feeds of 3000 messages, generated from a `Book` with adds, sweeps,
+  partial cancels, replaces and deletes, replayed with a quoting bot of size 10,
+  100 or 300: the real orders at the end equal the generating book's, in queue
+  order, and every seed has more than 20 bot fills.
+- Injected bugs: ignoring the queue position, letting the taking bot, a crossing
+  add or an execution move the real book, and not batching sweeps. Each fails at
+  least one test. For calibration: appending the market order per message
+  instead of per batch, an off-by-one distance, forgetting to sample the queue
+  after the last message, and dropping the unit conversion of beta.
+- Calibration recovers a zero-intelligence model it did not see: a 1500-minute
+  simulation from known CSTParams gives lambda within 4 standard errors, theta
+  within 8% and mu within 4 standard errors. A simulated Hawkes process with a
+  25 ms decay comes back with mu within 15%, branching within 0.04 and beta
+  within 15%, in minutes.
+- A hand-worked feed checks every number exactly: rates, both queue profiles,
+  theta, a two-order sweep as one market order of 150, hidden shares.
+
+Results (CSCO, 9:35 to 15:55, twelve 30-minute sessions per row):
+
+- lambda(1) is 184 orders a minute per side and theta(1) 14.2 per share per
+  minute, against 2927 shares resting at the touch. 54% of limit orders are
+  exactly 100 shares, the mean is 272. 4008 market orders, mean 399 shares. 17%
+  of traded shares hit hidden orders.
+- The calibrated Poisson model's mid moves 0.01 times a minute; the tape's moves
+  11.2 times. A touch quoter makes exactly 0.500 cents a share in the model and
+  -0.117 (se 0.112) on the tape: 0.514 of spread, -0.727 of one-minute adverse
+  selection, 0.096 of inventory.
+- Across CSCO, INTC, CMCSA, MSFT, AAPL and QQQ the touch quoter loses on all but
+  CMCSA, whose +0.112 is less than its inventory term. AAPL is worst at -0.962
+  (se 0.254), adverse -1.962.
+
+Design notes and things that went wrong:
+
+- I considered pushing the feed through the normal matching engine, translating
+  each execution into a market order. The trouble is that whenever the bot
+  absorbs part of an aggressor, the real order it saved stays in the book, and a
+  fully executed real order never gets a delete. That leftover liquidity would
+  sit at a stale price for the rest of the day. Keeping the real book exact and
+  the bot's fills on top (no market impact) avoids that, at the cost of
+  flattering a bot that trades in size.
+- First calibration run gave 10,933 market orders with a median gap of 0 ms. The
+  append for each batch was indented inside the per-message loop, so a sweep
+  through five orders logged five market orders with running totals. 4008 after
+  the fix. The hand-worked test now pins it.
+- The Hawkes fit starting from second units and from minute units lands in
+  different optima. Both are dominated by sub-millisecond clustering, and the
+  minute start adds a slow cross term with branching 0.46 and 0.69 but a lower
+  likelihood. One exponential cannot fit both scales; the residual KS statistic
+  is about 0.12 either way.
+- The side field of `P` messages is `B` on all 22,264 of them in the six
+  files, so hidden trades carry no direction.
+- Off-grid prices first raised an error. They turned out to be stub orders at
+  $0.0001 to $0.27, up to ten per symbol, so now they are dropped.
+- `C` executions use the resting order's price for the print, not the execution
+  price. They are mostly the opening cross, which the sessions skip.
+- A run with the "one tick back" quoter was dropped from the example: on a
+  one-tick stock it got 9 shares a session on the tape and none in the models.
+
+Next: a queue-reactive model (Huang, Lehalle, Rosenbaum 2015), where the arrival
+and cancel rates depend on the queue size, calibrated from the same feed, to see
+whether it can reproduce the 11 mid moves a minute. Then latency on the replay
+and the fill-weighted kappa for the lean.
