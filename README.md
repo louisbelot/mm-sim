@@ -778,6 +778,77 @@ sweep does not appear. Pairing sharpens differences, not levels: each point's
 level still has the standard error of 300 independent sessions, so a paired
 sweep says where the top is, not how much the top makes.
 
+## Which side is about to be hit
+
+The lean moves the mid the bot quotes around. Cartea, Jaimungal and Ricci put
+the intensity of market orders on each side into the market maker's state as
+well, since a side that is about to be hit often is a side where inventory
+builds up. GLFT can say what that is worth. With fill intensities A_bid and
+A_ask the linear system keeps its shape, but the two off-diagonals of M differ:
+-eta_bid couples v_q to v_{q+1} and -eta_ask couples it to v_{q-1}. A diagonal
+similarity D = diag(r^q) with r = sqrt(eta_ask / eta_bid) turns M into the
+symmetric matrix with the geometric mean on both off-diagonals, so the
+eigenvalues do not change, and in the long run v_q picks up a factor r^q. The
+quotes then move by exactly
+
+```
+delta_bid = delta_bid(geometric mean) + ln(A_bid / A_ask) / 2k
+delta_ask = delta_ask(geometric mean) - ln(A_bid / A_ask) / 2k
+```
+
+When market sells are the busier side, the bid steps back and the ask comes in,
+because the bot expects to get long and finds it harder to get out.
+`glft.Model(skew=...)` takes the log ratio. The tests solve the nonlinear HJB with
+different intensities on each side to 1e-6 and check the long-run shift to
+1e-9; swapping the two sides fails both.
+
+`GLFT(..., sides=True)` reads the intensity of each side from its signal's
+Hawkes tracker and tilts its quotes by that formula. The ablation below also has
+an "activity" variant, which re-solves GLFT for the geometric-mean intensity it
+sees, so that a busier market means more fills to earn the spread on.
+`examples/which_side.py` runs everything on `PairedFlow`, 300 sessions per row,
+on the Hawkes flow used so far (each market order triggers 0.6 more on its own
+side and 0.1 on the other, so bursts are one-sided) and on the second flow from
+the lean section (0.5 and 0.2, slower decay, so bursts bring orders on both
+sides):
+
+| GLFT, gain over plain (paired se) | one-sided bursts | two-sided bursts |
+|-----------------------------------|------------------|------------------|
+| lean                              | +38.0 (3.6)      | -4.7 (1.8)       |
+| sides                             | +11.7 (2.1)      | +1.1 (1.2)       |
+| sides + activity                  | -6.6 (2.4)       | -6.1 (1.5)       |
+| lean + sides                      | +34.0 (4.0)      | -7.3 (1.8)       |
+| lean + sides + activity           | +20.2 (4.2)      | -12.7 (2.0)      |
+
+The tilt on its own is safe but small: a third of what the lean is worth where
+bursts are one-sided, nothing where they are not. On top of the lean it adds
+nothing. Activity loses on both flows. GLFT has no adverse selection in it, so
+more market orders look like more chances to earn the spread, and the bot
+tightens into exactly the bursts it should stay out of. A model with the
+intensities in the state only helps if the fills those intensities bring are
+priced as the bad fills they are.
+
+The lean's problem on the second flow is a tick. GLFT steps a whole tick back as
+soon as the shift passes 0.09 ticks, so a small expected drift costs a full tick
+of queue. `FlowLean(..., dead=d)` ignores shifts smaller than d ticks and keeps
+larger ones whole. Against the lean without one, same sessions:
+
+| dead zone (ticks)              | 0.1        | 0.2        | 0.3        | 0.5         | 0.8         |
+|--------------------------------|------------|------------|------------|-------------|-------------|
+| GLFT, one-sided bursts         | -0.0 (0.5) | +0.4 (1.5) | +0.3 (1.9) | -2.7 (2.1)  | -10.3 (2.6) |
+| GLFT, two-sided bursts         | -0.6 (0.6) | +3.9 (1.3) | +4.2 (1.4) | +4.6 (1.7)  | +3.8 (1.7)  |
+| join the touch, one-sided      | -1.8 (5.8) | -2.2 (5.8) | -4.0 (5.8) | -19.7 (6.0) | -28.1 (7.0) |
+
+![Which side is about to be hit](docs/which_side.png)
+
+A dead zone of 0.2 to 0.3 ticks takes away the lean's loss where bursts are
+two-sided (+4.2, se 1.4, against a loss of 4.7) and costs GLFT nothing where they
+are one-sided, because the drifts that matter there are large. It does not turn
+the lean into a gain on the second flow, where there is little to read. For the
+touch quoter, whose lean at a one-tick spread follows only the sign of the
+shift, the cost of 0.3 is within its noise (-4.0, se 5.8) and 0.5 is clearly too
+much.
+
 ## Install
 
 ```
@@ -865,11 +936,11 @@ eq.lam[0], eq.Sigma[-1], eq.profit                     # (0.901, 0.074, 0.886)
 
 `python examples/as_replication.py`, `cst_sessions.py`, `glft_quotes.py`,
 `informed_flow.py`, `why_spreads.py`, `queue_value.py`, `latency_cost.py`,
-`hawkes_flow.py`, `flow_lean.py`, `tournament.py` and `paired_sessions.py` redraw
-the eleven charts. The session experiments run 1600 to 20,000 sessions on all
+`hawkes_flow.py`, `flow_lean.py`, `tournament.py`, `paired_sessions.py` and
+`which_side.py` redraw the twelve charts. The session experiments run 1600 to 20,000 sessions on all
 cores. `flow_lean.py` is the longest: its 1000-session sweep makes it about
-20,000 sessions, which took 100 minutes on four cores, and `paired_sessions.py`
-(7200 sessions) took about half an hour. `latency_cost.py` takes 8 minutes here
+20,000 sessions, which took 100 minutes on four cores; `paired_sessions.py`
+(7200 sessions) and `which_side.py` (8700) took about half an hour each. `latency_cost.py` takes 8 minutes here
 and `tournament.py` 1.
 
 ## Notes

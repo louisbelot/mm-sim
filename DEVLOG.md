@@ -740,3 +740,66 @@ Design notes and things that went wrong:
 Next: quotes that use the intensity of market orders on each side (Cartea,
 Jaimungal and Ricci), compared with the lean on paired sessions. Real ITCH data
 still needs a network that can reach it.
+
+## 2026-10-28: Which side is about to be hit
+
+The plan from this morning: put the intensity of each side into the quotes, the
+way Cartea, Jaimungal and Ricci do, and see whether that fixes the lean's
+dependence on the flow. It does not, and the ablation says why. What does fix
+the loss on the second flow is ignoring drifts smaller than a fraction of a
+tick.
+
+Built:
+
+- `glft.Model(skew=...)`: different fill intensities on the bid and the ask,
+  with A their geometric mean. The matrix's off-diagonals differ by e^skew.
+- `GLFT(..., sides=True)`: tilts the quotes by ln(lambda_sell / lambda_buy) / 2k
+  from the signal's Hawkes tracker.
+- `FlowLean(..., dead=d)`: shifts smaller than d ticks count as zero.
+- `examples/which_side.py` and its chart: the ablation and the dead-zone sweep on
+  `PairedFlow`, 300 sessions per row, about 8700 sessions.
+
+Checks (measured today):
+
+- 237 tests (was 232). The 24 fixed sessions are bit-identical with the new
+  options off.
+- Skewed GLFT models (skew -1.5 on the paper's example, 0.8 with drift and impact
+  on the order-book calibration) solve the nonlinear HJB with separate bid and ask
+  intensities to 1e-6 at tau = 120. The long-run quotes move by exactly
+  skew / 2k (to 1e-9, two skews, with drift and impact), the closed form by the
+  same amount, and the settling time is unchanged. Swapping the two tilts fails
+  three tests.
+- After one market sell on the symmetric Hawkes model the sell intensity is 2.95
+  times the buy intensity and `sides` moves both of the order-book bot's quotes
+  by 0.15 ticks.
+- Ablation on `PairedFlow` (300 sessions, gain over plain GLFT, paired se),
+  one-sided and two-sided bursts: lean +38.0 (3.6) and -4.7 (1.8); sides +11.7
+  (2.1) and +1.1 (1.2); sides with activity -6.6 (2.4) and -6.1 (1.5); lean and
+  sides +34.0 (4.0) and -7.3 (1.8); all three +20.2 (4.2) and -12.7 (2.0).
+- Dead zone against the lean without one: GLFT +0.3 (1.9) on one-sided bursts
+  and +4.2 (1.4) on two-sided ones at 0.3 ticks; -2.7 and -10.3 on one-sided
+  bursts at 0.5 and 0.8. The touch quoter -4.0 (5.8) at 0.3 and -19.7 (6.0) at
+  0.5. The no-lean and plain-lean rows repeat the ablation's to the last digit.
+- The example's sessions equal the exploratory scripts' on every cell checked
+  (four variants, two seeds each).
+
+Design notes and things that went wrong:
+
+- I first derived the tilt with the sign backwards: a busier bid side looked like
+  it should tighten the bid. Writing out the similarity transform instead of
+  reasoning from the picture gave the other sign, the inventory story agrees with
+  it, and the HJB test pins it.
+- The intensities can only act through inventory risk in GLFT, since its fills
+  carry no adverse selection. That is why activity hurts: the model reads a burst
+  as more fills to earn the spread on. Pricing the fills each side brings, not
+  just counting them, is what a Cartea-Jaimungal-Ricci model adds and this
+  ablation does not.
+- The activity variant re-solves GLFT on a grid of 161 intensity levels (0.1 to
+  20 times the mean) and interpolates, cached once per process; solving per
+  requote cost half a second a session.
+- The dead zone is hard, not soft: a shift past the threshold is kept whole,
+  since stepping back costs a fixed tick of queue whatever the size of the drift.
+
+Next: the tournament's open question, why GLFT and AS do better in company on
+Hawkes flow, now that paired sessions can isolate it. Then pricing the fills
+each side brings, which is what the intensities were missing here.
