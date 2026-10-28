@@ -13,7 +13,8 @@ order flow, a quoting signal that reads the Hawkes intensity off the public
 trade tape, and an exact split of P&L into spread, adverse selection and
 inventory. Sessions can run on the C++ [orderbook](https://github.com/louisbelot/orderbook)
 engine instead of the Python book, and several bots can compete in one session.
-Real NASDAQ data comes next.
+The background market can also be a real day of NASDAQ ITCH data for one stock,
+and the flow models can be calibrated from it.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -613,6 +614,136 @@ isolated why. One candidate is that the touch bot, now sharing the front of the
 queue, takes the bursts that used to hit the others. The mean/sd column is per
 session, not annualised.
 
+## Real NASDAQ flow
+
+Everything above runs on simulated flow. `itch.py` reads NASDAQ TotalView-ITCH
+5.0 and `replay.py` turns one stock's day into the background market, so the
+same bots quote against what actually happened on 30 December 2019.
+
+NASDAQ posts sample files at
+[emi.nasdaq.com/ITCH](https://emi.nasdaq.com/ITCH/Nasdaq%20ITCH/). The one used
+here, `12302019.NASDAQ_ITCH50.gz`, is 3.5 GB compressed and 8.3 GB raw.
+`python -m mmsim.itch path/to/12302019.NASDAQ_ITCH50 CSCO INTC --out data` walks
+it once (68 s for six symbols) and writes each stock's messages, unchanged, to
+`data/<SYMBOL>.itch`. CSCO comes out at 16.6 MB and 550,473 messages. `data/` is
+gitignored.
+
+The real orders sit in a `ReplayBook` under negative ids and follow the feed
+exactly. The bot's orders sit in the same price-time queues, and fill by three
+rules:
+
+- When the feed executes a real order, the aggressor would have reached every
+  bot order with priority over it first: a better price, or the same price and
+  earlier in the queue. Those fill, up to the executed size.
+- A real limit order added at or through a bot quote fills the quote, up to the
+  added size, and then rests in full.
+- A bot order that takes liquidity fills against the displayed real orders
+  without removing them. What is left of a GTC order that still crosses is
+  cancelled.
+
+So the real book never feels the bot. That is the usual assumption for
+backtesting passive quotes, and with 100-share quotes against queues of a few
+thousand shares it costs little, but a bot that took liquidity in size would be
+flattered by it. Executions that share a nanosecond timestamp are one aggressor,
+so a sweep through five resting orders is one print. Hidden-order trades (`P`)
+change nothing in the book and fill nobody; their side field is `B` on all 2457
+of CSCO's, so it says nothing about direction anyway. Orders priced off the cent
+grid, stub bids at $0.0001 and the like, are dropped along with their history.
+The clock is minutes after midnight, so `warm_up(575)` replays the morning up to
+9:35.
+
+The book matches the orderbook repo's C++ ITCH reader (`ob-itch`): the top five
+levels of CSCO at noon, price, size and order count (checked by hand, since the
+data is not in the repo), and the whole book plus all
+1200 traded shares of an ITCH file that the C++ engine wrote itself
+(`tests/data/session.itch`, 790 bytes). Twelve random feeds of 3000 messages,
+with partial cancels, replaces and sweeps, are replayed with a quoting bot of
+three sizes, and the real orders end up exactly where a replay without the bot
+puts them, in the same queue order. Five injected bugs (ignoring queue order,
+letting a taking bot, an add or an execution move the real book, splitting
+sweeps into separate prints) each fail at least one test. A full CSCO day with a
+quoting bot replays in 5 seconds.
+
+`calibrate` measures the Cont-Stoikov-Talreja quantities on the real feed between
+two times: the limit order rate lambda(i) at i ticks from the opposite best
+quote, the cancel rate theta(i) per resting share at that distance (cancelled
+shares per minute over the time-averaged queue, sampled every second), and the
+market order rate mu in units of the mean limit order size, as in section 3.1 of
+the paper. `cst()` returns `CSTParams` that `ZeroIntelligence` runs directly, and
+`hawkes()` fits the two-dimensional Hawkes process to the market order times.
+CSCO from 9:35 to 15:55, both sides averaged:
+
+| i  | lambda(i) per min | theta(i) per min | mean queue (shares) |
+|----|-------------------|------------------|---------------------|
+| 1  | 183.7             | 14.17            | 2927                |
+| 2  | 52.0              | 3.82             | 3528                |
+| 3  | 15.1              | 2.37             | 4157                |
+| 4  | 13.0              | 2.10             | 5397                |
+| 5  | 9.9               | 0.60             | 4095                |
+| 10 | 4.3               | 0.36             | 1975                |
+
+256,523 limit orders averaging 272 shares (54% of them exactly 100), 4008 market
+orders averaging 399 shares, so mu is 7.72 units a minute per side. 317,011 of
+the 1,915,733 shares traded hit hidden orders.
+
+Then the experiment: the same bots on the real tape and on the two calibrated
+models, in twelve 30-minute sessions each (9:35 to 15:35 on the tape, twelve
+seeds in the models). The bot starts flat, quotes 100 shares a side with a 1000
+share limit (one unit of 272 shares and four units in the models), and is marked
+at the session's last mid. Cents per share traded, P&L split with a one-minute
+markout, standard errors from the twelve sessions:
+
+| CSCO           | flow    | P&L (se)       | spread | adverse | inventory | shares/session | mid moves/min |
+|----------------|---------|----------------|--------|---------|-----------|----------------|---------------|
+| join the touch | real    | -0.117 (0.112) | 0.514  | -0.727  | 0.096     | 11,550         | 11.16         |
+| join the touch | Poisson | 0.500 (0.000)  | 0.500  | 0.000   | 0.000     | 53,242         | 0.01          |
+| join the touch | Hawkes  | 0.498 (0.002)  | 0.500  | 0.001   | -0.002    | 44,659         | 0.04          |
+| keep priority  | real    | -0.047 (0.190) | 0.521  | -0.710  | 0.142     | 6,901          | 11.16         |
+| keep priority  | Poisson | 0.500 (0.000)  | 0.500  | 0.000   | 0.000     | 50,472         | 0.01          |
+| keep priority  | Hawkes  | 0.498 (0.002)  | 0.500  | 0.001   | -0.003    | 34,669         | 0.04          |
+
+The calibrated model keeps about 11 units at the touch and refills them at 184
+orders a minute against 7.7 units of market flow, so its best queue almost never
+empties: the mid moves about once every 100 minutes in the model and 11 times
+a minute on the tape. A quoter in the model collects half a tick per share and
+nothing else. On the tape it collects the same half tick and gives back 0.73
+within a minute. The Hawkes version does not help. A single exponential kernel
+locks onto the sub-millisecond bursts (decay 0.27 and 0.36 ms, branching 0.34 and
+0.38), its time-rescaled residuals fail a Kolmogorov-Smirnov test (statistic
+about 0.12 on 2000 events a side), and clustering that fast is over before a
+quote could react. Independent unit-size orders cannot empty a queue of 3000
+shares on their own. Real queues empty because cancels and market orders come
+together, which is what the queue-reactive model of Huang, Lehalle and Rosenbaum
+(2015) is built for.
+
+The same bot on six symbols:
+
+| join the touch | P&L (se)       | spread | adverse | inventory | $/session | mid moves/min |
+|----------------|----------------|--------|---------|-----------|-----------|---------------|
+| CSCO           | -0.117 (0.112) | 0.514  | -0.727  | 0.096     | -13.5     | 11.2          |
+| INTC           | -0.256 (0.055) | 0.509  | -0.718  | -0.047    | -53.0     | 18.6          |
+| CMCSA          | 0.112 (0.062)  | 0.514  | -0.658  | 0.255     | 15.6      | 11.4          |
+| MSFT           | -0.361 (0.095) | 0.537  | -0.765  | -0.133    | -148.7    | 118.0         |
+| AAPL           | -0.962 (0.254) | 0.674  | -1.962  | 0.326     | -810.3    | 373.2         |
+| QQQ            | -0.353 (0.198) | 0.529  | -0.661  | -0.221    | -118.3    | 297.3         |
+
+![real ITCH flow: market order rate and P&L split by symbol](docs/itch_replay.png)
+
+Joining the touch loses on five of the six. The spread term is close to the half
+tick everywhere, and adverse selection over one minute takes more than that
+everywhere, most of all on AAPL, a $290 stock whose price moves many ticks in a
+minute. CMCSA is the one positive row, and its inventory term (0.26) is bigger
+than its whole P&L, so that is drift, not edge. Keeping priority (staying up to a
+tick behind instead of requoting) changes little; the example prints its rows
+too. The left panel shows another thing the model misses: market orders arrive
+at 43 a minute in the first ten minutes, 2.5 to 9 between noon and 15:00, and
+20 in the last ten, against a flat 10.5.
+
+Caveats. One day. Zero latency: the bot sees every message and reacts before the
+next, which flatters it. No fees or rebates; `Simulator` takes a `maker_fee`, and
+a negative one is a rebate. `examples/itch_replay.py` prints the tables and
+draws the chart in about 3 minutes once the six files are extracted.
+
 ## Install
 
 ```
@@ -644,6 +775,22 @@ A bot is a subclass of `Agent` with any of `on_start`, `on_book` (after every
 background event), `on_fill` and `on_timer`. Its `ctx` gives the clock, the book,
 everyone else's best bid, ask and mid, its own open orders and account, and
 `buy`, `sell`, `cancel`, `modify` and `set_timer`.
+
+```python
+from mmsim.bots import SymmetricQuoter
+from mmsim.calibrate import calibrate
+from mmsim.itch import read
+from mmsim.replay import ItchFlow, ReplayBook
+
+msgs = read("data/CSCO.itch")
+bot = SymmetricQuoter(0.5, size=100, max_position=1000)
+sim = Simulator(ItchFlow(msgs), [bot], book=ReplayBook)
+sim.warm_up(9 * 60 + 35)  # minutes after midnight
+sim.run(380)
+ctx = sim.contexts[0]
+ctx.pnl() / 100, ctx.position, len(ctx.account.fills)  # (-267.21, -982, 1983), dollars
+calibrate(msgs, 575, 955).cst().mu  # 7.72
+```
 
 ```python
 from mmsim import avellaneda as av
@@ -700,7 +847,8 @@ eq.lam[0], eq.Sigma[-1], eq.profit                     # (0.901, 0.074, 0.886)
 
 `python examples/as_replication.py`, `cst_sessions.py`, `glft_quotes.py`,
 `informed_flow.py`, `why_spreads.py`, `queue_value.py`, `latency_cost.py`,
-`hawkes_flow.py`, `flow_lean.py` and `tournament.py` redraw the ten charts. The session
+`hawkes_flow.py`, `flow_lean.py`, `tournament.py` and `itch_replay.py` redraw the
+eleven charts; the last one needs the extracted ITCH files. The session
 experiments run 1600 to 6800 sessions on all cores; `latency_cost.py` is the
 longest at 8 minutes here, `flow_lean.py` takes 6 and `tournament.py` 1.
 
