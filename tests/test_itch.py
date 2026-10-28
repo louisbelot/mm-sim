@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from mmsim.book import Side
-from mmsim.itch import Msg, decode, frames, read
+from mmsim.itch import Msg, decode, extract, frames, read
 
 SESSION = Path(__file__).parent / "data" / "session.itch"
 
@@ -15,6 +15,10 @@ def frame(body: bytes) -> bytes:
 
 def header(kind: bytes, locate: int, t: int) -> bytes:
     return kind + struct.pack(">HHHI", locate, 0, t >> 32, t & 0xFFFFFFFF)
+
+
+def directory(locate: int, symbol: str) -> bytes:
+    return frame(header(b"R", locate, 0) + symbol.encode().ljust(8) + bytes(20))
 
 
 def add(locate: int, t: int, ref: int, side: bytes, qty: int, symbol: str, px: int) -> bytes:
@@ -49,3 +53,20 @@ def test_decode_checks_length_and_skips_unknown_types():
     assert decode(header(b"I", 1, 0) + bytes(39)) is None
     with pytest.raises(ValueError, match="A message of 35"):
         decode(header(b"A", 1, 0) + bytes(24))
+
+
+def test_extract_keeps_one_locate(tmp_path):
+    raw = b"".join(
+        [
+            directory(1, "AAA"),
+            directory(2, "BBB"),
+            add(1, 5, 1, b"B", 100, "AAA", 10000),
+            add(2, 6, 2, b"S", 200, "BBB", 20000),
+            add(1, 7, 3, b"S", 300, "AAA", 10100),
+        ]
+    )
+    src = tmp_path / "day.itch"
+    src.write_bytes(raw)
+    paths = extract(src, ["BBB"], tmp_path / "out")
+    assert paths["BBB"].read_bytes() == directory(2, "BBB") + add(2, 6, 2, b"S", 200, "BBB", 20000)
+    assert [m.ref for m in read(paths["BBB"])] == [2]

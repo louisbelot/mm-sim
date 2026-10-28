@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import argparse
+import mmap
 import struct
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
+from contextlib import ExitStack
 from pathlib import Path
 from typing import NamedTuple
 
@@ -78,3 +81,40 @@ def decode(m) -> Msg | None:
 def read(path: str | Path) -> list[Msg]:
     data = Path(path).read_bytes()
     return [msg for m in frames(data) if (msg := decode(m)) is not None]
+
+
+def extract(src: str | Path, symbols: Iterable[str], out: str | Path) -> dict[str, Path]:
+    want = {s.encode().ljust(8): s for s in symbols}
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    paths = {s: out / f"{s}.itch" for s in want.values()}
+    with ExitStack() as stack:
+        f = stack.enter_context(open(src, "rb"))
+        m = stack.enter_context(mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ))
+        sinks = {s: stack.enter_context(open(p, "wb")) for s, p in paths.items()}
+        by_locate = {}
+        pos, n = 0, len(m)
+        while n - pos >= 2:
+            end = pos + 2 + (m[pos] << 8 | m[pos + 1])
+            sink = by_locate.get(m[pos + 3] << 8 | m[pos + 4])
+            if sink is not None:
+                sink.write(m[pos:end])
+            elif m[pos + 2] == 0x52 and (s := want.get(m[pos + 13 : pos + 21])):
+                by_locate[m[pos + 3] << 8 | m[pos + 4]] = sinks[s]
+                sinks[s].write(m[pos:end])
+            pos = end
+    return paths
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="python -m mmsim.itch")
+    ap.add_argument("src")
+    ap.add_argument("symbols", nargs="+")
+    ap.add_argument("--out", default="data")
+    args = ap.parse_args()
+    for s, p in extract(args.src, args.symbols, args.out).items():
+        print(f"{s}: {p} ({p.stat().st_size:,} bytes)")
+
+
+if __name__ == "__main__":
+    main()
