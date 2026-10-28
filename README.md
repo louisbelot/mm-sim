@@ -706,9 +706,9 @@ there, so competition only takes, and these two quote one tick behind the best
 price they see, which is now set by the touch bot and AS. On Hawkes flow the
 touch bot goes from 160 alone to -113 in company, while the leaning bot is the
 only one above zero (22.9 together, -19.3 alone) and GLFT and AS also do better
-in company than alone. I have not isolated why. One candidate is that the touch
-bot, now sharing the front of the queue, takes the bursts that used to hit the
-others. The mean/sd column is per session, not annualised.
+in company than alone. "A backstop" below shows why: the touch bot has no
+position limit and absorbs the bursts, which takes most of their price impact
+away for everyone. The mean/sd column is per session, not annualised.
 
 ## Paired sessions
 
@@ -849,6 +849,65 @@ touch quoter, whose lean at a one-tick spread follows only the sign of the
 shift, the cost of 0.3 is within its noise (-4.0, se 5.8) and 0.5 is clearly too
 much.
 
+## A backstop
+
+The tournament left a question open: on Hawkes flow, GLFT and AS make more among
+the other bots than alone. `examples/backstop.py` pairs GLFT with one bot at a
+time on `PairedFlow`, 300 sessions each, marking everyone at the closing mid of
+the tape as the tournament does. The fills column is lots per session from fills
+that emptied their price level, against GLFT's total; impact is the mid's move
+across a market order in its direction, and volatility the sd of one-minute mid
+changes:
+
+| GLFT next to               | GLFT's gain (se) | adverse, 1 min | emptying fills | impact | volatility | partner's P&L | partner's peak position |
+|----------------------------|------------------|----------------|----------------|--------|------------|---------------|-------------------------|
+| nobody                     |                  | -172.5         | 124 of 222     | 0.21   | 1.21       |               |                         |
+| touch bot                  | +47.5 (4.0)      | -72.1          | 0 of 164       | 0.08   | 0.69       | -67.9         | 24.0                    |
+| touch bot, 20-lot limit    | +40.3 (3.8)      | -76.3          | 1 of 165       | 0.09   | 0.75       | -166.9        | 17.7                    |
+| touch bot, 5-lot limit     | +8.9 (3.3)       | -97.6          | 4 of 165       | 0.12   | 0.97       | -138.1        | 5.0                     |
+| touch bot, keeps its place | +72.1 (4.2)      | -64.0          | 12 of 172      | 0.09   | 0.68       | -63.1         | 23.9                    |
+| AS                         | -24.2 (3.6)      | -119.2         | 4 of 158       | 0.14   | 1.10       | -98.2         | 7.3                     |
+| a second GLFT              | -27.1 (3.3)      | -118.1         | 15 of 164      | 0.14   | 1.09       | -89.7         | 4.1                     |
+
+![a backstop](docs/backstop.png)
+
+Only the touch bot helps, and only while it has room. The tournament's touch bot
+quotes one lot on each side half a tick from the mid, which is at the touch or
+inside it, has no position limit and requotes as soon as it is filled, so it
+keeps buying into a burst of sells and selling into a burst of buys. The bursts
+then move the price less: the impact of a market order falls from 0.21 to 0.08
+ticks and one-minute volatility from 1.21 to 0.69. GLFT's fills also stop
+emptying their level, and those were the bad fills (see the queue section):
+market orders are one lot and the touch bot always has a lot at the best price,
+so an order that reaches GLFT there leaves the touch bot's lot behind it. GLFT's
+first-minute adverse selection falls from -172.5 to -72.1 ticks a session. The
+touch bot pays.
+
+With a 5-lot limit the touch bot runs out of room early in a burst and stops
+quoting that side: GLFT gains only 8.9, and the touch bot loses 138, holding a
+full position while the move runs on. At 20 lots most of the effect is back. A
+touch bot that keeps its place in the queue helps GLFT more still. AS and a
+second GLFT lean against their inventory, so they are not backstops, and next to
+them GLFT simply shares the flow and makes less.
+
+The touch bot on its own, same seeds:
+
+| the touch bot alone | P&L (se)       | peak position | impact | volatility |
+|---------------------|----------------|---------------|--------|------------|
+| no limit            | +110.2 (20.6)  | 36.6          | 0.12   | 0.80       |
+| 20-lot limit        | -101.7 (19.8)  | 19.4          | 0.14   | 0.89       |
+| 5-lot limit         | -78.4 (6.3)    | 5.0           | 0.21   | 1.11       |
+
+Without a limit it damps the bursts it trades against and makes money. With one
+it is run over, worst at 20 lots where the position it carries into a move is
+largest (paired against the unlimited bot: 211.9 lower, se 17.4, and 188.7 lower
+at 5 lots, se 20.1). Next to GLFT the unlimited bot makes 178.1 less than alone
+(se 15.9). It gets a third fewer fills (243 a session instead of 363), its
+first-minute adverse selection per fill doubles (0.37 ticks instead of 0.19) and
+its inventory term falls from -39.5 to -120.8: it still absorbs the bursts, but
+now shares the quieter flow that paid for them. That is the tournament's touch
+bot going from 160 alone to -113 in company.
+
 ## Install
 
 ```
@@ -936,11 +995,12 @@ eq.lam[0], eq.Sigma[-1], eq.profit                     # (0.901, 0.074, 0.886)
 
 `python examples/as_replication.py`, `cst_sessions.py`, `glft_quotes.py`,
 `informed_flow.py`, `why_spreads.py`, `queue_value.py`, `latency_cost.py`,
-`hawkes_flow.py`, `flow_lean.py`, `tournament.py`, `paired_sessions.py` and
-`which_side.py` redraw the twelve charts. The session experiments run 1600 to 20,000 sessions on all
+`hawkes_flow.py`, `flow_lean.py`, `tournament.py`, `paired_sessions.py`,
+`which_side.py` and `backstop.py` redraw the thirteen charts. The session experiments run 1600 to 20,000 sessions on all
 cores. `flow_lean.py` is the longest: its 1000-session sweep makes it about
 20,000 sessions, which took 100 minutes on four cores; `paired_sessions.py`
-(7200 sessions) and `which_side.py` (8700) took about half an hour each. `latency_cost.py` takes 8 minutes here
+(7200 sessions) and `which_side.py` (8700) took about half an hour each, and
+`backstop.py` (3000) nine minutes. `latency_cost.py` takes 8 minutes here
 and `tournament.py` 1.
 
 ## Notes

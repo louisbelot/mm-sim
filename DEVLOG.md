@@ -803,3 +803,56 @@ Design notes and things that went wrong:
 Next: the tournament's open question, why GLFT and AS do better in company on
 Hawkes flow, now that paired sessions can isolate it. Then pricing the fills
 each side brings, which is what the intensities were missing here.
+
+## 2026-10-28: A backstop
+
+The tournament left one question open: on Hawkes flow, GLFT and AS make more
+among the other bots than alone. Pairing GLFT with one bot at a time on
+`PairedFlow` answers it. The touch bot has no position limit, so it absorbs the
+bursts, and that takes most of their price impact away for everyone else.
+
+Built:
+
+- `examples/backstop.py` and its chart: GLFT alone and next to six partners, and
+  the touch bot alone with three position limits, 300 sessions each, 3000
+  sessions in nine minutes. No library changes.
+
+Checks (measured today):
+
+- GLFT's gain over trading alone (paired se): +47.5 (4.0) next to the touch bot,
+  +40.3 (3.8) with a 20-lot limit, +8.9 (3.3) with a 5-lot limit, +72.1 (4.2)
+  with keep 1; -24.2 (3.6) next to AS and -27.1 (3.3) next to a second GLFT.
+- Next to the unlimited touch bot the impact of a market order falls from 0.21
+  to 0.08 ticks, one-minute volatility from 1.21 to 0.69, GLFT's emptying fills
+  from 124 lots a session to 0, and its first-minute adverse selection from
+  -172.5 to -72.1.
+- The touch bot alone: +110.2 (20.6) unlimited, -101.7 (19.8) at 20 lots, -78.4
+  (6.3) at 5; paired against the unlimited bot, 211.9 (17.4) and 188.7 (20.1)
+  lower. Next to GLFT the unlimited bot makes 178.1 (15.9) less than alone: 243
+  fills a session instead of 363, adverse selection per fill 0.37 ticks instead
+  of 0.19, inventory term -120.8 instead of -39.5.
+- The example's sessions equal the two exploratory scripts' on every seed of the
+  seven rows they share. 237 tests, unchanged.
+
+Design notes and things that went wrong:
+
+- The first question was whether the touch bot helps through its place at the
+  front of the book or through its room to take inventory. The variants separate
+  the two: a position limit removes most of the gain, while keep 1, which gives
+  up some of its place at the front, adds to it.
+- My first README draft said the touch bot loses in company because the others,
+  ahead of it in the queue, keep the better fills. Its own fills only partly
+  agree: next to GLFT a smaller share of them empty their level (51 of 243,
+  against 211 of 363 alone), the opposite of what that story predicts, while
+  adverse selection per fill doubles and most of the loss is in the inventory
+  term. The README gives those numbers instead of the story.
+- I also wrote that the touch bot makes money alone because it absorbs the
+  bursts before running it alone with a limit. The solo rows were added to test
+  that, and they agree: with a limit it loses.
+- The right panel's legend first sat on the lines, and one annotation was clipped
+  at the edge of the axes.
+
+Next: pricing the fills each side brings, which is what the intensities were
+missing in the previous entry. Together the pair here loses (GLFT -20.9 and the
+touch bot -67.9, against -68.4 and +110.2 apart), so a backstop that charges for
+the service, by widening once it holds a large position, is worth a look.
