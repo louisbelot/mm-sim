@@ -1,3 +1,4 @@
+import dataclasses
 import math
 
 import numpy as np
@@ -14,11 +15,12 @@ BOOK = Model(sigma=1.0, A=2.1, k=3.6, gamma=1.0, Q=10)
 def hjb_quotes(m: Model, tau: float):
     q, g, k = m.q, m.gamma, m.k
     c = m.A / (k + g) * (1 + g / k) ** (-k / g)
+    cb, ca = c * math.exp(m.skew / 2), c * math.exp(-m.skew / 2)
 
     def rhs(_, th):
         db = np.append(th[1:] - th[:-1] - (q[:-1] + 1) * m.xi, -np.inf)
         da = np.insert(th[:-1] - th[1:] + (q[1:] - 1) * m.xi, 0, -np.inf)
-        return m.mu * q - g * m.sigma**2 * q**2 / 2 + c * (np.exp(k * db) + np.exp(k * da))
+        return m.mu * q - g * m.sigma**2 * q**2 / 2 + cb * np.exp(k * db) + ca * np.exp(k * da)
 
     th = solve_ivp(rhs, (0, tau), np.zeros(len(q)), method="Radau", rtol=1e-10, atol=1e-10).y[:, -1]
     base = math.log1p(g / k) / g
@@ -41,6 +43,8 @@ def test_matches_expm_on_the_paper_example():
         Model(0.3, 0.9, 0.3, 0.01, 8, mu=0.002),
         Model(0.3, 0.9, 0.3, 0.01, 8, xi=0.4),
         Model(1.0, 2.1, 3.6, 1.0, 10, mu=0.1, xi=0.2),
+        Model(0.3, 0.9, 0.3, 0.01, 8, skew=-1.5),
+        Model(1.0, 2.1, 3.6, 1.0, 10, mu=0.1, xi=0.2, skew=0.8),
     ],
 )
 def test_quotes_solve_the_nonlinear_hjb(m):
@@ -193,3 +197,17 @@ def test_optimal_quotes_earn_the_value_function():
     for shift in (-0.3, 0.3):
         worse, _ = certainty_equivalent(m, T, shift, 20_000, seed=1)
         assert worse < ce - 5 * se
+
+
+def test_skew_moves_the_long_run_quotes_by_half_its_log_over_k():
+    m = Model(1.0, 2.1, 3.6, 0.3, 5, mu=0.05, xi=0.1)
+    b0, a0 = m.quotes(math.inf)
+    c0, d0 = m.approx()
+    for skew in (-2.0, 0.7):
+        tilted = dataclasses.replace(m, skew=skew)
+        b1, a1 = tilted.quotes(math.inf)
+        assert np.allclose(b1[:-1] - b0[:-1], skew / (2 * m.k), rtol=0, atol=1e-9)
+        assert np.allclose(a1[1:] - a0[1:], -skew / (2 * m.k), rtol=0, atol=1e-9)
+        c1, d1 = tilted.approx()
+        assert np.allclose(c1 - c0, skew / (2 * m.k)) and np.allclose(d1 - d0, -skew / (2 * m.k))
+    assert tilted.settle == m.settle

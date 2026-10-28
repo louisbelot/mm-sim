@@ -82,3 +82,12 @@ def test_quoter_moves_its_quotes_down_after_a_sell():
     assert quotes(sim.contexts[0]) == [(Side.BUY, 100), (Side.SELL, 101)]
     sim.run(1.0)
     assert quotes(sim.contexts[0]) == [(Side.BUY, 98), (Side.SELL, 100)]
+
+
+def test_dead_zone_drops_small_shifts_only():
+    lean, dead = FlowLean(SYM, 2.0), FlowLean(SYM, 2.0, dead=0.5)
+    for f in (lean, dead):
+        f.observe(Print(1.0, Side.SELL, 99, 1))
+    assert dead.shift(1.0) == lean.shift(1.0) == pytest.approx(-2.0)
+    later = next(t for t in np.arange(1.0, 3.0, 0.01) if abs(lean.shift(t)) < 0.5)
+    assert dead.shift(later) == 0.0 and lean.shift(later) < 0

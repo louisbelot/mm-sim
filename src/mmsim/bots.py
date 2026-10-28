@@ -13,8 +13,11 @@ from .sim import Agent, Context, Print
 
 
 class FlowLean:
-    def __init__(self, model: Hawkes, kappa: float, horizon: float = math.inf) -> None:
+    def __init__(
+        self, model: Hawkes, kappa: float, horizon: float = math.inf, dead: float = 0.0
+    ) -> None:
         self.kappa = kappa
+        self.dead = dead
         self.tracker = Tracker(model, horizon)
 
     @classmethod
@@ -49,7 +52,8 @@ class FlowLean:
 
     def shift(self, t: float) -> float:
         e = self.tracker.excess(t)
-        return self.kappa * float(e[Side.BUY] - e[Side.SELL])
+        s = self.kappa * float(e[Side.BUY] - e[Side.SELL])
+        return s if abs(s) >= self.dead else 0.0
 
 
 class Quoter(Agent):
@@ -169,9 +173,13 @@ class GLFT(Quoter):
         size: int = 1,
         keep: int = 0,
         signal: FlowLean | None = None,
+        sides: bool = False,
     ) -> None:
+        if sides and signal is None:
+            raise ValueError("sides reads the intensity of each side from the signal")
         super().__init__(size, model.Q * size, keep, signal)
         self.model = model
+        self.sides = sides
         self.bids, self.asks = model.quotes(math.inf)
 
     def targets(self, ctx: Context) -> tuple[int | None, int | None]:
@@ -181,6 +189,10 @@ class GLFT(Quoter):
         Q = self.model.Q
         i = Q + min(max(round(ctx.position / self.size), -Q), Q)
         db, da = self.bids[i], self.asks[i]
+        if self.sides:
+            lam = self.signal.tracker.intensity(ctx.t)
+            tilt = math.log(lam[Side.SELL] / lam[Side.BUY]) / (2 * self.model.k)
+            db, da = db + tilt, da - tilt
         bid = None if math.isnan(db) else min(math.floor(s - db), ctx.ask - 1)
         ask = None if math.isnan(da) else max(math.ceil(s + da), ctx.bid + 1)
         return bid, ask

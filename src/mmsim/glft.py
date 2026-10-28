@@ -17,6 +17,7 @@ class Model:
     Q: int
     mu: float = 0.0
     xi: float = 0.0
+    skew: float = 0.0
 
     @property
     def q(self) -> np.ndarray:
@@ -43,7 +44,8 @@ class Model:
 
     def matrix(self) -> np.ndarray:
         diag, off = self._bands
-        return np.diag(diag) + np.diag(off, 1) + np.diag(off, -1)
+        tilt = math.exp(self.skew / 2)
+        return np.diag(diag) + np.diag(off * tilt, 1) + np.diag(off / tilt, -1)
 
     @cached_property
     def settle(self) -> float:
@@ -66,7 +68,8 @@ class Model:
         c = math.sqrt(self.sigma**2 * g / (2 * k * self.A) * (1 + g / k) ** (1 + k / g))
         c *= math.exp(k * self.xi / 4)
         lean = (self.q + 0.5) - self.mu / (g * self.sigma**2)
-        return self.base + lean * c, self.base - (lean - 1) * c
+        tilt = self.skew / (2 * k)
+        return self.base + lean * c + tilt, self.base - (lean - 1) * c - tilt
 
 
 def _expm_metzler(B: np.ndarray) -> np.ndarray:

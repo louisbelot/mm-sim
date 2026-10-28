@@ -5,10 +5,11 @@ import pytest
 from scripted import limit, make, market
 
 from mmsim.book import Side
-from mmsim.bots import GLFT, AvellanedaStoikov, Quoter, SymmetricQuoter
+from mmsim.bots import GLFT, AvellanedaStoikov, FlowLean, Quoter, SymmetricQuoter
 from mmsim.flow import CSTParams, ZeroIntelligence
 from mmsim.glft import Model
-from mmsim.sim import Simulator
+from mmsim.hawkes import Hawkes
+from mmsim.sim import Print, Simulator
 
 
 def quotes(ctx):
@@ -163,3 +164,22 @@ def test_glft_on_cst_flow_respects_its_bound():
     assert sim.book.audit() == ""
     assert max(abs(s.position) for s in ctx.history) <= 3
     assert len(ctx.account.fills) > 50
+
+
+def test_glft_sides_tilts_both_quotes_by_the_intensity_ratio():
+    hawkes = Hawkes.symmetric(0.94, 0.6, 0.1, 6.0)
+    lean = FlowLean(hawkes, 0.0)
+    lean.observe(Print(1.0, Side.SELL, 100, 1))
+    lam = lean.tracker.intensity(1.0)
+    tilt = math.log(lam[Side.SELL] / lam[Side.BUY]) / (2 * BOOK.k)
+    assert tilt > 0.1
+    bids, asks = BOOK.quotes(float("inf"))
+    ctx = SimpleNamespace(t=1.0, mid=100.5, bid=90, ask=110, position=0)
+    plain = GLFT(BOOK, signal=FlowLean(hawkes, 0.0)).targets(ctx)
+    sided = GLFT(BOOK, signal=lean, sides=True).targets(ctx)
+    db, da = bids[BOOK.Q], asks[BOOK.Q]
+    assert plain == (math.floor(100.5 - db), math.ceil(100.5 + da))
+    assert sided == (math.floor(100.5 - db - tilt), math.ceil(100.5 + da - tilt))
+    assert sided != plain
+    with pytest.raises(ValueError):
+        GLFT(BOOK, sides=True)
