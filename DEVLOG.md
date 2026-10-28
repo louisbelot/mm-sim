@@ -651,3 +651,92 @@ Design notes and things that went wrong:
 Next: real ITCH data as the background flow, once the data can be fetched. Then
 quotes that use the intensity of market orders on each side, not just a shift
 of the mid, following Cartea, Jaimungal and Ricci.
+
+## 2026-10-28: Paired sessions
+
+Yesterday's sweep needed 1000 sessions a point because pairing sessions by seed
+bought nothing: over the same seeds, GLFT's P&L at two nearby kappas correlated
+at about 0.1. This entry adds a flow that keeps the market the same whatever the
+bots do, so that comparisons can be paired.
+
+Built:
+
+- `PairedFlow(params, hawkes=None)` in `flow.py`: CST limit orders and
+  cancellations with Poisson or Hawkes market orders, from two generators seeded
+  off the simulator's rng (so it is still a zero-argument factory for the
+  tournament). Market and limit arrivals are kept pending rather than redrawn.
+  Each flow order draws an Exp(1) threshold when it is placed, and is cancelled
+  when its accumulated hazard reaches it.
+- The CST exactness tests and the Hawkes refit now run on both flows, plus three
+  tests of the pairing itself.
+- `examples/paired_sessions.py` and its chart: both flows on the same 300 seeds,
+  for two bots and the GLFT kappa sweep. About half an hour on four cores.
+
+Checks (measured today):
+
+- 232 tests (was 215). The 24 fixed sessions are bit-identical, since the old
+  flows are untouched.
+- On `PairedFlow`: CST Table 3 through the book (four cells), the queue races
+  (three cells), the long-run limit-order rate, one-lot market orders, never
+  cancelling another owner's order, and the Hawkes refit (branching within
+  0.06).
+- A bot that does nothing but set a timer every 0.05 minutes leaves the prints
+  and the resting book identical to a session without it, for Poisson and Hawkes
+  market orders; with `ZeroIntelligence` the two sessions differ. Two GLFT bots
+  with different `keep` share more than 99% of their market-order times. A bot
+  that sweeps the bids every minute leaves more than 95% of the flow's prints at
+  the calm session's times.
+- Four injected bugs each fail one of those tests: skipping the hazard during a
+  wait for a timer, redrawing the pending limit arrival every step, exciting the
+  Hawkes process only when the order trades, and using theta one level too far
+  out.
+- The market-order generator alone, 400,000 minutes on each of 20 seeds: 1.8821
+  orders a minute (se 0.0017) against 1.8800.
+- Prototype stages, GLFT at kappa 0, 0.4 and 0.5 over 200 seeds, correlation of
+  the pairs (0, 0.5) and (0.4, 0.5): `HawkesFlow` 0.06 and 0.15; separate market
+  and limit streams with cancels from a third stream 0.43 and 0.52; per-order
+  thresholds 0.57 and 0.69; market orders that count even when they cannot
+  trade 0.67 and 0.79. That last step took the share of market-order times two
+  sessions have in common from 74% to 99.8%, and the correlation of their
+  one-minute mid moves from 0.85 to 0.95.
+- Same model: over 1000 sessions GLFT makes -63.8 (se 2.6) without a lean and
+  -27.8 (1.9) with the impact lean on `PairedFlow`, against -61.5 (2.5) and
+  -24.9 (1.8) on `HawkesFlow`; fills 216 and 166 against 220 and 166. The lean's
+  gain, paired over those 1000 seeds, is 35.9 (se 1.9).
+- `paired_sessions.py`, 300 seeds: correlation 0.12 against 0.85 and variance
+  ratio 6.6 for GLFT at 0.4 and 0.5; 3.0 for GLFT with and without the lean, 3.2
+  and 1.7 for the touch quoter at 0.2 against 0.4 and at 0 against 0.4. The
+  paired sweep's differences from kappa 0.5 have standard errors of 2.0 to 3.5,
+  against 2.5 to 3.1 from 1000 independent sessions, and peak near 0.6.
+- Tournament on paired Hawkes flow, 100 sessions: crowding standard errors 6.6,
+  6.7, 8.1 and 32.1 (leaning GLFT, GLFT, AS, touch) against 5.3, 9.2, 23.5 and
+  34.7.
+
+Design notes and things that went wrong:
+
+- A cancel clock redrawn every step is exact, but the number of steps depends on
+  the bots, so the cancel stream comes apart and the queues with it. A threshold
+  per order is the time-change construction of the same clock, and it needs no
+  draws after the order is placed. It is exact here because the simulator calls
+  the flow after every change to the book, so the rates are constant between
+  calls.
+- The first version thinned Hawkes market orders by "is the other side
+  non-empty", which matches `HawkesFlow` exactly but desynchronises the process
+  for good the first time one session's book is one-sided and the other's is
+  not. Bursts empty a side far more often than the 0.15% time average suggests:
+  14 of 24 sessions had at least one such moment. Market orders now count either
+  way.
+- The flow keeps its own time, but only to order its pending arrivals. Prints
+  are stamped by the simulator; yesterday's bug was exactly a flow clock leaking
+  into the tape.
+- My first sweeper test asserted that every flow print of the swept session also
+  appears in the calm one. It failed on one buy: arrivals are common, but either
+  session can drop one, and the calm session's ask side happened to be empty at
+  that moment during a burst of buys.
+- Pairing helps most where the two sessions stay close. For big changes, and for
+  the tournament, the bots' own trading moves the books apart, and nothing in
+  the flow can share that. It also does nothing for levels, only differences.
+
+Next: quotes that use the intensity of market orders on each side (Cartea,
+Jaimungal and Ricci), compared with the lean on paired sessions. Real ITCH data
+still needs a network that can reach it.

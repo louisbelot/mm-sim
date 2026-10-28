@@ -12,8 +12,9 @@ latency on market data and order entry, Hawkes processes for clustered
 order flow, a quoting signal that reads the Hawkes intensity off the public
 trade tape, and an exact split of P&L into spread, adverse selection and
 inventory. Sessions can run on the C++ [orderbook](https://github.com/louisbelot/orderbook)
-engine instead of the Python book, and several bots can compete in one session.
-Real NASDAQ data comes next.
+engine instead of the Python book, several bots can compete in one session, and
+a flow whose randomness does not depend on the bots lets two versions of a bot
+trade the same market. Real NASDAQ data comes next.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -709,6 +710,74 @@ in company than alone. I have not isolated why. One candidate is that the touch
 bot, now sharing the front of the queue, takes the bursts that used to hit the
 others. The mean/sd column is per session, not annualised.
 
+## Paired sessions
+
+Every comparison above is between averages of independent sessions, and a
+market maker's P&L per session is noisy: GLFT on Hawkes flow has a standard
+deviation of 55 to 85 ticks a session. Running both versions of a bot on the
+same seeds ought to help, but with `ZeroIntelligence` and `HawkesFlow` it hardly
+does. The flow draws every event from one random stream, so as soon as a bot's
+quote changes the book, or a timer interrupts a draw, every later draw lands on
+a different event and the two sessions have little in common. Over the same 300
+seeds, GLFT's P&L with kappa 0.4 and with kappa 0.5 correlates at 0.12.
+
+`PairedFlow(params, hawkes=None)` simulates the same model from random streams
+that do not depend on what the agents do. Market orders and limit orders arrive
+at rates that never depend on the book, so each comes from a generator of its
+own, seeded from the simulator's seed, and a pending arrival is kept rather than
+redrawn. Cancellations do depend on the book: each flow order draws an Exp(1)
+threshold when it is placed and is cancelled once its accumulated hazard (theta
+at its current distance from the opposite best, integrated over time) reaches
+the threshold. The flow is called after every change to the book, so the
+hazard rates are constant in between and the integral is exact. Table 3, the
+queue races, the long-run limit-order rate and the Hawkes refit pass on both
+flows, and a bot that only sets timers leaves a `PairedFlow` market identical
+order for order, which it does not with `ZeroIntelligence`.
+
+One convention differs from `HawkesFlow`: a market order that arrives while the
+other side of the book is empty does not trade but still counts in the Hawkes
+process. Dropping it instead shifts every later arrival, and Hawkes bursts empty
+one side of the book at some point in most sessions (14 of 24 in a check), so
+the streams would come apart again. Over 1000 sessions GLFT makes -63.8 (se 2.6)
+on `PairedFlow` against -61.5 (2.5) on `HawkesFlow` without a lean, and -27.8
+(1.9) against -24.9 (1.8) with the impact lean, with 216 and 166 fills against
+220 and 166.
+
+![Paired sessions](docs/paired_sessions.png)
+
+`examples/paired_sessions.py`, 300 sessions per row, the same seeds on both
+flows, P&L in ticks:
+
+| comparison                  | flow       | correlation | difference | paired se | unpaired se | variance ratio |
+|-----------------------------|------------|-------------|------------|-----------|-------------|----------------|
+| GLFT, kappa 0.4 to 0.5      | HawkesFlow | 0.12        | 9.5        | 4.65      | 4.95        | 1.1            |
+| GLFT, kappa 0.4 to 0.5      | PairedFlow | 0.85        | 0.7        | 2.03      | 5.24        | 6.6            |
+| GLFT, kappa 0 to 0.5        | HawkesFlow | 0.08        | 30.0       | 5.21      | 5.43        | 1.1            |
+| GLFT, kappa 0 to 0.5        | PairedFlow | 0.70        | 35.7       | 3.52      | 6.09        | 3.0            |
+| join the touch, 0.2 to 0.4  | HawkesFlow | 0.05        | 9.3        | 7.74      | 7.94        | 1.1            |
+| join the touch, 0.2 to 0.4  | PairedFlow | 0.69        | 0.1        | 4.76      | 8.56        | 3.2            |
+| join the touch, 0 to 0.4    | HawkesFlow | -0.03       | 52.5       | 8.37      | 8.24        | 1.0            |
+| join the touch, 0 to 0.4    | PairedFlow | 0.42        | 50.8       | 6.64      | 8.72        | 1.7            |
+
+The variance ratio is how many independent sessions one paired session is
+worth. It is largest for small changes: telling kappa 0.4 from 0.5 takes 6.6
+times fewer sessions. The bigger the change, the sooner the bot's own trading
+pulls the two markets apart, and no stream can share that part. The tournament
+is the extreme case, since a bot alone and the same bot among three others trade
+in very different books: on paired Hawkes flow the crowding standard errors of
+the leaning GLFT, GLFT, AS and the touch bot are 6.6, 6.7, 8.1 and 32.1, against
+5.3, 9.2, 23.5 and 34.7.
+
+The right panel is the GLFT sweep from the lean section again, as differences
+from kappa = 0.5. With 300 paired sessions the curve comes out smooth: -35.7,
+-24.4, -12.2, -5.9, -0.7, 0, 3.2, -2.2 and -10.6 for kappa 0 to 1.0 (paired se
+2.0 to 3.5, against 2.5 to 3.1 for the same differences from 1000 independent
+sessions). It has a flat top from 0.4 to 0.8 and peaks near 0.6, in line with
+the cubic fitted to the independent sweep (0.57), and the dip at 0.4 in that
+sweep does not appear. Pairing sharpens differences, not levels: each point's
+level still has the standard error of 300 independent sessions, so a paired
+sweep says where the top is, not how much the top makes.
+
 ## Install
 
 ```
@@ -796,11 +865,12 @@ eq.lam[0], eq.Sigma[-1], eq.profit                     # (0.901, 0.074, 0.886)
 
 `python examples/as_replication.py`, `cst_sessions.py`, `glft_quotes.py`,
 `informed_flow.py`, `why_spreads.py`, `queue_value.py`, `latency_cost.py`,
-`hawkes_flow.py`, `flow_lean.py` and `tournament.py` redraw the ten charts. The session
-experiments run 1600 to 20,000 sessions on all cores. `flow_lean.py` is the
-longest: its 1000-session sweep makes it about 20,000 sessions, which took 100
-minutes on four cores. `latency_cost.py` takes 8 minutes here and
-`tournament.py` 1.
+`hawkes_flow.py`, `flow_lean.py`, `tournament.py` and `paired_sessions.py` redraw
+the eleven charts. The session experiments run 1600 to 20,000 sessions on all
+cores. `flow_lean.py` is the longest: its 1000-session sweep makes it about
+20,000 sessions, which took 100 minutes on four cores, and `paired_sessions.py`
+(7200 sessions) took about half an hour. `latency_cost.py` takes 8 minutes here
+and `tournament.py` 1.
 
 ## Notes
 
