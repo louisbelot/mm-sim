@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterator, Sequence
+import random
+from bisect import bisect_right
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
+from itertools import accumulate
 
 import numpy as np
 
-from .book import Book, Order, Side
+from .book import Book, Event, Level, Order, OrderType, Side
 from .itch import NS_PER_MINUTE, Msg
 from .replay import ReplayBook, batches, on_grid
 
@@ -299,3 +302,159 @@ def _regimes(
         out[wide, s, :] = codes[wide, s, None]
         out[ups == (s == Side.BUY), s, :] += BASE
     return out
+
+
+class QueueReactive:
+    def __init__(self, params: Params, owner: int = 0, seed: int = 0) -> None:
+        self.params = params
+        self.owner = owner
+        self.gap = Gap()
+        self._rng = random.Random(seed)
+        self._bid: int | None = None
+        self._ask: int | None = None
+        self._market = False
+        self._far = [0, 0]
+
+    def seed(self, book: Book, bid: int, ask: int, ids: Iterator[int]) -> None:
+        for side, top, step in ((Side.BUY, bid, -1), (Side.SELL, ask, 1)):
+            for i in range(1, self.params.K + 1):
+                for qty in self._lump(i, self._rng):
+                    book.submit(next(ids), side, top + step * (i - 1), qty, owner=self.owner)
+            self._far[side] = top + step * (self.params.K - 1)
+
+    def step(
+        self, book: Book, rng: random.Random, horizon: float, ids: Iterator[int]
+    ) -> tuple[float, Callable[[Book], list[Event]]] | None:
+        bid, ask = self._touch(book)
+        exposed = self._exposed(bid, ask, rng, ids)
+        if exposed:
+            return 0.0, lambda b: [e for o, s, px, q in exposed for e in self._add(b, o, s, px, q)]
+        actions, weights = self._menu(book, bid, ask)
+        if not weights:
+            return None
+        cum = list(accumulate(weights))
+        dt = rng.expovariate(cum[-1])
+        if dt > horizon:
+            return None
+        k = bisect_right(cum, rng.random() * cum[-1], 0, len(cum) - 1)
+        return dt, self._fire(book, actions[k], rng, ids)
+
+    def _add(self, b: Book, oid: int, side: Side, px: int, qty: int) -> list[Event]:
+        return b.submit(oid, side, px, qty, owner=self.owner)
+
+    def _touch(self, book: Book) -> tuple[int, int]:
+        bid, ask = book.best_bid(), book.best_ask()
+        if bid is not None:
+            self._bid = bid
+        if ask is not None:
+            self._ask = ask
+        if self._bid is None or self._ask is None:
+            raise ValueError("the book needs both a bid and an ask once before flow can start")
+        self.gap.update(self._bid, self._ask, self._market)
+        return self._bid, self._ask
+
+    def _exposed(self, bid: int, ask: int, rng: random.Random, ids: Iterator[int]) -> list[tuple]:
+        K = self.params.K
+        out = []
+        reach = ask - K
+        while self._far[Side.BUY] > reach:
+            self._far[Side.BUY] -= 1
+            px = self._far[Side.BUY]
+            out.extend((next(ids), Side.BUY, px, q) for q in self._lump(K, rng))
+        reach = bid + K
+        while self._far[Side.SELL] < reach:
+            self._far[Side.SELL] += 1
+            px = self._far[Side.SELL]
+            out.extend((next(ids), Side.SELL, px, q) for q in self._lump(K, rng))
+        return out
+
+    def _lump(self, i: int, rng: random.Random) -> list[int]:
+        p = self.params
+        left = rng.choice(p.queues[i - 1])
+        sizes = p.sizes[LIMIT, i - 1]
+        out = []
+        while left > 0:
+            q = min(rng.choice(sizes), left)
+            out.append(q)
+            left -= q
+        return out
+
+    def _menu(self, book: Book, bid: int, ask: int) -> tuple[list[tuple], list[float]]:
+        p = self.params
+        gap = self.gap
+        low, high = p.edges
+        wide = ask - bid > 1
+        actions: list[tuple] = []
+        weights: list[float] = []
+        for side, far, best, step in ((Side.BUY, ask, bid, -1), (Side.SELL, bid, ask, 1)):
+            shift = BASE if p.memory and gap.up == (side == Side.BUY) else 0
+            if wide:
+                r0 = rest = gap.regime(side) + shift
+            else:
+                opp = book.level(side.opposite, far)
+                q = opp.qty if opp is not None else 0
+                r0 = (THIN if q <= low else USUAL if q <= high else DEEP) + shift
+                rest = shift
+            for i in range(p.K):
+                px = far + step * (i + 1)
+                lvl = book.level(side, px)
+                q = lvl.qty if lvl is not None else 0
+                a = p.aes[i]
+                n = min((q + a - 1) // a, p.N)
+                r = rest if i else r0
+                lam_l, lam_c, lam_m = p.rates[i][r][n]
+                if lam_l:
+                    actions.append((LIMIT, side, i, n, r, px))
+                    weights.append(lam_l)
+                if q:
+                    if lam_c:
+                        actions.append((CANCEL, side, i, n, r, px))
+                        weights.append(lam_c)
+                    if lam_m and px == best:
+                        actions.append((MARKET, side, i, n, r, px))
+                        weights.append(lam_m)
+        return actions, weights
+
+    def _fire(self, book: Book, action: tuple, rng: random.Random, ids: Iterator[int]):
+        kind, side, i, n, r, px = action
+        self._market = kind == MARKET
+        sizes = self.params.sizes
+        s = rng.choice(sizes.get((kind, i, n, r)) or sizes.get((kind, i, n)) or sizes[kind, i])
+        if kind == LIMIT:
+            oid = next(ids)
+            return lambda b: self._add(b, oid, side, px, s)
+        q = sum(o.qty for o in book.level(side, px).orders.values() if o.owner == self.owner)
+        if q == 0:
+            return lambda b: []
+        qty = self._take(s, q)
+        if kind == CANCEL:
+            return self._pull(book.level(side, px), i, qty, rng)
+        oid, taker = next(ids), side.opposite
+        return lambda b: b.submit(oid, taker, 0, qty, owner=self.owner, kind=OrderType.MARKET)
+
+    def _take(self, s: int, q: int) -> int:
+        if not self.params.conditioned:
+            return s
+        return max(q, -s) if s < 0 else max(min(s, q - 1), 1)
+
+    def _pull(self, lvl: Level, i: int, qty: int, rng: random.Random):
+        mine = [o for o in lvl.orders.values() if o.owner == self.owner]
+        back = self.params.back
+        u = rng.random() if back is None else rng.choice(back[i])
+        target = u * sum(o.qty for o in mine)
+        ahead = j = 0
+        while j < len(mine) - 1 and ahead + mine[j].qty <= target:
+            ahead += mine[j].qty
+            j += 1
+        plan = []
+        for o in mine[j:] + mine[:j][::-1]:
+            if qty <= 0:
+                break
+            left = o.qty - qty
+            plan.append((o.id, o.price, max(left, 0)))
+            qty -= o.qty
+        return lambda b: [e for oid, px, left in plan for e in _shrink(b, oid, px, left)]
+
+
+def _shrink(b: Book, oid: int, px: int, left: int) -> list[Event]:
+    return b.modify(oid, px, left) if left else b.cancel(oid)
