@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import NamedTuple
 
 import numpy as np
 
@@ -27,6 +28,24 @@ class Tape:
         if np.any(i < 0):
             raise ValueError("no mid on the tape that early")
         return np.asarray(self.mid)[i]
+
+
+class Signature(NamedTuple):
+    moves: float
+    eta: float
+    vol: float
+
+
+def signature(tape: Tape, start: float, end: float) -> Signature:
+    t = np.asarray(tape.t)
+    first = max(int(np.searchsorted(t, start, side="right")) - 1, 0)
+    steps = np.sign(np.diff(tape.mid[first:]))
+    moves = np.count_nonzero(t > start)
+    same = np.count_nonzero(steps[1:] == steps[:-1])
+    flips = steps.size - 1 - same
+    grid = np.arange(start, end + 0.5)
+    drift = np.diff(tape.at(grid))
+    return Signature(moves / (end - start), same / (2 * flips) if flips else np.nan, drift.std())
 
 
 def markouts(

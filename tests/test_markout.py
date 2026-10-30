@@ -3,7 +3,7 @@ import pytest
 
 from mmsim.accounting import Account, Fill
 from mmsim.book import Side
-from mmsim.markout import Tape, curve, markouts
+from mmsim.markout import Tape, curve, markouts, signature
 
 
 def tape():
@@ -52,3 +52,13 @@ def test_markout_to_the_close_is_the_pnl():
         acct.fill(f.t, f.oid, f.side, f.price, f.qty, True, None)
     close = markouts(fills, tp, [1000.0])[:, 0]
     assert close.sum() == pytest.approx(acct.value(tp.mid[-1]))
+
+
+def test_signature_of_a_known_tape():
+    tape = Tape()
+    for t, mid in enumerate([100.0, 100.5, 101.0, 100.5, 101.0, 101.5, 102.0]):
+        tape.record(float(t), mid)
+    sig = signature(tape, 0.0, 6.0)
+    assert sig.moves == 1.0
+    assert sig.eta == pytest.approx(3 / (2 * 2))
+    assert sig.vol == pytest.approx(np.std([0.5, 0.5, -0.5, 0.5, 0.5, 0.5]))
