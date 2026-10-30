@@ -238,6 +238,7 @@ def test_unit_sizes_are_one_aes():
     p = qr.fit(msgs, 1.0, 3.0, depth=2).params(sizes=qr.UNIT, min_events=1)
     assert p.sizes[LIMIT, 0] == (100,) and p.sizes[LIMIT, 1] == (40,)
     assert not p.conditioned
+    assert len(p.queues) == 2 and all(len(q) > 2 for q in p.queues)
 
 
 def flow_params():
