@@ -632,3 +632,80 @@ Next: a queue-reactive model (Huang, Lehalle, Rosenbaum 2015), where the arrival
 and cancel rates depend on the queue size, calibrated from the same feed, to see
 whether it can reproduce the 11 mid moves a minute. Then latency on the replay
 and the fill-weighted kappa for the lean.
+
+## 2026-10-30: Queue-reactive flow, latency and rebates on the tape
+
+A queue-reactive model fitted to the CSCO feed makes 10.26 mid moves a minute
+against 11.16 on the tape (the Poisson model made 0.01), and a touch quoter on it
+loses 0.155 cents a share against 0.117, with one-minute adverse selection of
+-0.606 against -0.727. Nothing was fitted to those targets. The replay also gained
+measured latency and rebates.
+
+Built:
+
+- `qr.py`: `fit` takes one pass over the feed and records the ladder of queues
+  before each event plus the events, then bins everything with numpy, so the
+  average event size and the opposite-queue terciles can be computed first. Rates
+  are events over exposure time per (level, regime, queue bin). `Params` holds the
+  rates, the empirical sizes, sampled queue volumes and cancel positions.
+  `QueueReactive` is a flow like the others, so bots, latency and the tape work
+  unchanged. Sparse cells fall back to the pooled rate at that bin, then the
+  nearest lower bin. The top bin reflects.
+- `Gap` is the small piece of memory shared by the fit and the flow: which side
+  left a wide spread, whether a market order did it, and the direction of the
+  last mid move.
+- `markout.signature`: moves per minute, eta and one-minute volatility of a tape.
+- `examples/queue_reactive.py` and `examples/replay_costs.py`.
+
+Checks (all measured today):
+
+- 323 tests (was 287).
+- A pinned queue matches the closed-form birth-death invariant within 0.01 at every
+  n and its depletion flux within 3%, over 40,000 simulated minutes.
+- Rates that generated a feed come back from `fit` within 4 standard errors.
+- Gaps close at the set 75% odds, within 4 standard errors, over more than 500 gaps.
+- Every command replays identically on a second book. This is what lets the flow
+  run under feed latency: all randomness and ids are drawn in `step`, never in the
+  command.
+- On random feeds with latency the feed replica ends on the exact real book.
+- 19 injected bugs in `qr.py` all fail a test. The first pass caught 16. The three
+  survivors were real holes: nothing forced a cancel onto a bot's position, and
+  nothing tied the flow's regime choice to the fit's, which is the riskiest
+  contract in the file. Added a test that the two agree on one book state.
+- `examples/queue_reactive.py` run twice gives byte-identical output.
+
+Results are in the README: the ladder, six symbols, fit on the morning against the
+afternoon, and latency with rebates.
+
+Design notes and things that went wrong:
+
+- Measuring before modelling set the whole design. I expected queues of 3000 shares
+  being eaten. The median queue that ends has 200 shares.
+- The first version overshot 2.6 times, and adding detail made it worse. The top
+  bin held 42% of the time against 2.8% on the tape. Cancels removed a random whole
+  order while adds used conditional sizes, so the drift at each queue size was
+  wrong. Conditioning cancel sizes fixed most of it. Then the top bin, whose rates
+  come from about 21 side-minutes with almost no drift, needed a reflecting barrier.
+- I guessed wrong twice on why the bot fills 1.5 times too often. Back-of-queue
+  cancels are a large measured effect but barely changed fills. Blinding the
+  aggressor to the bot did not change them either, though it fixed the moves (14.2
+  to 10.2). Decomposing settled it: 25% more volume times an 18% bigger slice. I
+  have not fixed that.
+- The cleanup rename of `depth` to `queues` added a `.T` and silently fixed a real
+  bug: `Params` had been storing time snapshots instead of per-level samples, so
+  deep levels were seeded from the wrong array. The stationary rung's moves went
+  from 12.2 to 18.4 when I reran it, which is how I noticed. Added a test that
+  fails without the fix. Every number in the README is from after it.
+- The first costs table looked wrong: latency cut adverse selection and QQQ's fills
+  went up fourfold. I added the spread term and dollars to test the idea that stale
+  fills move the loss between columns. They do, and dollars get worse on all six.
+- A test hung because a limit size of -1 made `_lump` count upward. That was the
+  test's fault: limit sizes are never signed in real parameters.
+- Two experiments started at the same moment killed one process pool at startup
+  (WinError 6). They now run one after the other.
+- I could not find Nasdaq's fee schedule for December 2019, so rebates are labelled
+  scenarios.
+
+Next: time-varying intensities, since the fit on the morning overstates the
+afternoon's moves 4.5 times while eta and adverse carry over. Then order-flow memory
+beyond one bit, to close the adverse gap, and the fill-weighted kappa for the lean.
