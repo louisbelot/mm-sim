@@ -7,7 +7,7 @@ from mmsim.book import Book, EventType, OrderType, Side, Tif
 from mmsim.bots import SymmetricQuoter
 from mmsim.itch import NS_PER_MINUTE, Msg, read
 from mmsim.replay import ItchFlow, ReplayBook, on_grid
-from mmsim.sim import Agent, Simulator
+from mmsim.sim import Agent, Latency, Simulator
 
 B, S = Side.BUY, Side.SELL
 
@@ -237,3 +237,45 @@ def test_the_bot_never_moves_the_real_book(seed):
     assert real(sim.book) == want
     assert sim.book.audit() == ""
     assert len(sim.contexts[0].account.fills) > 20
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_the_feed_replica_ends_on_the_real_book(seed):
+    rng = random.Random(seed)
+    _, msgs = random_feed(2000, rng)
+    bot = SymmetricQuoter(0.5, size=100, max_position=900)
+    lag = {bot: Latency(feed=1e-4, entry=1e-4, response=1e-4)}
+    sim = Simulator(ItchFlow(msgs), [bot], book=ReplayBook, latency=lag)
+    sim.warm_up(msgs[200].t / NS_PER_MINUTE)
+    sim.run(msgs[-1].t / NS_PER_MINUTE - sim.t + 1)
+    view = sim.contexts[0]._view
+    assert real(view) == real(sim.book)
+    assert view.audit() == "" and sim.book.audit() == ""
+
+
+def test_latency_loses_the_queue_position():
+    feed = [at(2.0, "A", 5, B, 99, 100), at(3.0, "E", 1, qty=300)]
+    feed += [at(3.1, "E", 2, qty=200), at(3.2, "E", 5, qty=100)]
+
+    def fills(delay):
+        def start(ctx):
+            ctx.buy(99, 10)
+
+        agent = Script(start)
+        lag = {agent: Latency(entry=delay)} if delay else None
+        sim = Simulator(ItchFlow(BOOK + feed), [agent], book=ReplayBook, latency=lag)
+        sim.warm_up(1.9)
+        sim.run(8.0)
+        return agent.fills
+
+    assert fills(0.0)[0].t == pytest.approx(3.2)
+    assert fills(0.0)[0].ahead == 500
+    assert fills(0.5) == []
+
+
+def test_a_rebate_is_paid_on_replayed_fills():
+    feed = [at(2.0, "A", 5, B, 99, 100), at(3.0, "E", 1, qty=300), at(3.1, "E", 2, qty=200)]
+    feed += [at(3.2, "E", 5, qty=100)]
+    sim, agent = replay(feed, lambda ctx: ctx.buy(99, 10), maker_fee=-0.2)
+    assert [f.fee for f in agent.fills] == [-2.0]
+    assert sim.contexts[0].account.fees == -2.0
