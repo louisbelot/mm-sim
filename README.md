@@ -14,7 +14,9 @@ trade tape, and an exact split of P&L into spread, adverse selection and
 inventory. Sessions can run on the C++ [orderbook](https://github.com/louisbelot/orderbook)
 engine instead of the Python book, and several bots can compete in one session.
 The background market can also be a real day of NASDAQ ITCH data for one stock,
-and the flow models can be calibrated from it.
+the flow models can be calibrated from it, and a queue-reactive model fitted to
+that feed reproduces the real mid-move rate and most of a quoter's adverse
+selection.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -739,10 +741,189 @@ too. The left panel shows another thing the model misses: market orders arrive
 at 43 a minute in the first ten minutes, 2.5 to 9 between noon and 15:00, and
 20 in the last ten, against a flat 10.5.
 
-Caveats. One day. Zero latency: the bot sees every message and reacts before the
-next, which flatters it. No fees or rebates; `Simulator` takes a `maker_fee`, and
-a negative one is a rebate. `examples/itch_replay.py` prints the tables and
-draws the chart in about 3 minutes once the six files are extracted.
+Caveats. One day. The tables above have zero latency and no fees; the next two
+sections add both. `examples/itch_replay.py` prints the tables and draws the
+chart in about 3 minutes once the six files are extracted.
+
+## Queue-reactive flow
+
+The calibrated models above fail for one reason: they cannot empty a queue. So
+before building another model I measured how CSCO's best queues actually end. The
+spread is one tick 99.6% of the time, and best queues end 5.59 times a minute,
+which is half of the 11.18 mid moves: every mid move is one side of a gap opening
+or closing. The mean touch queue is 2927 shares, but the median queue just before
+it ends is 200. Market orders finish 70% of them, and at every percentile from the
+10th to the 90th that last order takes exactly what is left. The gap then closes
+in a median of 71 microseconds, and a new level is born small (median 200 shares).
+Prices move on small fresh queues, and the big queues mostly just sit there.
+
+`qr.py` is the model of Huang, Lehalle and Rosenbaum (2015) built around that. The
+rate of limit orders, cancels and market orders at each level depends on the
+queue size in units of the level's average event size, estimated as events over
+time spent in the state, which is the maximum likelihood estimate for a Markov
+jump process. Market orders run from 76 a minute at one unit to 2 a minute at ten
+units, a factor of 40 the Poisson model has no way to express:
+
+![queue-reactive rates, queue distribution and adverse selection](docs/queue_reactive.png)
+
+Nothing below was fitted to the target. The paper calibrates two probabilities
+(theta, theta_reinit) to match volatility and mean reversion. Here the same
+effects are read off the feed, so every number in the model is a count over a
+time, and the moves, volatility and P&L that come out are predictions. The ladder
+adds one measured ingredient at a time, 48 seeded 30-minute sessions per row
+against the same twelve sessions of tape. The bot is the same touch quoter with
+100 shares and a 1000 share limit:
+
+| CSCO              | P&L (se)       | spread | adverse | shares/session | mid moves/min | eta   | vol   |
+|-------------------|----------------|--------|---------|----------------|---------------|-------|-------|
+| real tape         | -0.117 (0.112) | 0.514  | -0.727  | 11,550         | 11.16         | 0.598 | 1.62  |
+| unit sizes        | 0.208 (0.063)  | 0.500  | -0.236  | 10,146         | 7.76          | 0.309 | 1.53  |
+| stationary sizes  | -0.021 (0.105) | 0.500  | -0.591  | 11,386         | 18.38         | 0.338 | 3.46  |
+| queue sizes       | 0.147 (0.035)  | 0.500  | -0.305  | 16,041         | 7.91          | 0.341 | 1.23  |
+| + regimes         | -0.055 (0.043) | 0.508  | -0.462  | 18,701         | 10.29         | 0.418 | 1.35  |
+| + cancels at back | -0.080 (0.040) | 0.505  | -0.483  | 16,522         | 9.97          | 0.426 | 1.31  |
+| + last move       | -0.155 (0.052) | 0.505  | -0.606  | 16,610         | 10.26         | 0.543 | 1.59  |
+
+Eta is the mean reversion ratio N_c / (2 N_a) of continuations to alternations in
+the mid, and vol is the standard deviation of one-minute mid changes in cents.
+The Poisson model made 0.01 moves a minute and 0.500 a share. This one is 0.038
+from the tape's P&L, against a standard error of 0.112 on the tape itself.
+
+What each rung is:
+
+- Unit sizes: every event is one average event, as in the original paper.
+- Stationary sizes: event sizes drawn from all sizes at that level. It gets
+  adverse selection roughly right for the wrong reason: one large draw wipes out a
+  queue at any time, and volatility is twice the tape's.
+- Queue sizes: sizes drawn from the events seen at that queue size, plus an
+  explicit atom for "takes the whole queue". This is Bodor and Carlier's (2024)
+  point that depletion is far more common than stationary sizes imply. It also
+  makes the mean drift at each queue size match the data, and the first version
+  of this model showed why that matters. Cancels there removed one random whole
+  order, so the drift was wrong and the queue spent 42% of its time in the top bin
+  against 2.8% on the tape. The top bin is also a reflecting barrier now, since
+  its rates come from rare stretches and have almost no drift.
+- Regimes: touch rates also depend on the size of the opposite queue (HLR's Model
+  IIb, cut at terciles), and a gap remembers which side left and why. After a
+  market order empties a queue the price continues 84% of the time (1253 of 1496);
+  after a cancel, 47% (297 of 626). One calibrated theta would average those.
+- Cancels at the back: 52% of touch cancels come from the last 10% of the queue,
+  34% from the very last order, mean position 0.79, and the median cancelled order
+  lived 26 ms. A uniform cancel moves a resting order forward much faster than
+  that, which any queue-position backtest should worry about.
+- Last move: every rate also depends on the direction of the last mid move. One
+  bit of memory takes eta from 0.43 to 0.54 and adverse from -0.48 to -0.61.
+
+The left panel is the reactive rates. The middle panel is the fair test: the
+distribution of the touch queue on the tape and in the full model, one-second
+samples, neither fitted to the other. The right panel is the ladder.
+
+An aggressor sized to the whole queue takes the market's shares and not the bot's,
+the same no-impact rule the replay uses, so the two rows compare like with like.
+That rule matters. When the atom could also reach the bot, moves went to 14.2 a
+minute. It is a weakness of the replay too: a real aggressor would see the bot's
+quote and take it, so the replay spares the bot some of its worst fills.
+
+What is still wrong. The bot trades 44% more shares than on the tape: total volume
+in the model is 25% too high (157,000 shares a session against 125,500) and the
+bot gets a larger slice (10.9% against 9.2%). Adverse selection is 83% of the real
+number.
+
+The bigger problem is the clock. Fit on the morning and run against the afternoon:
+
+| CSCO, fit before 12:45 | P&L (se)       | adverse | shares/session | mid moves/min | eta   | vol  |
+|------------------------|----------------|---------|----------------|---------------|-------|------|
+| real, afternoon        | 0.170 (0.161)  | -0.653  | 5,935          | 3.66          | 0.538 | 1.14 |
+| model                  | -0.237 (0.046) | -0.626  | 23,533         | 16.59         | 0.522 | 2.09 |
+
+Adverse selection per share and eta carry over almost exactly. Activity does not:
+the morning's rates give 4.5 times the afternoon's mid moves. The structure of the
+model is stable across the day and its intensities are not, and the first table is
+an all-day average of a market that is far from stationary.
+
+The same recipe on the other symbols, 12 sessions a row:
+
+|       | moves real | moves model | adverse real | adverse model | P&L real | P&L model |
+|-------|------------|-------------|--------------|---------------|----------|-----------|
+| CSCO  | 11.16      | 10.26       | -0.727       | -0.598        | -0.117   | -0.133    |
+| INTC  | 18.62      | 13.69       | -0.718       | -0.441        | -0.256   | -0.009    |
+| CMCSA | 11.41      | 10.06       | -0.658       | -0.472        | 0.112    | -0.045    |
+| MSFT  | 117.98     | 72.90       | -0.765       | -0.526        | -0.361   | -0.041    |
+| AAPL  | 373.19     | 171.10      | -1.962       | -1.499        | -0.962   | -1.443    |
+| QQQ   | 297.29     | 275.46      | -0.661       | -0.424        | -0.353   | 0.068     |
+
+The CSCO row differs slightly from the ladder because it has 12 seeds, not 48. The
+model is built for large-tick stocks and it shows. AAPL's spread is one tick only
+13% of the time, so five levels from the opposite quote do not describe its book,
+and it misses the moves by a factor of two. Adverse selection is too small on every
+row, so something beyond one bit of memory is missing, most likely the long memory
+of order flow.
+
+`examples/queue_reactive.py` prints all of this and draws the chart in about 8
+minutes. A full model session on CSCO runs in about 3 seconds.
+
+The tests check the model against things it does not contain. A queue pinned to
+one price is a birth-death chain, so its occupancy has to equal the closed form
+pi(n) = pi(0) prod lambda(j-1) / (mu(j) + theta(j)), and its depletion rate has to
+equal pi(1) times the death rate at one, from 40,000 simulated minutes. Fitting a
+feed generated from known rates recovers each one within 4 standard errors. Gaps
+close at the odds put in. Commands replay identically on a second book, which the
+feed replica depends on. 19 injected bugs (floored bins, swapped regimes, an
+exposure off by one event, the bot visible to the aggressor) all fail a test.
+
+## Latency and rebates on the real tape
+
+The replay's zero latency is impossible, so here is the six-symbol table with
+latency and rebates. Feed and entry each take the same one-way delay. The rebate
+columns are scenarios: 0.18 and 0.305 cents a share, the range a 2024 IEX filing
+gives for Nasdaq's displayed-add tiers. I could not confirm the December 2019
+schedule, and a bot this small would not reach the top tier. The bot only posts,
+so the net is exact arithmetic on the same run. Cents per share, twelve 30-minute
+sessions:
+
+| symbol | one way | gross (se)     | spread | adverse | shares  | $/session | net, 0.18 | net, 0.305 |
+|--------|---------|----------------|--------|---------|---------|-----------|-----------|------------|
+| CSCO   | 0       | -0.117 (0.112) | 0.514  | -0.727  | 11,550  | -13.5     | 0.063     | 0.188      |
+| CSCO   | 100 us  | -0.228 (0.065) | 0.357  | -0.577  | 14,029  | -32.0     | -0.048    | 0.077      |
+| CSCO   | 1 ms    | -0.296 (0.071) | 0.350  | -0.593  | 13,290  | -39.3     | -0.116    | 0.009      |
+| CSCO   | 10 ms   | -0.276 (0.060) | 0.346  | -0.588  | 12,684  | -35.1     | -0.096    | 0.029      |
+| INTC   | 0       | -0.256 (0.055) | 0.509  | -0.718  | 20,668  | -53.0     | -0.076    | 0.049      |
+| INTC   | 100 us  | -0.284 (0.057) | 0.331  | -0.699  | 23,909  | -67.8     | -0.104    | 0.021      |
+| INTC   | 1 ms    | -0.271 (0.054) | 0.310  | -0.666  | 23,448  | -63.5     | -0.091    | 0.034      |
+| INTC   | 10 ms   | -0.305 (0.052) | 0.299  | -0.680  | 21,966  | -66.9     | -0.125    | 0.000      |
+| CMCSA  | 0       | 0.112 (0.062)  | 0.514  | -0.658  | 14,003  | 15.6      | 0.292     | 0.417      |
+| CMCSA  | 100 us  | 0.061 (0.053)  | 0.362  | -0.572  | 14,743  | 9.0       | 0.241     | 0.366      |
+| CMCSA  | 1 ms    | -0.089 (0.071) | 0.325  | -0.582  | 14,418  | -12.8     | 0.091     | 0.216      |
+| CMCSA  | 10 ms   | -0.097 (0.086) | 0.326  | -0.599  | 13,591  | -13.2     | 0.083     | 0.208      |
+| MSFT   | 0       | -0.361 (0.095) | 0.537  | -0.765  | 41,181  | -148.7    | -0.181    | -0.056     |
+| MSFT   | 100 us  | -0.369 (0.115) | 0.278  | -0.585  | 52,901  | -195.2    | -0.189    | -0.064     |
+| MSFT   | 1 ms    | -0.436 (0.073) | 0.220  | -0.581  | 56,323  | -245.5    | -0.256    | -0.131     |
+| MSFT   | 10 ms   | -0.436 (0.076) | 0.206  | -0.600  | 54,152  | -236.2    | -0.256    | -0.131     |
+| AAPL   | 0       | -0.962 (0.254) | 0.674  | -1.962  | 84,215  | -810.3    | -0.782    | -0.657     |
+| AAPL   | 100 us  | -1.288 (0.156) | 0.428  | -1.742  | 99,409  | -1280.6   | -1.108    | -0.983     |
+| AAPL   | 1 ms    | -1.435 (0.153) | 0.276  | -1.662  | 104,667 | -1501.6   | -1.255    | -1.130     |
+| AAPL   | 10 ms   | -1.535 (0.201) | 0.175  | -1.734  | 96,385  | -1479.5   | -1.355    | -1.230     |
+| QQQ    | 0       | -0.353 (0.198) | 0.529  | -0.661  | 33,529  | -118.3    | -0.173    | -0.048     |
+| QQQ    | 100 us  | -0.164 (0.060) | 0.132  | -0.303  | 87,404  | -143.5    | 0.016     | 0.141      |
+| QQQ    | 1 ms    | -0.184 (0.063) | 0.083  | -0.260  | 125,228 | -230.9    | -0.004    | 0.121      |
+| QQQ    | 10 ms   | -0.178 (0.039) | 0.075  | -0.278  | 124,636 | -221.9    | 0.002     | 0.127      |
+
+Read the dollars, because the cents mislead. Latency makes adverse selection look
+better on every row, and QQQ's loss per share halves while its fills go up almost
+fourfold. Both are accounting. A slow quote sits at a price the market has left, a
+real order crosses it, and the fill is already through the mid when it happens, so
+the loss lands in the spread term (0.529 down to 0.075 on QQQ) and never reaches
+the markout. Dollars per session are worse at every latency on all six symbols.
+
+On CSCO, INTC and AAPL most of the damage is done by 100 microseconds, and on MSFT,
+CMCSA and QQQ by 1 ms. Going from 1 ms to 10 ms changes little anywhere. That fits
+the gap measurement: a gap closes in a median of 71 microseconds, so a zero-latency
+bot reprices inside the gap and anything slower reacts after the fact.
+
+The rebate is about as large as what the bot loses. At 0.18 cents only CMCSA is
+clearly positive across latencies. At 0.305 CSCO, INTC, CMCSA and, once it is slow,
+QQQ are at or above zero, while MSFT and AAPL lose at every latency.
+`examples/replay_costs.py` prints the table in about 4 minutes.
 
 ## Install
 
