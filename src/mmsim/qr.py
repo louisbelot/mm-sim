@@ -380,9 +380,10 @@ def _regimes(
 
 
 class QueueReactive:
-    def __init__(self, params: Params, owner: int = 0, seed: int = 0) -> None:
+    def __init__(self, params: Params, owner: int = 0, seed: int = 0, start: float = 0.0) -> None:
         self.params = params
         self.owner = owner
+        self.t = start
         self.gap = Gap()
         self._rng = random.Random(seed)
         self._bid: int | None = None
@@ -405,14 +406,27 @@ class QueueReactive:
         if exposed:
             return 0.0, lambda b: [e for o, s, px, q in exposed for e in self._add(b, o, s, px, q)]
         actions, weights = self._menu(book, bid, ask)
-        if not weights:
-            return None
-        cum = list(accumulate(weights))
-        dt = rng.expovariate(cum[-1])
-        if dt > horizon:
-            return None
-        k = bisect_right(cum, rng.random() * cum[-1], 0, len(cum) - 1)
-        return dt, self._fire(book, actions[k], rng, ids)
+        clock = self.params.clock
+        waited = 0.0
+        while True:
+            left = horizon - waited
+            if clock is None:
+                edge, w = math.inf, weights
+            else:
+                h, edge = clock.slot(self.t)
+                m = clock.scale[h]
+                w = [x * m[a[0]] for a, x in zip(actions, weights, strict=True)]
+            cum = list(accumulate(w))
+            dt = rng.expovariate(cum[-1]) if cum and cum[-1] > 0 else math.inf
+            if dt <= min(left, edge):
+                self.t += dt
+                k = bisect_right(cum, rng.random() * cum[-1], 0, len(cum) - 1)
+                return waited + dt, self._fire(book, actions[k], rng, ids)
+            if left <= edge:
+                self.t += left
+                return None
+            waited += edge
+            self.t += edge
 
     def _add(self, b: Book, oid: int, side: Side, px: int, qty: int) -> list[Event]:
         return b.submit(oid, side, px, qty, owner=self.owner)
