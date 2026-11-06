@@ -20,6 +20,7 @@ BASE = 7
 REGIMES = 2 * BASE
 POSITIONS = 1000
 UNIT, STATIONARY, QUEUE = "unit", "stationary", "queue"
+KINDS, SHARED = "kinds", "shared"
 
 
 class Gap:
@@ -51,6 +52,17 @@ class Gap:
 
 
 @dataclass(frozen=True)
+class Clock:
+    edges: tuple[float, ...]
+    scale: tuple[tuple[float, float, float], ...]
+
+    def slot(self, t: float) -> tuple[int, float]:
+        H = len(self.scale)
+        h = bisect_right(self.edges, t, 1, H) - 1
+        return h, self.edges[h + 1] - t if h < H - 1 else math.inf
+
+
+@dataclass(frozen=True)
 class Params:
     rates: tuple
     sizes: dict
@@ -60,6 +72,7 @@ class Params:
     conditioned: bool
     back: tuple[tuple[float, ...], ...] | None = None
     memory: bool = False
+    clock: Clock | None = None
 
     @property
     def K(self) -> int:
@@ -79,6 +92,9 @@ class Fit:
     edges: tuple[int, int]
     events: np.ndarray
     queues: np.ndarray
+    slots: np.ndarray
+    exposure: np.ndarray
+    arrivals: np.ndarray
 
     def params(
         self,
@@ -87,8 +103,14 @@ class Fit:
         back: bool = True,
         memory: bool = True,
         min_events: int = 30,
+        clock: str | None = None,
     ) -> Params:
-        pooled_n, pooled_t = self.counts.sum(axis=1), self.tau.sum(axis=1)
+        c = None if clock is None else self.clock(clock)
+        if c is None:
+            tau = np.repeat(self.tau[..., None], 3, axis=-1)
+        else:
+            tau = np.einsum("irnh,hk->irnk", self.exposure, np.array(c.scale))
+        pooled_n, pooled_t = self.counts.sum(axis=1), tau.sum(axis=1)
         out = []
         for i in range(self.aes.size):
             levels = []
@@ -96,11 +118,11 @@ class Fit:
                 if not regimes:
                     n, t = pooled_n[i], pooled_t[i]
                 elif memory:
-                    n, t = self.counts[i, r], self.tau[i, r]
+                    n, t = self.counts[i, r], tau[i, r]
                 else:
                     b = r % BASE
                     n = self.counts[i, b] + self.counts[i, b + BASE]
-                    t = self.tau[i, b] + self.tau[i, b + BASE]
+                    t = tau[i, b] + tau[i, b + BASE]
                 levels.append(_filled(n, t, pooled_n[i], pooled_t[i], min_events))
             out.append(tuple(levels))
         return Params(
@@ -112,7 +134,23 @@ class Fit:
             sizes == QUEUE,
             self._back() if back else None,
             memory and regimes,
+            c,
         )
+
+    def clock(self, mode: str = KINDS, tol: float = 1e-10, iters: int = 10_000) -> Clock:
+        N = self.counts.reshape(-1, 3)
+        T = self.exposure.reshape(-1, self.slots.size - 1)
+        L = np.diff(self.slots)
+        s = np.ones((L.size, 3))
+        for _ in range(iters):
+            lam = _ratio(N, T @ s)
+            new = _scale(self.arrivals, T.T @ lam, mode)
+            new /= L @ new / L.sum()
+            done = np.abs(new - s).max() < tol
+            s = new
+            if done:
+                break
+        return _clock(self.slots, s)
 
     def _back(self) -> tuple[tuple[float, ...], ...]:
         lvl, _, kind, _, _, pos = self.events.T
@@ -153,6 +191,30 @@ class Fit:
         return invariant(r[:, LIMIT], r[:, CANCEL] + r[:, MARKET])
 
 
+def _ratio(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    return np.divide(a, b, out=np.zeros_like(b, dtype=float), where=b > 0)
+
+
+def _scale(arrivals: np.ndarray, expected: np.ndarray, mode: str) -> np.ndarray:
+    if mode == SHARED:
+        arrivals, expected = (
+            arrivals.sum(axis=1, keepdims=True),
+            expected.sum(axis=1, keepdims=True),
+        )
+    return _ratio(arrivals, expected) * np.ones(3)
+
+
+def _clock(slots: np.ndarray, s: np.ndarray) -> Clock:
+    return Clock(tuple(float(e) for e in slots), tuple(tuple(float(x) for x in r) for r in s))
+
+
+def rescale(p: Params, f: Fit, mode: str = KINDS) -> Clock:
+    if p.aes != tuple(int(a) for a in f.aes) or p.edges != f.edges:
+        raise ValueError("fit the other window with the same aes and edges as the params")
+    expected = np.einsum("irnk,irnh->hk", np.array(p.rates), f.exposure)
+    return _clock(f.slots, _scale(f.arrivals, expected, mode))
+
+
 def _filled(n, t, pooled_n, pooled_t, min_events):
     rate = np.zeros_like(n, dtype=float)
     last = None
@@ -182,6 +244,9 @@ def fit(
     depth: int = 5,
     bins: int = 30,
     tick: int = 100,
+    slot: float = 30.0,
+    aes: Sequence[int] | None = None,
+    edges: tuple[int, int] | None = None,
 ) -> Fit:
     book = ReplayBook()
     gap = Gap()
@@ -211,33 +276,43 @@ def fit(
 
     q = np.array(rows, dtype=np.int64)
     ev = np.array(events, dtype=np.int64).reshape(-1, 6)
-    aes = np.array(
-        [max(1, round(np.abs(ev[ev[:, 2] == i, 4]).mean())) for i in range(depth)], dtype=np.int64
-    )
+    if aes is None:
+        aes = [max(1, round(np.abs(ev[ev[:, 2] == i, 4]).mean())) for i in range(depth)]
+    aes = np.array(aes, dtype=np.int64)
     dt = np.diff(np.array([lo, *ts], dtype=float)) / NS_PER_MINUTE
-    touch = q[:, :, 0].ravel()
-    low, high = (int(v) for v in np.quantile(touch[touch > 0], [1 / 3, 2 / 3]))
+    if edges is None:
+        touch = q[:, :, 0].ravel()
+        edges = tuple(int(v) for v in np.quantile(touch[touch > 0], [1 / 3, 2 / 3]))
+    low, high = edges
+    H = max(1, math.ceil((end - start) / slot - 1e-9))
+    slots = np.minimum(start + slot * np.arange(H + 1), end)
+    h = np.minimum((np.array(ts) - lo) // (slot * NS_PER_MINUTE), H - 1).astype(np.int64)
     n = np.minimum(-(-q // aes), bins)
     regime = _regimes(q, np.array(codes, dtype=np.int64), np.array(ups), low, high)
 
     counts = np.zeros((depth, REGIMES, bins + 1, 3), dtype=np.int64)
-    tau = np.zeros((depth, REGIMES, bins + 1))
+    exposure = np.zeros((depth, REGIMES, bins + 1, H))
     for s in Side:
         for i in range(depth):
-            np.add.at(tau, (i, regime[:, s, i], n[:, s, i]), dt)
+            np.add.at(exposure, (i, regime[:, s, i], n[:, s, i], h), dt)
     row, side, lvl, kind, qty, pos = ev.T
     b = n[row, side, lvl]
     np.add.at(counts, (lvl, regime[row, side, lvl], b, kind), 1)
+    arrivals = np.zeros((H, 3), dtype=np.int64)
+    np.add.at(arrivals, (h[row], kind), 1)
     grid = np.searchsorted(np.cumsum(dt), np.arange(1, int((end - start) * 60)) / 60)
     sample = q[np.minimum(grid, len(q) - 1)]
     return Fit(
         end - start,
         counts,
-        tau,
+        exposure.sum(axis=-1),
         aes,
         (low, high),
         np.column_stack((lvl, b, kind, qty, regime[row, side, lvl], pos)),
         np.concatenate((sample[:, 0], sample[:, 1])),
+        slots,
+        exposure,
+        arrivals,
     )
 
 
