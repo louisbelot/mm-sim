@@ -871,6 +871,119 @@ close at the odds put in. Commands replay identically on a second book, which th
 feed replica depends on. 19 injected bugs (floored bins, swapped regimes, an
 exposure off by one event, the bot visible to the aggressor) all fail a test.
 
+## Time of day
+
+The queue-reactive rates depend on the book and not on the clock, which is why the
+morning fit runs the afternoon 4.5 times too fast. The fix keeps the model and puts a
+clock on top of it. Every rate is the book-state rate times a multiplier for the
+30-minute slot it falls in:
+
+```
+lambda(x, k, t) = lambda(x, k) * s_k(h(t))
+```
+
+x is the book state (level, regime, queue bin), k the event kind (limit, cancel,
+market) and h the slot. With N(x, k) events seen in state x, A(h, k) events in slot h
+and T(x, h) minutes spent in state x during slot h, the two score equations of the
+Poisson likelihood are
+
+```
+lambda(x, k) = N(x, k) / sum_h T(x, h) s_k(h)
+s_k(h)       = A(h, k) / sum_x T(x, h) lambda(x, k)
+```
+
+The log-likelihood is concave in log lambda and log s, so solving one equation, then
+the other, until nothing moves gives the joint maximum. The scale between the two is
+free, so each s_k is pinned to a time-weighted mean of one and lambda stays an
+all-day rate. A shared clock uses one multiplier for all three kinds. `Fit.clock`
+solves it and `Fit.params(clock=...)` returns rates fitted against the clocked
+exposure. The flow samples through slot edges exactly: it draws an exponential at
+the current slot's total rate, and when the draw crosses the edge it moves to the edge
+and draws again, which is allowed because the exponential has no memory.
+
+![CSCO multipliers by slot; mid moves per session against the tape; afternoon moves on six symbols](docs/activity_clock.png)
+
+CSCO's activity falls by a factor of 14 from the first slot (multiplier 3.95) to the
+13:35 slot (0.29). Kinds do not move together. Cancels swing the most, 5.3 at the open
+and 0.18 in the afternoon. Market orders come back for the close, 2.27 in the last
+slot while cancels stay at 0.26.
+
+Fit on the whole day, mean mid moves per minute over 8 seeds in each 30-minute
+session:
+
+| start | tape  | flat  | shared clock | clock by kind |
+|-------|-------|-------|--------------|---------------|
+| 9:35  | 56.30 | 10.72 | 41.91        | 52.69         |
+| 10:05 | 23.90 | 10.72 | 23.96        | 19.73         |
+| 10:35 | 12.00 | 10.72 | 14.53        | 9.21          |
+| 11:05 | 7.37  | 10.72 | 10.59        | 5.67          |
+| 11:35 | 6.70  | 10.72 | 7.77         | 4.62          |
+| 12:05 | 4.23  | 10.72 | 6.16         | 2.49          |
+| 12:35 | 5.07  | 10.72 | 5.92         | 3.93          |
+| 13:05 | 2.60  | 10.72 | 4.31         | 3.01          |
+| 13:35 | 2.80  | 10.72 | 2.96         | 3.14          |
+| 14:05 | 4.17  | 10.72 | 4.37         | 4.35          |
+| 14:35 | 4.47  | 10.72 | 4.61         | 3.48          |
+| 15:05 | 4.27  | 10.72 | 3.20         | 5.55          |
+
+The flat model gets the day's average and nothing else. Both clocks follow the
+twentyfold fall in moves.
+
+The harder test is the one that failed before: rates fitted on the morning, run on
+the afternoon. `qr.rescale(params, later_fit)` holds the morning's lambda fixed and
+solves only the s equation on the afternoon's tape. That uses the afternoon's event
+counts, so it measures how much the model is missing and forecasts nothing. With one
+day of data I cannot test a forecast from earlier days. The closest thing is the
+median afternoon clock of the five other symbols, which asks whether the shape of the
+day carries across stocks.
+
+| CSCO, fit before 12:45     | P&L (se)       | adverse | shares/session | moves/min | median touch queue |
+|----------------------------|----------------|---------|----------------|-----------|--------------------|
+| real, afternoon            | 0.170 (0.161)  | -0.653  | 5,935          | 3.66      | 3,300              |
+| fit on morning             | -0.401 (0.046) | -0.743  | 23,934         | 16.82     | 2,043              |
+| + afternoon clock, shared  | -0.406 (0.103) | -0.560  | 5,137          | 3.48      | 2,050              |
+| + afternoon clock, by kind | -0.114 (0.067) | -0.481  | 9,151          | 4.64      | 2,950              |
+| + peers' afternoon clock   | -0.131 (0.066) | -0.635  | 10,270         | 7.15      | 2,022              |
+
+The shared clock gets moves and volume right and leaves the queue too short. The clock
+by kind cuts cancels harder than adds (0.15 to 0.24 against 0.23 to 0.49), so queues
+grow back toward the real 3,300 shares, at the cost of 1.5 times the volume. None of
+the rows gets the sign of the real P&L, though the real one is only one standard error
+from zero.
+
+The same on all six symbols, afternoon moves per minute, 24 sessions a row:
+
+| symbol | tape   | flat   | own clock | peers' clock | adverse tape | own clock | peers' clock |
+|--------|--------|--------|-----------|--------------|--------------|-----------|--------------|
+| CSCO   | 3.66   | 17.92  | 3.62      | 7.20         | -0.653       | -0.565    | -0.678       |
+| INTC   | 7.59   | 19.98  | 6.26      | 8.80         | -0.752       | -0.485    | -0.503       |
+| CMCSA  | 5.13   | 12.70  | 2.21      | 6.09         | -0.529       | -0.459    | -0.555       |
+| MSFT   | 55.19  | 113.32 | 63.63     | 39.20        | -0.613       | -0.599    | -0.463       |
+| AAPL   | 220.58 | 254.81 | 145.22    | 87.34        | -1.976       | -1.644    | -1.354       |
+| QQQ    | 119.84 | 427.53 | 183.85    | 152.87       | -0.430       | -0.447    | -0.363       |
+
+The flat morning rates run 1.2 (AAPL) to 3.6 (QQQ) times too fast. Each symbol's own
+clock lands within 20% on CSCO, INTC and MSFT and misses CMCSA by half. That miss is
+structural. The clock is fitted to the number of events in each slot, and a shared
+multiplier scales adds and removals alike, so it cannot change the balance between
+them at the touch, which is what sets how often a queue runs out. Where the afternoon
+changes that balance, matching event counts does not match moves. The peers' clock is
+within 20% on INTC and CMCSA and off by two on CSCO, so the shape of the day is only
+partly common across stocks.
+
+`examples/activity_clock.py` prints all of this and draws the chart in about 15
+minutes.
+
+The tests check the estimator on data with a known answer. Counts drawn from known
+rates and multipliers come back within 4 standard errors, and at the solution the
+expected count in every slot equals the observed count to 1e-8. A feed generated by a
+flow with a three-slot clock is fitted back to that clock's ratios. The flow's event
+counts per slot match rate times length, and a draw started in a nearly silent slot
+lands just past the edge at the next slot's rate. A clock of all ones gives exactly
+the tape of the flat model. Nine injected bugs (no normalization, a draw
+allowed to jump an edge, the wrong multiplier column, the slot index off by one, and
+others) all fail a test.
+
 ## Latency and rebates on the real tape
 
 The replay's zero latency is impossible, so here is the six-symbol table with
