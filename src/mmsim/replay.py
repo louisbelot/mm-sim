@@ -2,14 +2,28 @@ from __future__ import annotations
 
 import random
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from enum import IntEnum
 
+from .accounting import Fill
 from .book import _SIGN, Book, Event, EventType, Order, OrderType, Reason, Side, Tif, _fillable
 from .itch import NS_PER_MINUTE, Msg
 
 MARKET = 0
 
 
+class Cause(IntEnum):
+    QUEUE = 0
+    ADD = 1
+    SWEEP = 2
+    CROSS = 3
+    TAKE = 4
+
+
 class ReplayBook(Book):
+    def __init__(self) -> None:
+        super().__init__()
+        self.causes: list[tuple[int, Cause]] = []
+
     def best(self, side: Side) -> int | None:
         for lvl in self.levels(side):
             for o in lvl.orders.values():
@@ -24,7 +38,7 @@ class ReplayBook(Book):
             case "E" | "C":
                 o = self._orders[-m.ref]
                 side = o.side.opposite
-                out = self._hit(agg[side], side, m.qty, o.price, o.id)
+                out = self._hit(agg[side], side, m.qty, o.price, Cause.QUEUE, o.id)
                 if m.printable:
                     out.append(Event(EventType.TRADE, agg[side], side, o.price, m.qty, maker=o.id))
                 self._shrink(o, m.qty)
@@ -40,11 +54,13 @@ class ReplayBook(Book):
         return []
 
     def _add(self, ref: int, side: Side, px: int, qty: int, agg: int) -> list[Event]:
-        out = self._hit(agg, side, qty, px)
+        out = self._hit(agg, side, qty, px, Cause.ADD)
         self._rest(Order(-ref, MARKET, side, px, qty))
         return out
 
-    def _hit(self, agg: int, side: Side, qty: int, px: int, stop: int = 0) -> list[Event]:
+    def _hit(
+        self, agg: int, side: Side, qty: int, px: int, cause: Cause, stop: int = 0
+    ) -> list[Event]:
         opp = side.opposite
         levels, limit = self._levels[opp], _SIGN[opp] * px
         targets = []
@@ -62,6 +78,7 @@ class ReplayBook(Book):
                 break
             q = min(qty, o.qty)
             out.append(Event(EventType.TRADE, agg, side, o.price, q, maker=o.id))
+            self.causes.append((o.id, cause))
             qty -= q
             self._shrink(o, q)
         return out
@@ -93,6 +110,7 @@ class ReplayBook(Book):
         for o, price, q in takes:
             out.append(Event(EventType.TRADE, t.id, t.side, price, q, maker=o.id))
             if o.owner != MARKET:
+                self.causes.append((o.id, Cause.CROSS))
                 self._shrink(o, q)
         t.qty = left
         if t.qty == 0:
@@ -131,6 +149,12 @@ class ItchFlow:
                 return dt, lambda b: [e for m in batch for e in b.apply(m, agg)]
         self.t += horizon
         return None
+
+
+def label(book: ReplayBook, fills: Sequence[Fill]) -> list[Cause]:
+    mine = {f.oid for f in fills}
+    log = iter([c for oid, c in book.causes if oid in mine])
+    return [next(log) if f.maker else Cause.TAKE for f in fills]
 
 
 def batches(msgs: list[Msg]) -> list[list[Msg]]:

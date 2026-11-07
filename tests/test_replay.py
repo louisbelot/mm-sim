@@ -6,7 +6,7 @@ import pytest
 from mmsim.book import Book, EventType, OrderType, Side, Tif
 from mmsim.bots import SymmetricQuoter
 from mmsim.itch import NS_PER_MINUTE, Msg, read
-from mmsim.replay import ItchFlow, ReplayBook, on_grid
+from mmsim.replay import Cause, ItchFlow, ReplayBook, label, on_grid
 from mmsim.sim import Agent, Latency, Simulator
 
 B, S = Side.BUY, Side.SELL
@@ -160,6 +160,31 @@ def test_sweep_is_one_print():
     feed = [at(2, "E", 1, qty=300), at(2, "E", 2, qty=200), at(2, "E", 4, qty=10)]
     _, agent = replay(feed, None)
     assert [(p.t, p.side, p.price, p.qty) for p in agent.prints] == [(2.0, S, 98, 510)]
+
+
+def test_every_fill_gets_its_cause():
+    def start(ctx):
+        ctx.buy(100, 40)
+        ctx.buy(101, 10, tif=Tif.IOC)
+
+    feed = [at(2, "E", 1, qty=10), at(3, "A", 9, S, 100, 25)]
+    sim, agent = replay(feed, start)
+    assert [(f.side, f.qty, f.maker) for f in agent.fills] == [
+        (B, 10, False),
+        (B, 10, True),
+        (B, 25, True),
+    ]
+    assert label(sim.book, agent.fills) == [Cause.TAKE, Cause.QUEUE, Cause.ADD]
+
+
+def test_a_cross_between_bots_is_labelled():
+    a = Script(lambda ctx: ctx.sell(100, 10))
+    b = Script(lambda ctx: ctx.buy(101, 30, tif=Tif.IOC))
+    sim = Simulator(ItchFlow(BOOK), [a, b], book=ReplayBook)
+    sim.warm_up(1.0)
+    sim.run(1.0)
+    assert label(sim.book, a.fills) == [Cause.CROSS]
+    assert label(sim.book, b.fills) == [Cause.TAKE, Cause.TAKE]
 
 
 def test_off_grid_orders_are_dropped_with_their_history():
