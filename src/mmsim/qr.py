@@ -73,6 +73,7 @@ class Params:
     back: tuple[tuple[float, ...], ...] | None = None
     memory: bool = False
     clock: Clock | None = None
+    regimes: bool = True
 
     @property
     def K(self) -> int:
@@ -95,6 +96,10 @@ class Fit:
     slots: np.ndarray
     exposure: np.ndarray
     arrivals: np.ndarray
+    t: np.ndarray | None = None
+    h: np.ndarray | None = None
+    top: np.ndarray | None = None
+    hits: np.ndarray | None = None
 
     def params(
         self,
@@ -135,6 +140,7 @@ class Fit:
             self._back() if back else None,
             memory and regimes,
             c,
+            regimes=regimes,
         )
 
     def clock(self, mode: str = KINDS, tol: float = 1e-10, iters: int = 10_000) -> Clock:
@@ -300,6 +306,11 @@ def fit(
     np.add.at(counts, (lvl, regime[row, side, lvl], b, kind), 1)
     arrivals = np.zeros((H, 3), dtype=np.int64)
     np.add.at(arrivals, (h[row], kind), 1)
+    has = q > 0
+    i = np.where(has.any(axis=2), has.argmax(axis=2), -1)
+    at = np.arange(len(q))[:, None], np.arange(2)[None, :], np.maximum(i, 0)
+    top = np.stack((i, regime[at], n[at]), axis=-1)
+    hits = ev[kind == MARKET][:, :2]
     grid = np.searchsorted(np.cumsum(dt), np.arange(1, int((end - start) * 60)) / 60)
     sample = q[np.minimum(grid, len(q) - 1)]
     return Fit(
@@ -313,6 +324,10 @@ def fit(
         slots,
         exposure,
         arrivals,
+        (np.array(ts, dtype=float) - lo) / NS_PER_MINUTE,
+        h,
+        top,
+        hits,
     )
 
 

@@ -436,3 +436,13 @@ def test_fit_and_flow_agree_on_the_state():
     actions, weights = flow._menu(book, 99, 100)
     got = {(a[1], a[2]): (a[3], a[4]) for a in actions}
     assert (int(n[0]), int(regime[0])) == got[B, 0]
+
+
+def test_fit_keeps_the_touch_and_the_market_hits():
+    p = flat(2, 8, lambda n: 30.0 / (1 + 0.3 * n), lambda n: 6.0 + n, lambda n: 4.0)
+    f = qr.fit(feed(p, 100.0, 2), 0.0, 100.0, depth=2, bins=8)
+    lvl = f.events[f.events[:, 2] == MARKET, 0]
+    rows, side = f.hits.T
+    assert lvl.size == rows.size > 100
+    assert np.array_equal(lvl, f.top[rows, side, 0])
+    assert np.all(np.diff(f.t) >= 0) and 0 <= f.t[0] and f.t[-1] <= f.T
