@@ -870,3 +870,89 @@ Design notes:
 Next: order-flow memory beyond one bit for the queue-reactive model, since adverse
 selection is still short of the tape on five of six symbols, then the
 fill-weighted kappa for the flow lean.
+
+## 2026-11-07: Hawkes memory on the queue-reactive market orders
+
+The queue-reactive flow now remembers its own market orders. On CSCO the lag-1
+autocorrelation of aggressor signs goes from 0.26 to 0.43 (tape 0.43), the bot's
+volume excess from 44% to 7%, and one-minute adverse selection from -0.606 to
+-0.666 against -0.727 on the tape.
+
+Built:
+
+- `qr.fit` keeps per-row data: row times, slot, the touch cell (level, regime,
+  queue bin) on each side, and the market orders as (row, side).
+- `qr.Excite` (own, cross, beta per kernel) on `Params.excite`. The flow keeps
+  decayed counts of its market orders per kernel and side, adds the excitation to
+  the market actions, and samples by thinning against the current rate.
+- `Fit.excite(params, kernels, min_events)`: joint maximum likelihood of the
+  kernels and one baseline scale per book state with enough market orders (one
+  shared scale for the rest), L-BFGS on log parameters with an analytic gradient.
+  Returns params with rescaled market rates and the kernels.
+- `Fit.residuals(params)`: time-rescaled waits between market orders per side.
+- `qr._decay`: the exponential sums by summing the last m events directly when
+  that is cheaper than `hawkes.decayed_at`'s overflow buckets.
+- `examples/order_memory.py`, a README section and `docs/order_memory.png`.
+
+Checks:
+
+- 369 tests (was 350). Every intermediate commit passes on its own.
+- The log-likelihood and its gradient match an O(n^2) brute force with dead rows
+  and tied timestamps to 1e-9; residuals match a brute force too.
+- Twelve simulated 600-minute feeds with own 0.4, cross 0.1, beta 30 recover
+  0.397, 0.0996 and 30.2 (standard errors 0.003, 0.002, 0.4). The market rate
+  matches mu / (1 - branching) within 4 standard deviations.
+- A zero kernel gives the same tape as no kernel, draw for draw.
+- 14 injected bugs: 13 failed a test on the first pass. Residuals that ignored dead
+  time survived because the simulated feed has 0.3% dead time; the brute-force
+  residual test on a hand-built fit with 15% dead rows catches it.
+- `examples/order_memory.py` run twice gives identical output.
+
+Results (CSCO, 2019-12-30):
+
+- One kernel: branching 0.40 at 0.33 ms. Three kernels: 0.51 over 0.20 ms, 5.6 ms
+  and 0.60 s. Residual variance 5.09 to 1.40, KS distance 0.418 to 0.048 (5%
+  critical value 0.021, so still rejected).
+- Sign autocorrelation at lags 1 and 2 matches the tape with three kernels, and the
+  10-second Fano factor matches with two (4.31). Mid moves fall from 10.26 to 9.08
+  a minute against 11.16.
+- Six symbols: adverse moves toward the tape everywhere, closing 75% of the gap on
+  INTC and CMCSA, 45% on MSFT, 17% on CSCO and QQQ, and overshooting on AAPL
+  (-2.40 against -1.96). Bot volume within 5% of the tape on four symbols.
+- The bot's P&L gets worse, not closer: -0.258 cents a share on CSCO against
+  -0.117, through the inventory term.
+
+Design notes and what went wrong:
+
+- One scale on the old baseline was the first version. On a simulated feed with a
+  flat baseline of 4 it returned 5.9 at queue size one: the old rates already held
+  the bursts, because a market order leaves a small queue behind it. Fitting a
+  baseline per state fixed it (4.0 to 4.3).
+- Then the kernel came back 3.5% low across twelve seeds, five standard errors.
+  The same estimator on a plain Hawkes simulation was unbiased, and residuals
+  under the true parameters averaged 1.005, so the flow and the likelihood
+  disagreed. The flow cannot send a market order on a side whose touch is beyond
+  the modelled depth, and that happens right after a market order, when the
+  excitation is largest. Integrating the excitation only over time at risk took
+  the bias to zero.
+- Doing that integral over all 486k CSCO rows took 107 s a fit. Only the rare dead
+  rows differ from the whole-window integral, so the code subtracts those: 6 s.
+- The brute-force test caught two end-point bugs: a market order on the last row
+  counted one unit of excitation mass, and a zero-length dead interval after a
+  tied timestamp picked up one too. The second showed up on real data as one
+  negative residual.
+- On the other symbols some market orders landed in states whose queue-reactive
+  rate is zero (sparse cells with no lower bin to borrow from), which makes the
+  likelihood minus infinity. Those states now get the level's pooled rate. A
+  related crash: the excited flow tried market orders at depths where the tape
+  never had one and had no sizes to draw.
+- The fitted timescales are sub-millisecond, where `decayed_at` puts one event in
+  each overflow bucket and runs a Python loop per event. AAPL took over 20 minutes;
+  summing the last m events as vectors brings it to 3.
+- I killed two experiment runs: one because I stashed `qr.py` while its workers
+  could be importing it, and one that was still running pre-fix code.
+
+Next: let the excitation reach cancels and limit orders at the touch, since moves
+are now short of the tape and the excited model overshoots on AAPL, and let a
+bot's own market orders excite the flow. Then the fill-weighted kappa for the
+flow lean.
