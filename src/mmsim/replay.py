@@ -20,8 +20,9 @@ class Cause(IntEnum):
 
 
 class ReplayBook(Book):
-    def __init__(self) -> None:
+    def __init__(self, sweep: bool = False) -> None:
         super().__init__()
+        self.sweep = sweep
         self.causes: list[tuple[int, Cause]] = []
 
     def best(self, side: Side) -> int | None:
@@ -52,6 +53,23 @@ class ReplayBook(Book):
                 self._remove(o)
                 return self._add(m.new, o.side, m.px, m.qty, agg[o.side])
         return []
+
+    def play(self, batch: Sequence[Msg], agg: tuple[int, int]) -> list[Event]:
+        hit = set()
+        if self.sweep and batch[0].kind in "EC":
+            hit = {(o.side, o.price) for o in (self._orders[-m.ref] for m in batch)}
+        out = [e for m in batch for e in self.apply(m, agg)]
+        for side, px in sorted(hit, key=lambda k: (k[0], _SIGN[k[0]] * k[1])):
+            lvl = self.level(side, px)
+            if lvl is None or any(o.owner == MARKET for o in lvl.orders.values()):
+                continue
+            for o in list(lvl.orders.values()):
+                out.append(
+                    Event(EventType.TRADE, agg[side.opposite], side.opposite, px, o.qty, maker=o.id)
+                )
+                self.causes.append((o.id, Cause.SWEEP))
+                self._remove(o)
+        return out
 
     def _add(self, ref: int, side: Side, px: int, qty: int, agg: int) -> list[Event]:
         out = self._hit(agg, side, qty, px, Cause.ADD)
@@ -146,7 +164,7 @@ class ItchFlow:
                 self._i += 1
                 self.t += dt
                 agg = (next(ids), next(ids))
-                return dt, lambda b: [e for m in batch for e in b.apply(m, agg)]
+                return dt, lambda b: b.play(batch, agg)
         self.t += horizon
         return None
 

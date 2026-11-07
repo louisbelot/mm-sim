@@ -1,4 +1,5 @@
 import random
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -44,9 +45,12 @@ class Script(Agent):
         pass
 
 
-def replay(feed, start, until=10.0, **kw):
+SWEEP = partial(ReplayBook, sweep=True)
+
+
+def replay(feed, start, until=10.0, book=ReplayBook, **kw):
     agent = Script(start)
-    sim = Simulator(ItchFlow(BOOK + feed), [agent], book=ReplayBook, **kw)
+    sim = Simulator(ItchFlow(BOOK + feed), [agent], book=book, **kw)
     sim.warm_up(1.0)
     sim.run(until - 1.0)
     return sim, agent
@@ -162,6 +166,47 @@ def test_sweep_is_one_print():
     assert [(p.t, p.side, p.price, p.qty) for p in agent.prints] == [(2.0, S, 98, 510)]
 
 
+CLEAR = [at(2, "E", 1, qty=300), at(2, "E", 2, qty=200)]
+
+
+def test_no_impact_misses_the_aggressor_that_clears_the_level():
+    _, agent = replay(CLEAR, lambda ctx: ctx.buy(99, 50))
+    assert agent.fills == []
+
+
+def test_sweep_takes_the_bot_behind_a_cleared_level():
+    sim, agent = replay(CLEAR, lambda ctx: ctx.buy(99, 50), book=SWEEP)
+    assert [(f.t, f.price, f.qty, f.left) for f in agent.fills] == [(2.0, 99, 50, 0)]
+    assert [(p.side, p.price, p.qty) for p in agent.prints] == [(S, 99, 550)]
+    assert label(sim.book, agent.fills) == [Cause.SWEEP]
+    assert sim.book.best_bid() == 98 and sim.book.audit() == ""
+
+
+def test_sweep_needs_the_level_emptied_by_executions():
+    partial_fill = [at(2, "E", 1, qty=300)]
+    _, agent = replay(partial_fill, lambda ctx: ctx.buy(99, 50), book=SWEEP)
+    assert agent.fills == []
+    canceled = [at(2, "E", 1, qty=300), at(2, "D", 2)]
+    _, agent = replay(canceled, lambda ctx: ctx.buy(99, 50), book=SWEEP)
+    assert agent.fills == []
+
+
+def test_sweep_leaves_deeper_quotes_alone():
+    def quote(ctx):
+        ctx.buy(99, 50)
+        ctx.buy(98, 70)
+
+    _, agent = replay(CLEAR, quote, book=SWEEP)
+    assert [(f.price, f.qty) for f in agent.fills] == [(99, 50)]
+
+
+def test_sweep_through_two_levels_fills_the_rest_of_the_first():
+    feed = [at(2, "E", 1, qty=300), at(2, "E", 2, qty=200), at(2, "E", 4, qty=30)]
+    sim, agent = replay(feed, lambda ctx: ctx.buy(99, 50), book=SWEEP)
+    assert [(f.price, f.qty) for f in agent.fills] == [(99, 30), (99, 20)]
+    assert label(sim.book, agent.fills) == [Cause.QUEUE, Cause.SWEEP]
+
+
 def test_every_fill_gets_its_cause():
     def start(ctx):
         ctx.buy(100, 40)
@@ -262,6 +307,23 @@ def test_the_bot_never_moves_the_real_book(seed):
     assert real(sim.book) == want
     assert sim.book.audit() == ""
     assert len(sim.contexts[0].account.fills) > 20
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_sweep_keeps_the_real_book_and_logs_every_fill(seed):
+    rng = random.Random(seed)
+    truth, msgs = random_feed(3000, rng)
+    bot = SymmetricQuoter(0.5, size=rng.choice([10, 100, 300]), max_position=900)
+    sim = Simulator(ItchFlow(msgs), [bot], book=SWEEP)
+    sim.warm_up(msgs[200].t / NS_PER_MINUTE)
+    sim.run(msgs[-1].t / NS_PER_MINUTE - sim.t + 1)
+    want = [(-o.id, o.price, o.qty) for side in Side for o in truth.orders(side)]
+    assert real(sim.book) == want and sim.book.audit() == ""
+    fills = sim.contexts[0].account.fills
+    assert [oid for oid, _ in sim.book.causes] == [f.oid for f in fills if f.maker]
+    causes = label(sim.book, fills)
+    swept = [f for f, c in zip(fills, causes, strict=True) if c == Cause.SWEEP]
+    assert swept and all(f.left == 0 for f in swept)
 
 
 @pytest.mark.parametrize("seed", range(4))
