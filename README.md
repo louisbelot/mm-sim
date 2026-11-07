@@ -1122,6 +1122,103 @@ under the other. A real answer needs the aggressor's order size, which ITCH does
 not carry. `examples/fill_quality.py` prints both tables and draws the chart in
 about 4.5 minutes.
 
+## Order-flow memory
+
+The queue-reactive model remembers one bit, the direction of the last mid move.
+The tape remembers a lot more. On CSCO the aggressor sign of one print predicts
+the next with an autocorrelation of 0.43, and counts of prints in 10-second
+windows have a variance 4.3 times their mean. The model gives 0.26 and 2.3. Market
+orders on the tape come in bursts, mostly on one side, and a quote that gets hit
+at the start of a burst is about to be hit again.
+
+`Fit.excite(params, kernels)` adds a Hawkes term to the market-order rates, the
+first model of Wu, Rambaldi, Muzy and Bacry (2019). On side s the rate is
+
+    lambda_s(t) = mu_s(q(t)) + sum_k beta_k * sum over earlier market orders l of
+                  a_k(s, s_l) * exp(-beta_k (t - t_l))
+
+where `mu_s(q)` is the queue-reactive rate for the book state, `a_k` is `own` when
+order l hit the same side and `cross` otherwise, and `own + cross` summed over
+kernels is the branching ratio. Everything is fitted together by maximum
+likelihood: the kernels and one baseline per book state with at least 30 market
+orders (the rarer states share one scale). Refitting the baselines matters.
+Scaling the old rates by one number makes the fit blame the state for clustering:
+right after a market order the touch queue is small, so the old rate at small
+queues already contains the burst. Two details make the likelihood match what the
+simulator can do. A side can only be hit while it has a touch inside the modelled
+depth, so the excitation is integrated only over that time, and a state where the
+table says no market order can happen but one did gets the level's pooled rate.
+`QueueReactive` samples the new rates by thinning: draw from the rate now, which
+only decays until the next event, and accept with the ratio of the rate at the
+drawn time.
+
+On a simulated feed with own 0.4, cross 0.1 and beta 30 per minute, twelve runs of
+600 minutes recover 0.397, 0.0996 and 30.2 (standard errors 0.003, 0.002, 0.4).
+On CSCO the time-rescaled waits between market orders show how much was missing.
+They should be unit exponential:
+
+| model | branching | kernel timescales | residual variance | KS distance |
+| --- | ---: | --- | ---: | ---: |
+| queue-reactive | | | 5.09 | 0.418 |
+| + 1 kernel | 0.40 | 0.33 ms | 1.73 | 0.086 |
+| + 2 kernels | 0.47 | 0.23 ms, 27 ms | 1.50 | 0.061 |
+| + 3 kernels | 0.51 | 0.20 ms, 5.6 ms, 0.60 s | 1.40 | 0.048 |
+
+The 5% critical KS distance for 4,008 orders is 0.021, so even three kernels are
+rejected, but the distance shrinks almost ninefold. Most of the excitation lives
+below a millisecond: another market order on the same side, typically within a
+third of a millisecond. The other five symbols agree (one-kernel timescales from 0.22 to 0.66 ms,
+three-kernel branching ratios from 0.47 to 0.71).
+
+Forty-eight 30-minute sessions of CSCO with the join-the-touch bot, cents per share:
+
+| | pnl (se) | adverse | shares | moves/min | prints | Fano 10 s | sign acf, lag 1 | lag 2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| tape | -0.117 (0.112) | -0.727 | 11,550 | 11.16 | 304 | 4.31 | 0.428 | 0.240 |
+| queue-reactive | -0.155 (0.052) | -0.606 | 16,610 | 10.26 | 343 | 2.26 | 0.260 | 0.130 |
+| + 1 kernel | -0.229 (0.062) | -0.628 | 13,563 | 9.30 | 327 | 3.74 | 0.410 | 0.212 |
+| + 2 kernels | -0.161 (0.057) | -0.686 | 12,850 | 9.11 | 319 | 4.31 | 0.410 | 0.208 |
+| + 3 kernels | -0.258 (0.080) | -0.666 | 12,342 | 9.08 | 312 | 5.03 | 0.432 | 0.240 |
+
+The sign autocorrelation now matches the tape at lags 1 and 2, and so does the
+clustering with two kernels. The bot's volume, 44% too high before, is 7% too
+high. Nothing in the fit looked at the bot. Adverse selection moves toward the
+tape. Mid moves fall a little further short (9.1 against 11.2), because the same
+number of market orders now arrives in fewer, tighter bursts.
+
+The other symbols, twelve sessions each, three kernels:
+
+| | adverse: tape | queue-reactive | + 3 kernels | shares: tape | queue-reactive | + 3 kernels |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| CSCO | -0.727 | -0.598 | -0.620 | 11,550 | 17,093 | 12,037 |
+| INTC | -0.718 | -0.441 | -0.650 | 20,668 | 29,364 | 21,556 |
+| CMCSA | -0.658 | -0.472 | -0.614 | 14,003 | 18,308 | 13,862 |
+| MSFT | -0.765 | -0.526 | -0.633 | 41,181 | 67,066 | 56,426 |
+| AAPL | -1.962 | -1.499 | -2.398 | 84,215 | 135,003 | 106,987 |
+| QQQ | -0.661 | -0.424 | -0.465 | 33,529 | 43,244 | 34,650 |
+
+Adverse selection moves toward the tape on all six. It closes three quarters of
+the gap on INTC and CMCSA, under half on MSFT, about a sixth on CSCO and QQQ, and
+overshoots on AAPL by almost as much again as the gap was. The volume excess is
+gone on CSCO, INTC, CMCSA and QQQ, down from 63% to 37% on MSFT and from 60% to
+27% on AAPL. The bot's P&L got
+worse rather than closer: on CSCO it loses 0.258 cents a share against 0.117 on
+the tape, mostly through the inventory term, because a burst now leaves it holding
+a position into a move.
+
+![Order-flow memory](docs/order_memory.png)
+
+The left panel is the rescaled waits on a log scale, coloured as in the middle
+panel; a perfect model sits on the dashed exp(1) line. The queue-reactive model has too many short waits and a fat
+tail of long ones, which is what clustering looks like through a Poisson lens. The
+middle panel is the sign autocorrelation by lag in prints.
+
+Two limits. Only the flow's own market orders excite it, so a bot that crosses the
+spread does not start a burst, and the kernels are fitted on one day. The excess
+mid moves and the AAPL overshoot both point at the same next step: the excitation
+should probably reach cancels at the touch too, which this model leaves alone. `examples/order_memory.py` prints the tables and
+draws the chart in about 22 minutes.
+
 ## Install
 
 ```
