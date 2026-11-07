@@ -63,6 +63,17 @@ class Clock:
 
 
 @dataclass(frozen=True)
+class Excite:
+    own: tuple[float, ...]
+    cross: tuple[float, ...]
+    beta: tuple[float, ...]
+
+    @property
+    def branching(self) -> float:
+        return sum(self.own) + sum(self.cross)
+
+
+@dataclass(frozen=True)
 class Params:
     rates: tuple
     sizes: dict
@@ -73,6 +84,7 @@ class Params:
     back: tuple[tuple[float, ...], ...] | None = None
     memory: bool = False
     clock: Clock | None = None
+    excite: Excite | None = None
     regimes: bool = True
 
     @property
@@ -405,6 +417,9 @@ class QueueReactive:
         self._ask: int | None = None
         self._market = False
         self._far = [0, 0]
+        k = 0 if params.excite is None else len(params.excite.beta)
+        self._kicks = [[0.0, 0.0] for _ in range(k)]
+        self._kicked = start
 
     def seed(self, book: Book, bid: int, ask: int, ids: Iterator[int]) -> None:
         for side, top, step in ((Side.BUY, bid, -1), (Side.SELL, ask, 1)):
@@ -422,6 +437,7 @@ class QueueReactive:
             return 0.0, lambda b: [e for o, s, px, q in exposed for e in self._add(b, o, s, px, q)]
         actions, weights = self._menu(book, bid, ask)
         clock = self.params.clock
+        markets = [(j, a[1]) for j, a in enumerate(actions) if a[0] == MARKET and self._kicks]
         waited = 0.0
         while True:
             left = horizon - waited
@@ -431,10 +447,18 @@ class QueueReactive:
                 h, edge = clock.slot(self.t)
                 m = clock.scale[h]
                 w = [x * m[a[0]] for a, x in zip(actions, weights, strict=True)]
-            cum = list(accumulate(w))
+            x = self._excess(self.t)
+            extra = sum(x[s] for _, s in markets)
+            cum = list(accumulate(_kicked(w, markets, x)))
             dt = rng.expovariate(cum[-1]) if cum and cum[-1] > 0 else math.inf
             if dt <= min(left, edge):
                 self.t += dt
+                if extra:
+                    bound = cum[-1]
+                    cum = list(accumulate(_kicked(w, markets, self._excess(self.t))))
+                    if rng.random() * bound >= cum[-1]:
+                        waited += dt
+                        continue
                 k = bisect_right(cum, rng.random() * cum[-1], 0, len(cum) - 1)
                 return waited + dt, self._fire(book, actions[k], rng, ids)
             if left <= edge:
@@ -442,6 +466,25 @@ class QueueReactive:
                 return None
             waited += edge
             self.t += edge
+
+    def _excess(self, t: float) -> list[float]:
+        out = [0.0, 0.0]
+        if not self._kicks:
+            return out
+        e = self.params.excite
+        for a, c, b, (r0, r1) in zip(e.own, e.cross, e.beta, self._kicks, strict=True):
+            f = b * math.exp(-b * (t - self._kicked))
+            out[0] += f * (a * r0 + c * r1)
+            out[1] += f * (a * r1 + c * r0)
+        return out
+
+    def _kick(self, side: Side) -> None:
+        for b, r in zip(self.params.excite.beta, self._kicks, strict=True):
+            f = math.exp(-b * (self.t - self._kicked))
+            r[0] *= f
+            r[1] *= f
+            r[side] += 1.0
+        self._kicked = self.t
 
     def _add(self, b: Book, oid: int, side: Side, px: int, qty: int) -> list[Event]:
         return b.submit(oid, side, px, qty, owner=self.owner)
@@ -514,7 +557,7 @@ class QueueReactive:
                     if lam_c:
                         actions.append((CANCEL, side, i, n, r, px))
                         weights.append(lam_c)
-                    if lam_m and px == best:
+                    if (lam_m or (self._kicks and p.sizes.get((MARKET, i)))) and px == best:
                         actions.append((MARKET, side, i, n, r, px))
                         weights.append(lam_m)
         return actions, weights
@@ -533,6 +576,8 @@ class QueueReactive:
         qty = self._take(s, q)
         if kind == CANCEL:
             return self._pull(book.level(side, px), i, qty, rng)
+        if self._kicks:
+            self._kick(side)
         oid, taker = next(ids), side.opposite
         return lambda b: b.submit(oid, taker, 0, qty, owner=self.owner, kind=OrderType.MARKET)
 
@@ -558,6 +603,15 @@ class QueueReactive:
             plan.append((o.id, o.price, max(left, 0)))
             qty -= o.qty
         return lambda b: [e for oid, px, left in plan for e in _shrink(b, oid, px, left)]
+
+
+def _kicked(w: list[float], markets: list[tuple[int, Side]], x: list[float]) -> list[float]:
+    if not markets:
+        return w
+    w = list(w)
+    for j, s in markets:
+        w[j] += x[s]
+    return w
 
 
 def _shrink(b: Book, oid: int, px: int, left: int) -> list[Event]:
