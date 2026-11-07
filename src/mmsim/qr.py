@@ -4,12 +4,14 @@ import math
 import random
 from bisect import bisect_right
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import accumulate
 
 import numpy as np
+from scipy.optimize import minimize
 
 from .book import Book, Event, Level, Order, OrderType, Side
+from .hawkes import decayed_at
 from .itch import NS_PER_MINUTE, Msg
 from .replay import ReplayBook, batches, on_grid
 
@@ -19,6 +21,7 @@ STAYED_CANCEL, STAYED_MARKET, LEFT_CANCEL, LEFT_MARKET = range(3, 7)
 BASE = 7
 REGIMES = 2 * BASE
 POSITIONS = 1000
+FAR = 50.0
 UNIT, STATIONARY, QUEUE = "unit", "stationary", "queue"
 KINDS, SHARED = "kinds", "shared"
 
@@ -170,6 +173,79 @@ class Fit:
                 break
         return _clock(self.slots, s)
 
+    def excite(self, p: Params, kernels: int = 1, min_events: int = 30) -> Params:
+        p = self._wet(p)
+        mu, dt, t, side, key = self._market_path(p)
+        ev = key[self.hits[:, 0], side]
+        cells, n = np.unique(ev, return_counts=True)
+        cells = cells[n >= min_events]
+
+        def group(x):
+            return np.where(np.isin(x, cells), np.searchsorted(cells, x) + 1, 0)
+
+        G = cells.size + 1
+        M = np.bincount(group(key).ravel(), (mu * dt[:, None]).ravel(), G)
+        g_ev = group(ev)
+        free = np.bincount(g_ev, minlength=G) > 0
+        mu_ev = mu[self.hits[:, 0], side]
+        live = key >= 0
+        k = kernels
+        beta0 = [60.0] if k == 1 else np.geomspace(600.0, 6.0, k)
+        x0 = np.concatenate((np.full(free.sum(), 0.5), np.full(2 * k, 0.1 / k), beta0))
+
+        def unpack(x):
+            psi = np.ones(G)
+            psi[free] = x[: free.sum()]
+            return psi, x[free.sum() :]
+
+        def f(x):
+            psi, th = unpack(np.exp(x))
+            ll, g_psi, g = _excite_score(psi, th, M, g_ev, mu_ev, t, side, self.t, live)
+            return -ll, -np.concatenate((g_psi[free], g)) * np.exp(x)
+
+        res = minimize(f, np.log(x0), jac=True, method="L-BFGS-B")
+        if not res.success:
+            raise RuntimeError(f"excitation fit did not converge: {res.message}")
+        psi, th = unpack(np.exp(res.x))
+        own, cross, beta = (tuple(float(v) for v in th[j * k : (j + 1) * k]) for j in range(3))
+        rates = np.array(p.rates)
+        grid = _keys(p, *np.indices(rates.shape[:3]))
+        rates[..., MARKET] *= psi[group(grid)]
+        return replace(p, rates=_nested(rates), excite=Excite(own, cross, beta))
+
+    def _wet(self, p: Params) -> Params:
+        mu, dt, _, side, key = self._market_path(p)
+        rows = self.hits[:, 0]
+        dry = np.unique(key[rows, side][mu[rows, side] == 0])
+        if dry.size == 0:
+            return p
+        i = self.top[..., 0]
+        clock = 1.0 if p.clock is None else np.array(p.clock.scale)[self.h, MARKET][:, None]
+        live = key >= 0
+        exposure = np.bincount(i[live], (dt[:, None] * clock * live)[live], p.K)
+        pooled = _ratio(np.bincount(i[rows, side], minlength=p.K), exposure)
+        rates = np.array(p.rates)
+        lvl = np.indices(rates.shape[:3])
+        wet = np.isin(_keys(p, *lvl), dry)
+        rates[wet, MARKET] = pooled[lvl[0][wet]]
+        return replace(p, rates=_nested(rates))
+
+    def _market_path(self, p: Params):
+        if self.top is None:
+            raise ValueError("this fit has no row data; refit with qr.fit")
+        if p.aes != tuple(int(a) for a in self.aes) or p.edges != self.edges:
+            raise ValueError("params come from a fit with different aes or edges")
+        i, r, n = np.moveaxis(self.top, -1, 0)
+        traded = np.array([bool(p.sizes.get((MARKET, j))) for j in range(p.K)])
+        ok = (i >= 0) & traded[np.maximum(i, 0)]
+        i = np.where(ok, i, 0)
+        mu = np.where(ok, np.array(p.rates)[i, r, n, MARKET], 0.0)
+        if p.clock is not None:
+            mu *= np.array(p.clock.scale)[self.h, MARKET][:, None]
+        dt = np.diff(self.t, prepend=0.0)
+        rows, side = self.hits.T
+        return mu, dt, self.t[rows], side, np.where(ok, _keys(p, i, r, n), -1)
+
     def _back(self) -> tuple[tuple[float, ...], ...]:
         lvl, _, kind, _, _, pos = self.events.T
         out = []
@@ -231,6 +307,80 @@ def rescale(p: Params, f: Fit, mode: str = KINDS) -> Clock:
         raise ValueError("fit the other window with the same aes and edges as the params")
     expected = np.einsum("irnk,irnh->hk", np.array(p.rates), f.exposure)
     return _clock(f.slots, _scale(f.arrivals, expected, mode))
+
+
+def _nested(rates: np.ndarray) -> tuple:
+    return tuple(tuple(tuple(tuple(map(float, c)) for c in r) for r in lvl) for lvl in rates)
+
+
+def _keys(p: Params, i, r, n):
+    r = r if p.memory else r % BASE if p.regimes else np.zeros_like(r)
+    return (i * REGIMES + r) * (p.N + 1) + n
+
+
+def _decay(t: np.ndarray, at: np.ndarray, beta: float) -> tuple[np.ndarray, np.ndarray]:
+    hi = np.searchsorted(t, at, "left")
+    m = int((hi - np.searchsorted(t, at - FAR / beta, "left")).max(initial=0))
+    if t.size and at.size and 8 * m > np.unique(np.floor(np.r_[t, at] * beta / 300)).size:
+        return decayed_at(t, at, beta)
+    r, q = np.zeros(at.size), np.zeros(at.size)
+    for lag in range(1, m + 1):
+        j = hi - lag
+        ok = j >= 0
+        d = at[ok] - t[j[ok]]
+        e = np.exp(-beta * d)
+        r[ok] += e
+        q[ok] += d * e
+    return r, q
+
+
+def _dead(t, side, at, live, beta):
+    out = []
+    for s in Side:
+        d = np.flatnonzero(~live[:, s])
+        a = np.where(d > 0, at[np.maximum(d - 1, 0)], 0.0)
+        mass, slope = np.zeros((2, d.size)), np.zeros((2, d.size))
+        for src in Side:
+            x = t[side == src]
+            ra, qa = _decay(x, a, beta)
+            rb, qb = _decay(x, at[d], beta)
+            tie = np.searchsorted(x, a, "right") - np.searchsorted(x, a, "left")
+            gap = at[d] > a
+            mass[src], slope[src] = gap * (ra + tie - rb), gap * (qb - qa)
+        out.append((d, mass, slope))
+    return out
+
+
+def _excite_score(psi, th, M, g_ev, mu, t, side, at, live):
+    k = th.size // 3
+    own, cross, beta = th[:k], th[k : 2 * k], th[2 * k :]
+    terms = []
+    lam = psi[g_ev] * mu
+    for j in range(k):
+        r = np.zeros((2, t.size))
+        q = np.zeros((2, t.size))
+        for s in Side:
+            mine = side == s
+            for w, src in ((0, mine), (1, ~mine)):
+                r[w, mine], q[w, mine] = _decay(t[src], t[mine], beta[j])
+        terms.append((r, q))
+        lam = lam + beta[j] * (own[j] * r[0] + cross[j] * r[1])
+    inv = 1 / lam
+    ll = np.log(lam).sum() - psi @ M
+    g_psi = np.bincount(g_ev, mu * inv, psi.size) - M
+    g = np.zeros(th.size)
+    for j, (r, q) in enumerate(terms):
+        x = at[-1] - t
+        total, h = -np.expm1(-beta[j] * x).sum(), x @ np.exp(-beta[j] * x)
+        dead = _dead(t, side, at, live, beta[j])
+        D = [total - sum(m[w ^ s].sum() for s, (_, m, _) in enumerate(dead)) for w in (0, 1)]
+        dD = [h - sum(q_[w ^ s].sum() for s, (_, _, q_) in enumerate(dead)) for w in (0, 1)]
+        ll -= own[j] * D[0] + cross[j] * D[1]
+        g[j] = beta[j] * (r[0] @ inv) - D[0]
+        g[k + j] = beta[j] * (r[1] @ inv) - D[1]
+        d = own[j] * (r[0] - beta[j] * q[0]) + cross[j] * (r[1] - beta[j] * q[1])
+        g[2 * k + j] = d @ inv - own[j] * dD[0] - cross[j] * dD[1]
+    return float(ll), g_psi, g
 
 
 def _filled(n, t, pooled_n, pooled_t, min_events):
