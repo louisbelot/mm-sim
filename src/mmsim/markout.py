@@ -68,3 +68,17 @@ def curve(fills: Sequence[Fill], m: np.ndarray) -> tuple[np.ndarray, np.ndarray]
     mean = np.where(ok, m, 0.0).T @ qty[:, 0] / n
     var = (w * (np.where(ok, m, 0.0) - mean) ** 2).sum(axis=0) / n
     return mean, np.sqrt(var / ok.sum(axis=0))
+
+
+def totals(fills: Sequence[Fill], m: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    qty = np.array([f.qty for f in fills], dtype=float).reshape(-1, 1)
+    ok = ~np.isnan(m)
+    return (np.where(ok, m, 0.0) * qty).sum(axis=0), (ok * qty).sum(axis=0)
+
+
+def clustered(num: np.ndarray, den: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    num, den = np.asarray(num, dtype=float), np.asarray(den, dtype=float)
+    n, total = len(num), den.sum(axis=0)
+    mean = num.sum(axis=0) / total
+    r = num - mean * den
+    return mean, np.sqrt((r**2).sum(axis=0) * n / (n - 1)) / total

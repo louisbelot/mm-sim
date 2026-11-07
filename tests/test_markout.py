@@ -3,7 +3,7 @@ import pytest
 
 from mmsim.accounting import Account, Fill
 from mmsim.book import Side
-from mmsim.markout import Tape, curve, markouts, signature
+from mmsim.markout import Tape, clustered, curve, markouts, signature, totals
 
 
 def tape():
@@ -62,3 +62,30 @@ def test_signature_of_a_known_tape():
     assert sig.moves == 1.0
     assert sig.eta == pytest.approx(3 / (2 * 2))
     assert sig.vol == pytest.approx(np.std([0.5, 0.5, -0.5, 0.5, 0.5, 0.5]))
+
+
+def test_totals_skip_horizons_past_the_end():
+    fills = [fill(0.5, Side.BUY, 100, 3), fill(1.0, Side.SELL, 102, 2)]
+    m = markouts(fills, tape(), [0, 2.5], end=3.2)
+    num, den = totals(fills, m)
+    assert list(den) == [5, 3]
+    assert num == pytest.approx([3 * 0.5 + 2 * 0.5, 3 * 0.0])
+
+
+def test_clustered_with_equal_weights_is_the_mean_of_cluster_means():
+    rng = np.random.default_rng(3)
+    means = rng.normal(0.2, 1.0, size=(40, 3))
+    mean, se = clustered(means * 25, np.full((40, 3), 25.0))
+    assert mean == pytest.approx(means.mean(axis=0))
+    assert se == pytest.approx(means.std(axis=0, ddof=1) / np.sqrt(40))
+
+
+def test_clustered_se_covers_the_truth():
+    rng = np.random.default_rng(4)
+    hits = 0
+    for _ in range(400):
+        n = rng.integers(5, 60, size=30)
+        x = [rng.normal(1.0 + rng.normal(0, 0.5), 2.0, size=k) for k in n]
+        mean, se = clustered([v.sum() for v in x], n)
+        hits += abs(mean - 1.0) < 1.96 * se
+    assert 0.9 < hits / 400 < 0.98
