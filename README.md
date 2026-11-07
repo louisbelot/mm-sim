@@ -16,7 +16,8 @@ engine instead of the Python book, and several bots can compete in one session.
 The background market can also be a real day of NASDAQ ITCH data for one stock,
 the flow models can be calibrated from it, and a queue-reactive model fitted to
 that feed reproduces the real mid-move rate and most of a quoter's adverse
-selection.
+selection. A second replay fill rule bounds the fills the usual no-impact
+assumption leaves out, and every fill is labelled with what caused it.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -642,6 +643,9 @@ rules:
 - A bot order that takes liquidity fills against the displayed real orders
   without removing them. What is left of a GTC order that still crosses is
   cancelled.
+- Optional, `ReplayBook(sweep=True)`: when one aggressor's executions empty a
+  price level of real orders, the bot orders still resting there fill too. See
+  [Fills the replay hides](#fills-the-replay-hides).
 
 So the real book never feels the bot. That is the usual assumption for
 backtesting passive quotes, and with 100-share quotes against queues of a few
@@ -1037,6 +1041,86 @@ The rebate is about as large as what the bot loses. At 0.18 cents only CMCSA is
 clearly positive across latencies. At 0.305 CSCO, INTC, CMCSA and, once it is slow,
 QQQ are at or above zero, while MSFT and AAPL lose at every latency.
 `examples/replay_costs.py` prints the table in about 4 minutes.
+
+## Fills the replay hides
+
+The no-impact rules have a blind spot. Say the bid is 99 with 500 real shares and
+the bot's 100 behind them, and an aggressor sells exactly 500. On the tape the
+level is gone and the bot was never touched. That aggressor was probably sized to
+what it saw (take the whole bid), and with the bot's quote displayed it would have
+taken 600. Those are the fills a market maker fears most: a level cleared and the
+price moving right after. The feed cannot say what size the aggressor would have
+sent, so the replay now has two rules that bound the answer. `no impact` assumes
+every level-clearing aggressor was sized to the real queue alone. `sweep`
+assumes every one was sized to the whole displayed level, bot included, and fills
+the bot's resting shares at that price as part of the same print. A level emptied
+by a cancel, or only partly executed, fills nobody.
+
+Each fill also gets a cause. `ReplayBook` keeps a log of every bot maker fill in
+the order it emits them, and `label(book, fills)` lines it up with the account:
+`queue` (a real execution behind the bot), `add` (a real order added through the
+quote), `sweep`, `cross` (another bot took it) and `take` (the bot crossed).
+Markouts by cause use `markout.totals` per session and `markout.clustered`, the
+ratio estimator with a standard error clustered by session, since fills in one
+burst are not independent.
+
+Twelve 30-minute sessions per symbol, 100-share quotes, cents per share traded.
+The last two columns are 1-minute markouts of the swept fills and the queue fills
+under the sweep rule (the queue column is for the same rule as its row):
+
+| symbol | bot            | rule      | shares  | swept | gross (se)     | $/session | swept 1m | queue 1m |
+|--------|----------------|-----------|---------|-------|----------------|-----------|----------|----------|
+| CSCO   | join the touch | no impact | 11,550  |       | -0.117 (0.112) | -13.5     |          | -0.213   |
+| CSCO   | join the touch | sweep     | 16,034  | 28.4% | -0.230 (0.118) | -36.9     | -0.434   | -0.200   |
+| CSCO   | keep priority  | no impact | 6,901   |       | -0.047 (0.190) | -3.2      |          | -0.192   |
+| CSCO   | keep priority  | sweep     | 8,635   | 21.3% | -0.247 (0.118) | -21.3     | -0.593   | -0.118   |
+| INTC   | join the touch | no impact | 20,668  |       | -0.256 (0.055) | -53.0     |          | -0.214   |
+| INTC   | join the touch | sweep     | 28,799  | 28.0% | -0.317 (0.040) | -91.3     | -0.489   | -0.204   |
+| INTC   | keep priority  | no impact | 11,912  |       | -0.282 (0.096) | -33.6     |          | -0.233   |
+| INTC   | keep priority  | sweep     | 15,728  | 23.6% | -0.251 (0.085) | -39.5     | -0.567   | -0.237   |
+| CMCSA  | join the touch | no impact | 14,003  |       | 0.112 (0.062)  | 15.6      |          | -0.136   |
+| CMCSA  | join the touch | sweep     | 18,338  | 23.0% | -0.033 (0.087) | -6.1      | -0.378   | -0.155   |
+| CMCSA  | keep priority  | no impact | 6,876   |       | 0.093 (0.082)  | 6.4       |          | -0.156   |
+| CMCSA  | keep priority  | sweep     | 8,852   | 22.0% | -0.030 (0.108) | -2.6      | -0.411   | -0.193   |
+| MSFT   | join the touch | no impact | 41,181  |       | -0.361 (0.095) | -148.7    |          | -0.209   |
+| MSFT   | join the touch | sweep     | 73,073  | 43.3% | -0.335 (0.060) | -244.6    | -0.459   | -0.208   |
+| MSFT   | keep priority  | no impact | 24,175  |       | -0.472 (0.149) | -114.2    |          | -0.254   |
+| MSFT   | keep priority  | sweep     | 39,660  | 39.5% | -0.385 (0.122) | -152.6    | -0.386   | -0.156   |
+| AAPL   | join the touch | no impact | 84,215  |       | -0.962 (0.254) | -810.3    |          | -1.486   |
+| AAPL   | join the touch | sweep     | 161,479 | 48.8% | -1.229 (0.127) | -1984.9   | -1.040   | -1.546   |
+| AAPL   | keep priority  | no impact | 75,350  |       | -0.897 (0.291) | -675.6    |          | -1.331   |
+| AAPL   | keep priority  | sweep     | 135,006 | 45.7% | -1.198 (0.153) | -1616.8   | -1.008   | -1.580   |
+| QQQ    | join the touch | no impact | 33,529  |       | -0.353 (0.198) | -118.3    |          | -0.123   |
+| QQQ    | join the touch | sweep     | 56,513  | 40.9% | -0.334 (0.097) | -188.8    | -0.204   | -0.219   |
+| QQQ    | keep priority  | no impact | 18,704  |       | -0.513 (0.347) | -95.9     |          | -0.363   |
+| QQQ    | keep priority  | sweep     | 29,765  | 36.9% | -0.561 (0.201) | -167.0    | -0.603   | -0.475   |
+
+The no-impact rows are the same numbers as the earlier tables, so routing the
+feed through the new batch code changed nothing. Under the sweep rule 21% to 49%
+of the bot's volume is fills the no-impact replay never shows, and dollars per
+session are worse on all twelve rows. CMCSA, the one symbol that made money,
+loses on both bots. On CSCO, INTC, CMCSA and MSFT a swept fill marks out two to
+five times as badly at one minute as a queue fill, on both bots. QQQ is mixed
+(equal for one bot, 27% worse for the other), and AAPL goes the other way: its
+queue fills are already the worst on the table.
+
+![Fill quality by cause](docs/fill_quality.png)
+
+The right panel pools the six symbols in basis points, weighted by shares, so
+AAPL and MSFT carry it. The shape is the useful part. A queue fill starts at
++0.19 bps, half a spread, because the level is still there when the bot fills.
+A swept fill starts at zero: the level vanished in the same instant, and on a
+one-tick spread the new mid is exactly the price the bot paid. By one second the
+two are 0.07 bps apart and by a minute they have merged, so the swept fills lose
+the half spread at once and the queue fills lose it over the next second. `add`
+fills (3% of shares) start at -0.21 bps, a real order crossing a quote the market
+had already left, and are too few to say much after that.
+
+So the replay's P&L for a passive quoter is an upper bound, and the gap is large:
+on CSCO the join-the-touch bot loses $13.50 a session under one rule and $36.90
+under the other. A real answer needs the aggressor's order size, which ITCH does
+not carry. `examples/fill_quality.py` prints both tables and draws the chart in
+about 4.5 minutes.
 
 ## Install
 
