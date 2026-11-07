@@ -230,6 +230,24 @@ class Fit:
         rates[wet, MARKET] = pooled[lvl[0][wet]]
         return replace(p, rates=_nested(rates))
 
+    def residuals(self, p: Params) -> list[np.ndarray]:
+        mu, dt, t, side, key = self._market_path(p)
+        e = p.excite or Excite((), (), ())
+        rows = self.hits[:, 0]
+        big = [np.cumsum(mu[:, s] * dt)[rows[side == s]] for s in Side]
+        for a, c, b in zip(e.own, e.cross, e.beta, strict=True):
+            dead = _dead(t, side, self.t, key >= 0, b)
+            for s in Side:
+                mine = side == s
+                d, mass, _ = dead[s]
+                cut = np.searchsorted(d, rows[mine])
+                for w, src in ((a, s), (c, 1 - s)):
+                    x = t[side == src]
+                    n = np.searchsorted(x, t[mine], side="left")
+                    lost = np.concatenate(([0.0], np.cumsum(mass[src])))[cut]
+                    big[s] += w * (n - _decay(x, t[mine], b)[0] - lost)
+        return [np.diff(x, prepend=0.0) for x in big]
+
     def _market_path(self, p: Params):
         if self.top is None:
             raise ValueError("this fit has no row data; refit with qr.fit")

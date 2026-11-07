@@ -145,6 +145,22 @@ def test_fit_recovers_the_kernel(sim_fit):
     assert np.all(np.abs(base / 4.0 - 1) < 0.1)
 
 
+def test_residuals_are_unit_exponential(sim_fit):
+    f = sim_fit
+    p = f.params(regimes=False, min_events=1)
+    hot_r = np.concatenate(f.residuals(f.excite(p, min_events=1)))
+    cold_r = np.concatenate(f.residuals(p))
+    assert hot_r.min() >= 0
+    assert hot_r.mean() == pytest.approx(1, abs=0.04)
+    assert hot_r.var() == pytest.approx(1, abs=0.1)
+    assert cold_r.var() > 1.4
+
+
+def test_true_params_give_unit_residuals(sim_fit):
+    r = np.concatenate(sim_fit.residuals(hot()))
+    assert r.mean() == pytest.approx(1, abs=0.04)
+
+
 def test_excite_works_with_a_clock(sim_fit):
     p = sim_fit.excite(sim_fit.params(regimes=False, min_events=1, clock=SHARED), min_events=1)
     assert p.clock is not None
@@ -182,6 +198,45 @@ def test_excited_flow_runs_under_latency():
     sim.run(5.0)
     assert sim.contexts[0].account.fills
     assert sim.book.audit() == "" and sim.contexts[0]._view.audit() == ""
+
+
+def test_residuals_match_brute_force(sim_fit):
+    _, _, _, t, side, at, live = score_case(1)
+    p = dataclasses.replace(
+        flat(1, 2, lambda n: 1.0, lambda n: 1.0, lambda n: 3.0),
+        excite=Excite((0.3, 0.1), (0.2, 0.05), (5.0, 0.7)),
+    )
+    rows = np.searchsorted(at, t)
+    top = np.zeros((at.size, 2, 3), dtype=np.int64)
+    top[..., 2] = 1
+    top[~live, 0] = -1
+    f = dataclasses.replace(
+        sim_fit,
+        aes=np.ones(1, dtype=np.int64),
+        t=at,
+        h=np.zeros(at.size, dtype=np.int64),
+        top=top,
+        hits=np.column_stack((rows, side)),
+    )
+    got = f.residuals(p)
+    e = p.excite
+    for s in Side:
+        big, prev = [], 0.0
+        for r in rows[side == s]:
+            lam = 0.0
+            for q in range(r + 1):
+                a, b = at[q - 1] if q else 0.0, at[q]
+                if not live[q, s]:
+                    continue
+                lam += 3.0 * (b - a)
+                for m in range(t.size):
+                    if t[m] <= a:
+                        w = np.array(e.own if side[m] == s else e.cross)
+                        beta = np.array(e.beta)
+                        lam += np.sum(w * (np.exp(-beta * (a - t[m])) - np.exp(-beta * (b - t[m]))))
+            big.append(lam - prev)
+            prev = lam
+        assert np.allclose(got[s], big, atol=1e-9)
 
 
 def test_a_traded_cell_with_no_rate_gets_the_level_rate(sim_fit):
