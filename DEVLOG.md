@@ -794,3 +794,79 @@ Design notes and what went wrong:
 Next: order-flow memory beyond one bit, since adverse selection on the model is
 still short of the tape on five of six symbols, and the 25% excess volume. Then the
 replay fill rule that lets an aggressor reach the bot's displayed shares.
+
+## 2026-11-06: The fills the replay hides, and markouts by cause
+
+Built:
+
+- `ReplayBook(sweep=True)`: a second fill rule. When one aggressor's executions
+  (one ITCH timestamp) leave a price level with no real orders, the bot orders still
+  resting there fill at that price, with the same aggressor id, so they join the
+  print. A level emptied by a cancel or only partly executed fills nobody. The
+  flow now hands the whole batch to `ReplayBook.play`, which notes the executed
+  levels before applying the messages and checks them after.
+- Fill causes: `ReplayBook.causes` logs every bot maker fill as it is emitted
+  (`queue`, `add`, `sweep`, `cross`), and `replay.label(book, fills)` lines the log
+  up with an account's fills, giving `take` to the bot's own aggressive fills.
+- `markout.totals` (share-weighted markout sums per horizon, skipping horizons past
+  the end) and `markout.clustered` (the ratio estimator with a standard error
+  clustered by session, the same formula the replay tables already used inline).
+- `examples/fill_quality.py`: both rules, both bots, six symbols, twelve sessions
+  each, then markout curves by cause at 0, 1 s, 5 s, 30 s, 1 min and 5 min, and
+  `docs/fill_quality.png`.
+
+Checks:
+
+- 350 tests (was 332).
+- Hand-built feeds: an aggressor that exactly clears the bid leaves the bot alone
+  under no impact and fills it under sweep, as one 550-share print; a partial
+  execution or a level emptied by a cancel fills nobody; a deeper quote is left
+  alone; a sweep through two levels fills the first level's remainder by queue
+  and the rest by sweep.
+- Eight random feeds with a quoting bot under the sweep rule: the real book still
+  ends equal to the generating book, the cause log matches the maker fills order
+  by order, and every swept fill leaves its level empty.
+- `clustered` with equal weights is the mean of cluster means with the textbook
+  standard error, and its 95% interval covers the truth in 400 simulated
+  experiments at a rate between 90% and 98%.
+- Ten injected bugs all fail a test: sweeping a level that still has real orders,
+  sweeping on a non-execution batch, mislabelling sweep or add fills, dropping
+  the cross log, looking only at the last executed level, the wrong aggressor id,
+  labelling taker fills from the maker log, no n/(n-1) correction, and a totals
+  denominator that ignores missing horizons.
+- The no-impact rows reproduce the earlier six-symbol table to the cent, so the
+  batch refactor changed nothing. Running the script twice gives identical output.
+
+Results:
+
+- Under the sweep rule 21% to 49% of the bot's volume is fills the no-impact
+  replay never produces (CMCSA 23%, AAPL 49% for join the touch). Dollars per
+  session are worse on all twelve symbol and bot pairs. CSCO join the touch goes
+  from -$13.5 to -$36.9, and CMCSA, the only profitable symbol, turns negative on
+  both bots.
+- At one minute a swept fill marks out two to five times worse than a queue fill
+  on CSCO, INTC, CMCSA and MSFT. QQQ is mixed and AAPL is reversed (queue fills
+  -1.49 cents, swept -1.04).
+- Pooled in basis points: queue fills start at +0.19 and swept fills at -0.01,
+  because the swept level is gone in the same instant. At 1 s they are -0.25 and
+  -0.32, and by a minute they are within one standard error.
+
+Design notes:
+
+- The two rules are bounds, not a model. ITCH gives the executed size, never the
+  aggressor's intended size, so the truth for a level-clearing aggressor sits
+  somewhere between sized-to-the-real-queue and sized-to-everything-displayed.
+  The existing rules already cover the cases the feed does show: an aggressor
+  that continues to a deeper level reaches the bot by price priority, and one
+  that rests its remainder crosses the bot as an add.
+- The cause log lives in the book because only the book knows why it emitted a
+  trade. Lining it up with the fills works because the simulator turns the book's
+  maker trades into fills in emission order, and order ids are unique, so
+  filtering the log by a bot's ids gives that bot's sequence. The random-feed test
+  checks the alignment directly.
+- Pooling in basis points weights by shares, so AAPL and MSFT dominate the curve;
+  the per-symbol cents in the table are the better comparison.
+
+Next: order-flow memory beyond one bit for the queue-reactive model, since adverse
+selection is still short of the tape on five of six symbols, then the
+fill-weighted kappa for the flow lean.
