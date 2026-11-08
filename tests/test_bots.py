@@ -23,6 +23,26 @@ def test_symmetric_quoter_joins_the_inside():
     assert quotes(sim.contexts[0]) == [(Side.BUY, 100), (Side.SELL, 101)]
 
 
+def test_inside_false_never_improves_the_touch():
+    sim = make([], SymmetricQuoter(inside=False))
+    sim.run(1.0)
+    assert quotes(sim.contexts[0]) == [(Side.BUY, 99), (Side.SELL, 102)]
+    tight = Model(sigma=1.0, A=2.1, k=3.6, gamma=0.01, Q=3)
+    for inside, want in (
+        (True, [(Side.BUY, 100), (Side.SELL, 101)]),
+        (False, [(Side.BUY, 99), (Side.SELL, 102)]),
+    ):
+        sim = make([], GLFT(tight, inside=inside))
+        sim.run(1.0)
+        assert quotes(sim.contexts[0]) == want
+
+
+def test_inside_false_keeps_quotes_behind_the_touch():
+    sim = make([], SymmetricQuoter(half_spread=2.6, inside=False))
+    sim.run(1.0)
+    assert quotes(sim.contexts[0]) == [(Side.BUY, 97), (Side.SELL, 104)]
+
+
 def test_wider_half_spread_rounds_away_from_mid():
     sim = make([], SymmetricQuoter(half_spread=1.2))
     sim.run(1.0)

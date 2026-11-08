@@ -56,11 +56,13 @@ class Quoter(Agent):
         max_position: int | None = None,
         keep: int = 0,
         signal: Signal | None = None,
+        inside: bool = True,
     ) -> None:
         self.size = size
         self.max_position = max_position
         self.keep = keep
         self.signal = signal
+        self.inside = inside
         self._oids: dict[Side, int | None] = {Side.BUY: None, Side.SELL: None}
 
     def targets(self, ctx: Context) -> tuple[int | None, int | None]:
@@ -87,6 +89,11 @@ class Quoter(Agent):
 
     def requote(self, ctx: Context) -> None:
         bid, ask = self.targets(ctx)
+        if not self.inside:
+            if bid is not None and ctx.bid is not None:
+                bid = min(bid, ctx.bid)
+            if ask is not None and ctx.ask is not None:
+                ask = max(ask, ctx.ask)
         if self.max_position is not None:
             if ctx.position + self.size > self.max_position:
                 bid = None
@@ -115,8 +122,9 @@ class SymmetricQuoter(Quoter):
         max_position: int | None = None,
         keep: int = 0,
         signal: Signal | None = None,
+        inside: bool = True,
     ) -> None:
-        super().__init__(size, max_position, keep, signal)
+        super().__init__(size, max_position, keep, signal, inside)
         self.half_spread = half_spread
 
     def targets(self, ctx: Context) -> tuple[int | None, int | None]:
@@ -166,8 +174,9 @@ class GLFT(Quoter):
         size: int = 1,
         keep: int = 0,
         signal: Signal | None = None,
+        inside: bool = True,
     ) -> None:
-        super().__init__(size, model.Q * size, keep, signal)
+        super().__init__(size, model.Q * size, keep, signal, inside)
         self.model = model
         self.bids, self.asks = model.quotes(math.inf)
 
