@@ -1042,3 +1042,95 @@ Design notes and what went wrong:
 Next: model the reaction as a paired event, a pull and a repost of the same size
 drawn together, and check that it keeps the event study while bringing moves and
 eta back. Then let bot market orders excite the flow, and the fill-weighted kappa.
+
+## 2026-11-08: Microprice and order-flow imbalance
+
+Two signals from the microstructure literature, measured on the replayed tape
+out of sample, and a quoter that uses the first. Quoting around Stoikov's
+microprice instead of the mid takes the touch quoter's adverse selection on CSCO
+from -0.727 cents a share to +0.029, at the cost of 89% of its volume.
+
+Built:
+
+- `micro.Tops` and `micro.tops(msgs)`: the top of book (time, bid, ask, sizes)
+  after every batch that changes it, from the same `ReplayBook`. 305k rows for
+  CSCO; the six symbols take 25 s and are cached in `data/<SYMBOL>.tops.npz`.
+- `micro.fit(top, n_imb, n_spread)`: Stoikov (2018). States are spread x
+  imbalance bucket, one step per top-of-book change, data symmetrized, then
+  G1 = (1 - Q)^-1 T K and B = (1 - Q)^-1 R. `Chain.gstar` sums G1 + B G1 + ...
+  with the fundamental matrix, (1 - B + 1 pi)^-1 G1, which is exact once
+  pi G1 = 0; `Chain.series` is the truncated sum for comparison.
+- `micro.spreads(top, end)`: the smallest number of spread states covering 95%
+  of the time (4 for AAPL, 2 elsewhere).
+- `Microprice.lean(ctx)` and a `Signal` protocol in `bots.py`, so a quoter's
+  fair value is mid plus whatever the signal says. `FlowLean` got `lean` too.
+- `ofi.py`: Cont-Kukanov-Stoikov e_n, cumulative flow at any time, binned
+  OFI / mid change / time-weighted depth, OLS with White or clustered standard
+  errors, per-window fits and the log-log depth scaling.
+- `examples/microprice.py`, `examples/ofi.py`, `examples/micro_quotes.py`, three
+  charts and three README sections.
+
+Checks:
+
+- 408 tests (was 384); every commit passes on its own.
+- Two two-state chains against closed forms: g* = (u - d) / (1 - stay + swap)
+  when the post-move state is uniform, and that divided by 1 - rho with a
+  persistent imbalance. The fundamental-matrix sum matches 200 terms of the
+  series.
+- A random symmetric 5-state chain: g* against the mean 150-step drift of 40,000
+  simulated paths per starting state, all within 4 standard errors.
+- `fit` on 200,000 quotes simulated from a known 3-state chain: 0.0559 against
+  the true 0.0551.
+- The imbalance bucket rule is mirror-symmetric (b(1 - I) = n - 1 - b(I)) and
+  needs an odd n, so I = 0.5 maps to the centre.
+- `lean` leaves the bot's own shares out: a 40-share bot bid on a 5 against 5
+  book still reads as balanced.
+- OFI: each of the six cases by hand, telescoping with fixed prices, a mirrored
+  book has negated flow, the depth integral against a 200k-point Riemann sum.
+  Clustered standard errors on rows repeated 9 times equal the plain White ones.
+- The mid-quoter rows of the quoting experiment reproduce the earlier six-symbol
+  table exactly (CSCO -0.117, 11,550 shares).
+
+Results (2019-12-30, fit on one half of the day, tested on the other):
+
+- CSCO g* runs from -0.383 to +0.383 ticks at one tick spread; the weighted mid
+  would say +-0.45. Four of the other five end within 0.37 to 0.39.
+- Out-of-sample R^2 is a few percent at 10 s and after two mid moves, and the
+  microprice is about as good as a straight line in imbalance. The weighted mid
+  is much worse on AAPL (-0.277 after two moves).
+- Calibration: slope of the realized change after k moves on g* is about 1 on
+  QQQ (1.07, 0.96, 0.92 at k = 2, 5, 20) and MSFT (0.89, 0.88, 0.94), but 1.5 to
+  1.75 on INTC and CMCSA at k = 2 to 5 and 0.4 to 0.6 on AAPL.
+- OFI explains 73 to 84% of 10 s mid changes in 30-minute windows; impact
+  scales as depth^-1.13 (se 0.02) across 72 windows; beta x depth 0.21 to 0.34.
+  Scaling by depth turns CSCO's afternoon R^2 from -0.49 to 0.79. Lagged OFI
+  predicts nothing.
+- Quoting: adverse term on the large-tick names from about -0.7 to between
+  +0.03 and -0.39, volume down 86 to 90%, dollars better on five of six
+  (MSFT -149 to +9 a session). Per-share P&L standard errors (0.3 to 0.76)
+  are as large as the gains.
+
+Design notes and what went wrong:
+
+- The first test of `adjust` failed because my hand-made quotes put the up move
+  after the low-imbalance state; the estimator was right.
+- With an even bucket count a balanced book falls on a bucket edge. On AAPL 11%
+  of updates have equal sizes, and they would all have taken the positive drift
+  of the upper bucket.
+- Stoikov's notebook ignores spread changes inside Q (it is block diagonal by
+  spread). Here Q is indexed by the full state, and transitions into states never
+  seen as a starting point are dropped and the rows renormalized.
+- The first quoting run fitted AAPL with two spread states, so the signal was
+  off whenever its spread was 3 or 4 ticks; `spreads` fixed it.
+- One-second samples overlap heavily at long horizons, so the calibration
+  standard errors are clustered by 30-minute block. White ones were 2 to 6 times
+  smaller.
+- A morning OFI beta is worse than nothing in the afternoon on CSCO because its
+  depth goes from 2,124 to 3,671 shares. The depth scaling in the paper is what
+  makes the relation portable.
+
+Next: put the drift into the quotes properly (Cartea, Jaimungal and Ricci skew
+the reservation price by the expected drift instead of the hard one-tick step
+used here), give the microprice chain a memory of the last move to fix the
+large-tick calibration, and measure how much of each signal survives the latency
+legs.
