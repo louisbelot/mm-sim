@@ -5,12 +5,12 @@ import random
 from bisect import bisect_right
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
-from itertools import accumulate
+from itertools import accumulate, count
 
 import numpy as np
 from scipy.optimize import minimize
 
-from .book import Book, Event, Level, Order, OrderType, Side
+from .book import Book, Event, EventType, Level, Order, OrderType, Side
 from .hawkes import decayed_at
 from .itch import NS_PER_MINUTE, Msg
 from .replay import ReplayBook, batches, on_grid
@@ -916,3 +916,31 @@ def _kicked(w: list[float], hot: list[tuple[int, int, Side]], x: list[list[float
 
 def _shrink(b: Book, oid: int, px: int, left: int) -> list[Event]:
     return b.modify(oid, px, left) if left else b.cancel(oid)
+
+
+def messages(
+    p: Params, minutes: float, seed: int = 0, bid: int = 100, tick: int = 100
+) -> list[Msg]:
+    book, rng, ids = Book(), random.Random(seed), count(1)
+    flow = QueueReactive(p, seed=seed)
+    flow.seed(book, bid, bid + 1, ids)
+    resting = [o for s in Side for o in book.orders(s)]
+    out = [Msg(0, "A", o.id, o.side, o.price * tick, o.qty) for o in resting]
+    left = {o.id: o.qty for o in resting}
+    t = 0.0
+    while (step := flow.step(book, rng, minutes - t, ids)) is not None:
+        t += step[0]
+        ns = round(t * NS_PER_MINUTE)
+        for e in step[1](book):
+            if e.type == EventType.TRADE:
+                out.append(Msg(ns, "E", e.maker, qty=e.qty))
+                left[e.maker] -= e.qty
+            elif e.type == EventType.CANCELED:
+                out.append(Msg(ns, "D", e.id))
+            elif e.type == EventType.MODIFIED:
+                out.append(Msg(ns, "X", e.id, qty=left[e.id] - e.qty))
+                left[e.id] = e.qty
+            elif e.type == EventType.ACCEPTED and e.id in book:
+                out.append(Msg(ns, "A", e.id, e.side, e.price * tick, e.qty))
+                left[e.id] = e.qty
+    return out

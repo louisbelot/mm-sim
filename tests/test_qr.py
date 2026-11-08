@@ -8,6 +8,7 @@ from mmsim.book import Book, EventType, OrderType, Side
 from mmsim.bots import SymmetricQuoter
 from mmsim.itch import NS_PER_MINUTE, Msg
 from mmsim.qr import CANCEL, LIMIT, MARKET, Gap, Params, QueueReactive, invariant
+from mmsim.replay import ReplayBook, on_grid
 from mmsim.sim import Latency, Simulator
 
 B, S = Side.BUY, Side.SELL
@@ -325,22 +326,26 @@ def test_prices_coming_into_range_get_filled():
 
 
 def feed(p, minutes, seed):
-    book, rng, ids = Book(), random.Random(seed), iter(range(1, 10**9))
-    flow = QueueReactive(p, seed=seed)
+    return qr.messages(p, minutes, seed)
+
+
+def test_messages_replay_to_the_flow_book():
+    p = flow_params()
+    msgs = qr.messages(p, 5.0, 3)
+    book, rng, ids = Book(), random.Random(3), iter(range(1, 10**9))
+    flow = QueueReactive(p, seed=3)
     flow.seed(book, 100, 101, ids)
-    msgs = [Msg(0, "A", o.id, o.side, o.price * 100, o.qty) for s in Side for o in book.orders(s)]
     t = 0.0
-    while (step := flow.step(book, rng, minutes - t, ids)) is not None:
+    while (step := flow.step(book, rng, 5.0 - t, ids)) is not None:
         t += step[0]
-        ns = round(t * NS_PER_MINUTE)
-        for e in step[1](book):
-            if e.type == EventType.TRADE:
-                msgs.append(Msg(ns, "E", e.maker, qty=e.qty))
-            elif e.type == EventType.CANCELED:
-                msgs.append(Msg(ns, "D", e.id))
-            elif e.type == EventType.ACCEPTED and e.id in book:
-                msgs.append(Msg(ns, "A", e.id, e.side, e.price * 100, e.qty))
-    return msgs
+        step[1](book)
+    replay = ReplayBook()
+    for m in on_grid(msgs, 100):
+        replay.apply(m, (0, 0))
+    assert sum(m.kind == "X" for m in msgs) > 50
+    for s in Side:
+        want = sorted((o.id, o.price, o.qty) for o in book.orders(s))
+        assert sorted((abs(o.id), o.price, o.qty) for o in replay.orders(s)) == want
 
 
 def test_fit_recovers_the_rates_that_made_the_feed():
