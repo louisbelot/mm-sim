@@ -66,7 +66,7 @@ def tops(msgs: Sequence[Msg], tick: int = 100) -> Tops:
 
 def spreads(top: Tops, end: float, share: float = 0.95) -> int:
     w = np.diff(top.t, append=end)
-    s = np.sort(np.unique(top.spread[top.spread >= 1]))
+    s = np.unique(top.spread[top.spread >= 1])
     covered = np.array([w[(top.spread >= 1) & (top.spread <= k)].sum() for k in s]) / w.sum()
     return max(2, int(s[np.argmax(covered >= share)]))
 
@@ -163,9 +163,6 @@ class Microprice:
         return (np.asarray(bid) + np.asarray(ask)) / 2 + self.adjust(
             np.asarray(ask) - np.asarray(bid), bq, aq
         )
-
-    def on(self, top: Tops) -> np.ndarray:
-        return self.price(top.bid, top.ask, top.bq, top.aq)
 
     def lean(self, ctx: Context) -> float:
         bid, ask = ctx.bid, ctx.ask
