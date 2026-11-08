@@ -1288,3 +1288,77 @@ moves INTC up and AAPL down at the same time.
 Next: condition the chain on time since the last move or on the Hawkes intensity
 of recent market orders instead of the direction, and see whether either moves
 the slopes without hurting MSFT and QQQ.
+
+## 2026-11-08: A PPO market maker, head to head, and stress tests
+
+The simulator is now a Gymnasium environment, a PPO agent written from scratch
+in numpy learns to make markets in it, and it is compared with tuned
+Avellaneda-Stoikov and GLFT on held-out sessions and in four stressed markets.
+
+Built:
+
+- `nn.py`: tanh MLP with a hand-written backward pass, orthogonal init, Adam,
+  global-norm clipping.
+- `ppo.py`: categorical actor and separate critic, rollouts, GAE, the clipped
+  surrogate with an entropy bonus, minibatch advantage normalization, linear
+  learning-rate annealing, and `train` taking any `map` so episodes run on a
+  process pool.
+- `env.py`: `MarketMakingEnv` (16 actions: bid and ask depth from {touch, 1 back,
+  2 back, off}, six features, reward dP&L - phi q^2 dt with a terminal q^2
+  charge) and `Learned`, the same agent as a timer-driven bot for ordinary
+  sessions.
+- `accounting.exposure` (exact integral of q^2 dt from fill times),
+  `tournament.Result.exposure`, and a `crowd` of unscored agents for sessions and
+  the environment (informed traders).
+- `Quoter(inside=False)`: never quote inside the other participants' spread.
+- `flow.RegimeFlow` and `CSTParams.scale` for scheduled rate changes, exact at
+  the switch.
+- `examples/rl_market_maker.py` and `examples/stress.py`.
+
+Checks:
+
+- 469 tests. MLP and PPO gradients against central finite differences
+  (including clipped samples, where the gradient must be zero, and the entropy
+  term). GAE against the explicit lambda-weighted n-step sum. PPO learns a
+  contextual bandit and a six-step delayed-credit task. Training is
+  reproducible from the seed (the full experiment reran to identical numbers).
+- Environment: `check_env`, rewards sum to the penalized P&L, `Learned` replays
+  an environment episode fill for fill. RegimeFlow with one regime is
+  ZeroIntelligence draw for draw, and market-order counts on either side of a
+  switch match the two rates.
+
+Results (one-hour sessions, phi = 0.02, terminal 0.25, scores in ticks):
+
+- Three PPO seeds train in 3.4 minutes each (1.15M decisions) and reach 9.58,
+  10.22 and 10.30 on 1000 held-out sessions. Tuned GLFT (gamma 0.08) gets 9.67,
+  tuned AS (gamma 0.003, an interior optimum of a grid from 0.0003 to 0.3) 9.76,
+  the touch quoter 5.57. Every paired PPO minus GLFT difference is within 1.5 se.
+- PPO learns GLFT's shape: join both sides when flat, step the side that adds
+  to the position back. It leans harder when short than long on all three
+  seeds, but the mirrored policies score the same (differences -0.25, +0.25,
+  +0.17 with se 0.32, 0.32, 0.16). Across three imbalance levels only one of
+  33 greedy actions changes.
+- Together in one market PPO loses 0.94 to crowding, AS 2.2.
+- Stress: PPO beat GLFT by 5.0 in a volatility spike and 5.3 in a thinning book.
+  GLFT posts inside a wide spread (70% of its spike fills started a new level)
+  and pays 25 ticks per hour of adverse selection there. GLFT with
+  `inside=False` gets 10.51 and 7.98 in those scenarios, ahead of PPO, and 10.45
+  in calm markets (+1.3 over plain GLFT). Training PPO on the mixture of
+  scenarios changes nothing beyond one se.
+
+Design notes:
+
+- gamma = 1 with time left in the state: the horizon is fixed, so the last step
+  is a real terminal and there is nothing to bootstrap. lambda 0.9 instead of
+  0.95 because the mark-to-market term adds q dS noise every step; with the
+  defaults (lr 3e-4, 4 epochs) the first attempt barely moved (KL 1e-4).
+- The decision interval is one minute, and between decisions the quotes chase
+  the touch. That is why imbalance is useless to it: it forecasts seconds.
+- The surprise of the day was the stress result. It reads as "RL copes
+  better with stress" until the adverse term is broken out, and then it is about where the
+  action space lets a bot quote. A learned policy is only as interesting as the
+  baseline next to it.
+
+Next: give PPO the inside price as an action (and a faster decision clock) to see
+whether it learns when improving pays, then the Spooner-Savani adversarial
+version on the regime flows.
