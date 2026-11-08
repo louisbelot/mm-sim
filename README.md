@@ -23,7 +23,10 @@ order-flow imbalance, checks both out of sample, and runs a quoter centred on
 the microprice. The Cartea-Jaimungal-Penalva market maker with a short-term
 alpha is solved numerically, calibrated from the replay's own fills, and run on
 the same sessions, along with a measurement of how much of each signal is left
-after a given latency.
+after a given latency. Finally, the simulator is wrapped as a Gymnasium
+environment, a PPO market maker written from scratch in numpy is trained on it
+and compared with the tuned inventory models, and every bot is stress-tested on
+volatility spikes, a thinning book and informed flow.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -1709,6 +1712,159 @@ for the queue reasons in the latency section above. The 100 us microprice cell
 looks better than zero latency only because of MSFT (+43.8, se 32.6). The run
 takes about 15 minutes for 1,152 sessions.
 
+## A learned market maker
+
+`env.MarketMakingEnv` wraps the simulator as a Gymnasium environment. Once a
+minute the agent picks a bid depth and an ask depth, each from {join the touch,
+one tick back, two back, off}, so 16 actions. Between decisions a `Quoter` keeps
+those quotes in place and chases the touch when it moves. The agent sees six
+numbers: inventory over the limit, the fraction of the session left, the spread,
+queue imbalance at the touch with its own orders taken out, the last minute's
+mid move, and the last minute's signed market volume. The reward is the change
+in mark-to-market P&L minus phi q^2 for every minute spent holding q, and the
+last step also pays TERM q^2 for whatever is left:
+
+```
+score = P&L - phi * integral of q(t)^2 dt - TERM * q_T^2,    phi = 0.02, TERM = 0.25
+```
+
+The running penalty is the one in Cartea and Jaimungal's book, and it is what
+GLFT optimizes too, with phi = gamma sigma^2 / 2. So all the bots below are
+scored on the same number the agent was trained on, from the same
+`tournament.session` runs. The integral is exact, from the fill times.
+
+PPO is written from scratch in numpy (`nn.py`, `ppo.py`): two tanh MLPs with
+64x64 hidden layers for the policy and the value, orthogonal initialization
+(gain sqrt 2, 0.01 on the policy head), GAE with lambda 0.9 and gamma 1 (the
+time left is in the state, so the episode end is a real terminal), the clipped
+surrogate at 0.2, advantages normalized per minibatch, no value clipping, global
+gradient-norm clipping at 0.5, Adam with a linearly annealed learning rate. Those
+choices follow the CleanRL and "37 implementation details" defaults, except the
+value loss, where Andrychowicz et al. (2021) found clipping does not help. The
+backward pass is hand-written and checked against finite differences, including
+the clipped and entropy terms.
+
+`examples/rl_market_maker.py` trains three seeds for 400 iterations of 48
+one-hour sessions (1.15 million decisions each, 3.4 minutes per seed on 16
+cores). The comparison bots are tuned on 300 separate sessions: the best of the
+16 fixed actions, Avellaneda-Stoikov over gamma from 0.0003 to 0.3, and GLFT over
+the same gammas with and without keep-priority quoting (sigma 1 tick per
+sqrt(minute), A = 2.1, k = 3.6, as measured earlier). Everything is then scored
+on 1000 held-out sessions:
+
+| bot                          | score (se)   | P&L   | fills | int q^2 dt | minus GLFT, paired (se) |
+| ---------------------------- | ------------ | ----- | ----- | ---------- | ----------------------- |
+| join the touch               | 5.57 (0.62)  | 15.94 | 39.9  | 408.9      | -4.10 (0.67)            |
+| best fixed (join both sides) | 5.42 (0.57)  | 13.85 | 31.2  | 322.7      | -4.26 (0.66)            |
+| AS, gamma 0.003              | 9.76 (0.42)  | 15.52 | 37.0  | 192.7      | +0.08 (0.53)            |
+| GLFT, gamma 0.08             | 9.67 (0.34)  | 12.30 | 36.2  | 107.6      | 0                       |
+| PPO seed 0                   | 9.58 (0.29)  | 11.87 | 27.5  | 99.7       | -0.10 (0.44)            |
+| PPO seed 1                   | 10.22 (0.30) | 12.48 | 27.9  | 95.9       | +0.54 (0.45)            |
+| PPO seed 2                   | 10.30 (0.28) | 12.22 | 27.6  | 81.3       | +0.63 (0.44)            |
+
+![PPO market maker](docs/rl_market_maker.png)
+
+PPO matches the tuned inventory models and does not beat them: every paired
+difference is within 1.5 standard errors. It gets there from a policy that knows
+nothing about inventory risk, and all three seeds land in the same place. What it
+learned is on the right: join both sides when flat, and once the position gets
+large pull the side that would add to it back from the touch. The shape is
+GLFT's, with two differences. PPO starts leaning at |q| = 2 when short but only
+at 3 when long (GLFT leans at 2 on both sides), and on the short side it steps
+the ask two ticks back where GLFT steps one (seed 1 drops the ask at q = -5 and
+seed 2 from q = -2). It also holds less inventory than any other bot (81 to 100
+against GLFT's 108) at the price of 25% fewer fills.
+
+The market is symmetric, so the asymmetry is suspicious. All three seeds have
+it, so it is not one unlucky run. The test is to flip the policy: negate q,
+imbalance, mid move and flow, swap the bid and ask decisions, and score the
+mirrored policy on the same 1000 sessions. The paired differences are -0.25
+(0.32), +0.25 (0.32) and +0.17 (0.16) for the three seeds, so the lean on the
+short side is worth nothing either way. The objective is flat over these
+choices and the seeds happen to fall on the same side of it. The imbalance
+feature barely matters too: across imbalance -0.6 to +0.6 the greedy action
+changes in one cell (q = 2), which fits the earlier finding that queue imbalance
+predicts a few seconds ahead, far below a one-minute decision.
+
+Putting PPO (seed 0), the tuned GLFT and AS and the touch quoter in one market
+for 300 sessions, with the scores each got alone on the same seeds:
+
+| bot            | score together (se) | alone | P&L together | fills |
+| -------------- | ------------------- | ----- | ------------ | ----- |
+| GLFT           | 9.35 (0.23)         | 9.13  | 11.01        | 24.1  |
+| PPO            | 9.07 (0.23)         | 10.01 | 10.74        | 23.6  |
+| AS             | 6.84 (0.42)         | 9.01  | 10.72        | 24.6  |
+| join the touch | 3.68 (0.65)         | 3.59  | 10.65        | 25.9  |
+
+The agent was trained alone and still holds up in company: it loses about 1 tick
+per hour to crowding and AS loses 2.2. AS also carries the most inventory of the
+three model-based bots when alone (193 against 108 for GLFT), and it is the one
+that pays most for sharing the flow.
+
+The checks behind this: the environment passes Gymnasium's `check_env`; its
+rewards over an episode add up to the penalized P&L computed from the account;
+and the `Learned` bot, which observes and decides on a timer inside an ordinary
+session, reproduces an environment episode fill for fill when fed the same
+actions, so the agent is evaluated in exactly the world it was trained in. One
+difference remains: the environment marks inventory at the other participants'
+mid, the session at the tape's mid, which includes the bot's own quotes. On the
+PPO side, GAE is checked against the explicit lambda-weighted sum of n-step
+advantages, and PPO solves a contextual bandit and a task where only the first
+action of six decides the final reward.
+
+## Stress tests
+
+`flow.RegimeFlow` switches the Cont-Stoikov-Talreja rates at fixed times, and
+it does so exactly: an exponential clock that would run past a switch is cut at
+the switch and redrawn with the new rates, which is legitimate because the
+clock is memoryless. `examples/stress.py` runs every bot through four one-hour
+markets:
+
+| scenario         | what changes                                          | 1-min mid move sd | moves over 3 ticks |
+| ---------------- | ----------------------------------------------------- | ----------------- | ------------------ |
+| calm             | nothing                                               | 1.03              | 1.4%               |
+| volatility spike | minutes 20 to 40: market orders x3, cancels x2        | 2.67              | 13.5%              |
+| thin book        | from minute 30: limit orders x0.5                     | 1.80              | 7.5%               |
+| informed flow    | an informed trader with a private random-walk value  | 1.16              | 2.1%               |
+
+The informed trader sends a market order at rate 0.5 per minute whenever its
+value (sigma 1 tick per sqrt(minute)) is through the touch. The bots are the
+tuned ones from above, PPO seed 0 trained on calm sessions only, a PPO trained
+on an even mixture of the four scenarios with the same settings, and one more:
+the same GLFT with `inside=False`, which never quotes inside the other
+participants' spread. Scores per hour over 600 held-out sessions per cell:
+
+| bot                | calm         | volatility spike | thin book    | informed flow |
+| ------------------ | ------------ | ---------------- | ------------ | ------------- |
+| join the touch     | 4.66 (0.84)  | 7.09 (2.11)      | -2.18 (1.53) | -3.24 (0.95)  |
+| best fixed         | 5.02 (0.73)  | 8.01 (1.99)      | 1.50 (1.44)  | -2.80 (0.86)  |
+| AS                 | 9.60 (0.53)  | 8.67 (1.69)      | 2.74 (1.27)  | 3.50 (0.67)   |
+| GLFT               | 9.17 (0.43)  | 5.02 (1.43)      | 1.25 (1.06)  | 7.80 (0.46)   |
+| GLFT, no improving | 10.45 (0.40) | 10.51 (1.34)     | 7.98 (0.75)  | 6.84 (0.45)   |
+| PPO, calm          | 9.82 (0.38)  | 10.01 (1.16)     | 6.60 (0.70)  | 7.17 (0.43)   |
+| PPO, mixture       | 9.74 (0.35)  | 11.00 (1.04)     | 6.87 (0.60)  | 7.51 (0.39)   |
+
+![Stress tests](docs/stress.png)
+
+The first version of this table had no "no improving" row, and it looked like a
+win for learning: PPO beat the tuned GLFT by 5.0 (1.85) in the spike and 5.3
+(1.27) in the thin book, paired. The adverse-selection term gave the reason away.
+GLFT lost 25 ticks per hour to adverse selection in the spike and PPO lost 1.4.
+GLFT quotes around the mid, so when the spread opens it posts inside it. Over 40
+sessions, 70% of its fills in the spike and 61% in the thin book came from orders
+that started a new price level, against 30% when calm, and none of PPO's did. Those are the orders that get hit just
+before the mid moves through them. PPO cannot do that, because its actions are
+depths measured from the other participants' best bid and ask. Clamping GLFT the same way recovers
+everything: +5.5 (2.0) in the spike, +6.7 (1.3) in the thin book, and +1.3
+(0.6) even in calm markets, with adverse selection down to PPO's level. So the
+edge came from the action space, not from anything the agent learned.
+
+The informed trader is the one scenario where clamping costs a little (-1.0,
+0.6). There the bots that skew for inventory (AS, GLFT, both PPOs) stay positive
+and the two that do not lose money. Training on the mixture moves PPO by less
+than one standard error of the difference in every scenario. The calm policy already generalizes as far as this action space lets
+it.
+
 ## Install
 
 ```
@@ -1718,7 +1874,7 @@ python -m venv .venv
 ```
 
 Requires Python 3.10+, numpy and scipy. matplotlib is only needed for the
-examples.
+examples, and gymnasium only for `mmsim.env` (`pip install -e ".[rl]"`).
 
 ## Usage
 
@@ -1810,12 +1966,34 @@ eq = kyle.solve(16, Sigma0=1.0, sigma_u=1.0)
 eq.lam[0], eq.Sigma[-1], eq.profit                     # (0.901, 0.074, 0.886)
 ```
 
+```python
+from functools import partial
+
+from mmsim.env import Learned, MarketMakingEnv, sky
+from mmsim.ppo import Config, train
+from mmsim.tournament import session
+
+env = MarketMakingEnv(phi=0.02, terminal=0.25)   # 60 one-minute steps, |q| <= 5
+obs, _ = env.reset(seed=1)       # [q/Q, time left, spread - 1, imbalance, mid move, flow]
+obs, reward, done, _, info = env.step(0)         # action 0: join both sides
+
+make = partial(MarketMakingEnv, phi=0.02, terminal=0.25)
+agent, curve = train(make, 6, 16, 30, Config(episodes=16, lr=1e-3, lam=0.9, epochs=8))
+# mean score per session -1.46 over the first 5 iterations, 1.55 over the last 5
+
+bot = lambda: Learned(agent.policy.greedy, Q=5, minutes=60.0, dt=1.0)
+r = session({"ppo": bot}, 1, flow=sky, minutes=60.0)["ppo"]
+r.pnl, r.fills, r.exposure       # (17.5, 23, 133.3): exposure is the integral of q^2 dt
+```
+
 `python examples/as_replication.py`, `cst_sessions.py`, `glft_quotes.py`,
 `informed_flow.py`, `why_spreads.py`, `queue_value.py`, `latency_cost.py`,
 `hawkes_flow.py`, `flow_lean.py`, `tournament.py` and `itch_replay.py` redraw the
 eleven charts; the last one needs the extracted ITCH files. The session
 experiments run 1600 to 6800 sessions on all cores; `latency_cost.py` is the
 longest at 8 minutes here, `flow_lean.py` takes 6 and `tournament.py` 1.
+`rl_market_maker.py` trains the three PPO seeds and saves them under `data/`
+(14 minutes), and `stress.py` reads seed 0 from there (9 minutes).
 
 ## Notes
 
