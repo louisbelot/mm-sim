@@ -115,6 +115,7 @@ class Fit:
     h: np.ndarray | None = None
     top: np.ndarray | None = None
     hits: np.ndarray | None = None
+    quotes: np.ndarray | None = None
 
     def params(
         self,
@@ -491,6 +492,7 @@ def fit(
     at = np.arange(len(q))[:, None], np.arange(2)[None, :], np.maximum(i, 0)
     top = np.stack((i, regime[at], n[at]), axis=-1)
     hits = ev[kind == MARKET][:, :2]
+    near = (kind != MARKET) & (lvl == i[row, side])
     grid = np.searchsorted(np.cumsum(dt), np.arange(1, int((end - start) * 60)) / 60)
     sample = q[np.minimum(grid, len(q) - 1)]
     return Fit(
@@ -508,6 +510,7 @@ def fit(
         h,
         top,
         hits,
+        np.column_stack((row, side, kind))[near],
     )
 
 
