@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .book import Side
@@ -57,3 +58,12 @@ class Account:
 
     def value(self, mark: float) -> float:
         return self.cash + self.position * mark
+
+
+def exposure(fills: Sequence[Fill], start: float, end: float, q0: int = 0) -> float:
+    area, t, q = 0.0, start, q0
+    for f in fills:
+        area += q * q * (f.t - t)
+        t = f.t
+        q += f.qty if f.side == Side.BUY else -f.qty
+    return area + q * q * (end - t)

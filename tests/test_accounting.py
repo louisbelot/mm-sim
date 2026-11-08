@@ -2,7 +2,7 @@ import random
 
 import pytest
 
-from mmsim.accounting import Account
+from mmsim.accounting import Account, exposure
 from mmsim.book import Side
 
 
@@ -43,3 +43,12 @@ def test_value_is_sum_of_fill_markouts():
         (1 if f.side == Side.BUY else -1) * f.qty * (mark - f.price) - f.fee for f in acct.fills
     )
     assert acct.value(mark) == pytest.approx(markouts)
+
+
+def test_exposure_integrates_squared_position():
+    acct = Account()
+    acct.fill(1.0, 1, Side.BUY, 100, 2, True, None)
+    acct.fill(3.0, 2, Side.SELL, 100, 3, True, None)
+    assert exposure(acct.fills, 0.0, 4.0) == 4 * 2 + 1 * 1
+    assert exposure(acct.fills, 0.0, 4.0, q0=1) == 1 + 9 * 2 + 0
+    assert exposure([], 2.0, 5.0, q0=-2) == 12
