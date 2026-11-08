@@ -28,8 +28,9 @@ environment, a PPO market maker written from scratch in numpy is trained on it
 and compared with the tuned inventory models, and every bot is stress-tested on
 volatility spikes, a thinning book and informed flow. Next to the book sits a
 concentrated-liquidity pool, with its loss-versus-rebalancing replicated in
-closed form and in simulation, and a comparison with a quoter on the same
-price path.
+closed form and in simulation, and compared with a quoter on the same price
+path. The same comparison runs for prediction markets: Hanson's LMSR and a
+constant-product pool against a Glosten-Milgrom quoter.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -1979,6 +1980,64 @@ either way. The best tier sits below the quoter's half spread (5 bp against 15,
 spread the pool still gets a third of the flow, from the times its stale price
 is better than the market.
 
+## Prediction markets: LMSR, a constant-product pool and a quoter
+
+`prediction.py` runs a binary event, a share that pays 1 if it happens, with
+three makers behind one interface (`price`, and `buy(yes)` for one share):
+Hanson's logarithmic market scoring rule with cost
+C(q) = b log(e^(q_yes/b) + e^(q_no/b)); the Gnosis fixed-product market maker,
+which turns the buyer's cash into a complete YES/NO set, adds it to its pool
+and pays out the token so that y n stays constant; and the Glosten-Milgrom
+quoter from above, whose ask and bid are E[w | buy] and E[w | sell] for a known
+informed share alpha. Traders arrive one at a time. Informed ones know the
+outcome w and buy the winning token, noise traders pick a side at random. All
+three are vectorized over markets.
+
+Each maker's P&L has a closed form, and the tests check it to 1e-9 on every
+simulated market:
+
+- LMSR: P&L = -b ln(p_T(w) / p_0(w)), the log scoring rule of the final price,
+  so the subsidy is at most b ln(1/p_0(w)), b ln 2 for an even prior.
+- FPMM: the reserves at price p are y = F sqrt((1-p)/p) and n = F sqrt(p/(1-p)),
+  so P&L is F (sqrt((1-p_T)/p_T) - sqrt((1-p_0)/p_0)) if YES wins. The subsidy
+  is at most F for an even prior.
+- Quoter: after k more YES buys than NO buys its belief is the Bayes posterior
+  with likelihood ratio (1 + alpha)/(1 - alpha) per net trade, and its expected
+  P&L is zero.
+
+With b = F the two pools move the price by the same 1/(4b) per share at 1/2.
+Away from 1/2 the FPMM moves 2 sqrt(p(1-p)) times as far as the LMSR, so it is
+as responsive at the start and slower near 0 and 1, and its worst-case subsidy
+is F against 0.69 b. `examples/prediction_markets.py`, informed share 0.2,
+20,000 markets of 400 trades:
+
+| maker                     | maker P&L | informed | noise | mean abs(p - w) after 25 | 50    | 100   | 200   |
+| ------------------------- | --------- | -------- | ----- | ------------------------ | ----- | ----- | ----- |
+| quoter, alpha known       | -0.01     | 2.74     | -2.73 | 0.220                    | 0.112 | 0.031 | 0.003 |
+| quoter, assumes 0.1       | -1.94     | 4.35     | -2.41 | 0.301                    | 0.181 | 0.064 | 0.008 |
+| quoter, assumes 0.4       | 1.10      | 2.02     | -3.13 | 0.175                    | 0.085 | 0.022 | 0.002 |
+| LMSR b = 10               | -6.91     | 7.99     | -1.08 | 0.384                    | 0.288 | 0.153 | 0.039 |
+| LMSR b = 14.4             | -9.86     | 10.90    | -1.03 | 0.416                    | 0.341 | 0.219 | 0.082 |
+| FPMM F = 10               | -8.69     | 9.73     | -1.05 | 0.387                    | 0.298 | 0.177 | 0.070 |
+
+![Prediction market makers](docs/prediction_markets.png)
+
+The quoter that knows alpha finds the outcome fastest and breaks even, and the
+noise traders pay the informed traders' whole 2.74 through its spread. With a
+pool the noise traders pay about 1 and the subsidy pays the rest. Informed
+traders make three or four times as much against a pool (8 to 11 against
+2.7), because a pool's price takes longer to get there and they trade at stale
+prices the whole way.
+LMSR b = 14.4 and FPMM F = 10 have the same worst case, 10: the LMSR is deeper
+at the start and the FPMM near the end, and the curves cross at about 260
+trades.
+
+The case for a pool in a thin market is the two misspecified rows. A quoter
+that thinks half as many traders are informed loses 1.94 a market. One that
+thinks twice as many makes 1.10, out of the noise traders' pockets (they pay
+3.13 instead of 2.73). The pool's loss is capped by b or F whatever the flow,
+which is Hanson's original reason for subsidizing a scoring rule.
+
 ## Install
 
 ```
@@ -2121,7 +2180,8 @@ experiments run 1600 to 6800 sessions on all cores; `latency_cost.py` is the
 longest at 8 minutes here, `flow_lean.py` takes 6 and `tournament.py` 1.
 `rl_market_maker.py` trains the three PPO seeds and saves them under `data/`
 (14 minutes), and `stress.py` reads seed 0 from there (9 minutes).
-`amm_lvr.py` redraws the pool chart in a minute.
+`amm_lvr.py` redraws the pool chart in a minute and `prediction_markets.py` the
+prediction-market one in a few seconds.
 
 ## Notes
 
