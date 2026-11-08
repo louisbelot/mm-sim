@@ -118,12 +118,12 @@ def test_kick_decays_at_beta():
     flow = QueueReactive(p)
     flow.t = 1.0
     flow._kick(Side.BUY)
-    assert flow._excess(1.0) == pytest.approx([0.4 * 20.0, 0.1 * 20.0])
-    assert flow._excess(1.05) == pytest.approx([8.0 * math.exp(-1.0), 2.0 * math.exp(-1.0)])
+    assert flow._excess(1.0)[MARKET] == pytest.approx([0.4 * 20.0, 0.1 * 20.0])
+    assert flow._excess(1.05)[MARKET] == pytest.approx([8.0 * math.exp(-1.0), 2.0 * math.exp(-1.0)])
     flow.t = 1.05
     flow._kick(Side.SELL)
     e = math.exp(-1.0)
-    assert flow._excess(1.05) == pytest.approx([20 * (0.4 * e + 0.1), 20 * (0.1 * e + 0.4)])
+    assert flow._excess(1.05)[MARKET] == pytest.approx([20 * (0.4 * e + 0.1), 20 * (0.1 * e + 0.4)])
 
 
 def test_branching_sets_the_market_rate(sim_fit):

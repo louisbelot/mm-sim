@@ -337,13 +337,14 @@ class Fit:
         ok = (i >= 0) & sized[np.maximum(i, 0)]
         i = np.where(ok, i, 0)
         mu = np.where(ok, np.array(p.rates)[i, r, n, kind], 0.0)
+        key = np.where(ok, _keys(p, i, r, n), -1)
+        if kind != MARKET:
+            key[mu == 0] = -1
         if p.clock is not None:
             mu *= np.array(p.clock.scale)[self.h, kind][:, None]
-        key = np.where(ok, _keys(p, i, r, n), -1)
         if kind == MARKET:
             rows, side = self.hits.T
         else:
-            key[mu == 0] = -1
             q = self.quotes[self.quotes[:, 2] == kind]
             rows, side = q[key[q[:, 0], q[:, 1]] >= 0, :2].T
             react = _reaction(p.excite, kind)
@@ -700,9 +701,16 @@ class QueueReactive:
         self._ask: int | None = None
         self._market = False
         self._far = [0, 0]
-        k = 0 if params.excite is None else len(params.excite.beta)
+        e = params.excite
+        k = 0 if e is None else len(e.beta)
         self._kicks = [[0.0, 0.0] for _ in range(k)]
         self._kicked = start
+        self._react = {} if e is None or not e.react else e.react
+        self._gains = [
+            [(MARKET, e.own[j], e.cross[j])]
+            + [(kind, r.own[j], r.cross[j]) for kind, r in self._react.items()]
+            for j in range(k)
+        ]
 
     def seed(self, book: Book, bid: int, ask: int, ids: Iterator[int]) -> None:
         for side, top, step in ((Side.BUY, bid, -1), (Side.SELL, ask, 1)):
@@ -718,9 +726,8 @@ class QueueReactive:
         exposed = self._exposed(bid, ask, rng, ids)
         if exposed:
             return 0.0, lambda b: [e for o, s, px, q in exposed for e in self._add(b, o, s, px, q)]
-        actions, weights = self._menu(book, bid, ask)
+        actions, weights, hot = self._menu(book, bid, ask)
         clock = self.params.clock
-        markets = [(j, a[1]) for j, a in enumerate(actions) if a[0] == MARKET and self._kicks]
         waited = 0.0
         while True:
             left = horizon - waited
@@ -731,14 +738,14 @@ class QueueReactive:
                 m = clock.scale[h]
                 w = [x * m[a[0]] for a, x in zip(actions, weights, strict=True)]
             x = self._excess(self.t)
-            extra = sum(x[s] for _, s in markets)
-            cum = list(accumulate(_kicked(w, markets, x)))
+            extra = sum(x[k][s] for _, k, s in hot)
+            cum = list(accumulate(_kicked(w, hot, x)))
             dt = rng.expovariate(cum[-1]) if cum and cum[-1] > 0 else math.inf
             if dt <= min(left, edge):
                 self.t += dt
                 if extra:
                     bound = cum[-1]
-                    cum = list(accumulate(_kicked(w, markets, self._excess(self.t))))
+                    cum = list(accumulate(_kicked(w, hot, self._excess(self.t))))
                     if rng.random() * bound >= cum[-1]:
                         waited += dt
                         continue
@@ -750,15 +757,18 @@ class QueueReactive:
             waited += edge
             self.t += edge
 
-    def _excess(self, t: float) -> list[float]:
-        out = [0.0, 0.0]
+    def _excess(self, t: float) -> list[list[float]]:
+        out = [[0.0, 0.0] for _ in range(3)]
         if not self._kicks:
             return out
         e = self.params.excite
-        for a, c, b, (r0, r1) in zip(e.own, e.cross, e.beta, self._kicks, strict=True):
+        for b, (r0, r1), gains in zip(e.beta, self._kicks, self._gains, strict=True):
             f = b * math.exp(-b * (t - self._kicked))
-            out[0] += f * (a * r0 + c * r1)
-            out[1] += f * (a * r1 + c * r0)
+            u0, u1 = f * r0, f * r1
+            for kind, a, c in gains:
+                x = out[kind]
+                x[0] += a * u0 + c * u1
+                x[1] += a * u1 + c * u0
         return out
 
     def _kick(self, side: Side) -> None:
@@ -809,13 +819,14 @@ class QueueReactive:
             left -= q
         return out
 
-    def _menu(self, book: Book, bid: int, ask: int) -> tuple[list[tuple], list[float]]:
+    def _menu(self, book: Book, bid: int, ask: int) -> tuple[list[tuple], list[float], list]:
         p = self.params
         gap = self.gap
         low, high = p.edges
         wide = ask - bid > 1
         actions: list[tuple] = []
         weights: list[float] = []
+        hot: list[tuple[int, int, Side]] = []
         for side, far, best, step in ((Side.BUY, ask, bid, -1), (Side.SELL, bid, ask, 1)):
             shift = BASE if p.memory and gap.up == (side == Side.BUY) else 0
             if wide:
@@ -833,17 +844,23 @@ class QueueReactive:
                 n = min((q + a - 1) // a, p.N)
                 r = rest if i else r0
                 lam_l, lam_c, lam_m = p.rates[i][r][n]
-                if lam_l:
-                    actions.append((LIMIT, side, i, n, r, px))
-                    weights.append(lam_l)
-                if q:
-                    if lam_c:
-                        actions.append((CANCEL, side, i, n, r, px))
-                        weights.append(lam_c)
-                    if (lam_m or (self._kicks and p.sizes.get((MARKET, i)))) and px == best:
-                        actions.append((MARKET, side, i, n, r, px))
-                        weights.append(lam_m)
-        return actions, weights
+                touch = q and px == best
+                for kind, lam in ((LIMIT, lam_l), (CANCEL, lam_c)):
+                    if not lam or (kind == CANCEL and not q):
+                        continue
+                    if touch and kind in self._react and p.sizes.get((kind, i)):
+                        react = self._react[kind]
+                        key = (i * REGIMES + (r if p.regimes else 0)) * (p.N + 1) + n
+                        lam *= react.cells.get(key, react.rest)
+                        hot.append((len(actions), kind, side))
+                    actions.append((kind, side, i, n, r, px))
+                    weights.append(lam)
+                if touch and (lam_m or (self._kicks and p.sizes.get((MARKET, i)))):
+                    if self._kicks:
+                        hot.append((len(actions), MARKET, side))
+                    actions.append((MARKET, side, i, n, r, px))
+                    weights.append(lam_m)
+        return actions, weights, hot
 
     def _fire(self, book: Book, action: tuple, rng: random.Random, ids: Iterator[int]):
         kind, side, i, n, r, px = action
@@ -888,12 +905,12 @@ class QueueReactive:
         return lambda b: [e for oid, px, left in plan for e in _shrink(b, oid, px, left)]
 
 
-def _kicked(w: list[float], markets: list[tuple[int, Side]], x: list[float]) -> list[float]:
-    if not markets:
+def _kicked(w: list[float], hot: list[tuple[int, int, Side]], x: list[list[float]]) -> list[float]:
+    if not hot:
         return w
     w = list(w)
-    for j, s in markets:
-        w[j] += x[s]
+    for j, kind, s in hot:
+        w[j] += x[kind][s]
     return w
 
 

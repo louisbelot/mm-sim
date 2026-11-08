@@ -8,8 +8,10 @@ from test_qr import feed, flat
 
 from mmsim import qr
 from mmsim.book import Side
+from mmsim.bots import SymmetricQuoter
 from mmsim.itch import NS_PER_MINUTE, Msg
-from mmsim.qr import CANCEL, LIMIT, MARKET, Excite, Reaction
+from mmsim.qr import CANCEL, LIMIT, MARKET, Excite, QueueReactive, Reaction
+from mmsim.sim import Latency, Simulator
 
 B, S = Side.BUY, Side.SELL
 
@@ -166,3 +168,77 @@ def test_react_needs_market_kernels(calm_fit):
     f, p = calm_fit
     with pytest.raises(ValueError):
         f.react(dataclasses.replace(p, excite=None))
+
+
+def echo(cancel=(0.3, 0.05), limit=(0.2, 0.1)):
+    react = {CANCEL: Reaction((cancel[0],), (cancel[1],), 1.0, {})}
+    react[LIMIT] = Reaction((limit[0],), (limit[1],), 1.0, {})
+    p = hot()
+    return dataclasses.replace(p, excite=dataclasses.replace(p.excite, react=react))
+
+
+@pytest.fixture(scope="module")
+def echo_fit():
+    p = echo()
+    return qr.fit(feed(p, 600.0, 2), 0.0, 600.0, depth=2, bins=8, edges=p.edges)
+
+
+def test_kick_reaches_the_touch_quotes():
+    flow = QueueReactive(echo())
+    flow.t = 1.0
+    flow._kick(Side.BUY)
+    x = flow._excess(1.0)
+    assert x[MARKET] == pytest.approx([0.4 * 30, 0.1 * 30])
+    assert x[CANCEL] == pytest.approx([0.3 * 30, 0.05 * 30])
+    assert x[LIMIT] == pytest.approx([0.2 * 30, 0.1 * 30])
+    assert flow._excess(1.1)[CANCEL] == pytest.approx([9 * math.exp(-3), 1.5 * math.exp(-3)])
+
+
+def test_zero_reaction_gives_the_same_tape():
+    def run(p):
+        sim = Simulator(QueueReactive(p, seed=4), seed=4)
+        sim.seed(100, 101)
+        sim.run(30.0)
+        return sim.tape
+
+    a = run(hot())
+    b = run(echo(cancel=(0.0, 0.0), limit=(0.0, 0.0)))
+    assert a.mid == b.mid and a.t == b.t
+
+
+def test_fit_recovers_the_reaction(echo_fit):
+    f = echo_fit
+    p = f.excite(f.params(regimes=False, min_events=1), min_events=1)
+    assert p.excite.own[0] == pytest.approx(0.4, abs=0.04)
+    got = f.react(p, min_events=200)
+    rates = np.array(got.rates)
+    truth = {CANCEL: lambda n: 6.0 + n, LIMIT: lambda n: 30.0 / (1 + 0.3 * n)}
+    for kind, (own, cross) in ((CANCEL, (0.3, 0.05)), (LIMIT, (0.2, 0.1))):
+        r = got.excite.react[kind]
+        assert r.own[0] == pytest.approx(own, abs=0.04)
+        assert r.cross[0] == pytest.approx(cross, abs=0.03)
+        touch = {k % (got.N + 1): v for k, v in r.cells.items() if k < got.N + 1}
+        assert len(touch) >= 6
+        for n, psi in touch.items():
+            assert psi * rates[0, 0, n, kind] == pytest.approx(truth[kind](n), rel=0.08)
+
+
+@pytest.mark.parametrize("kind", [CANCEL, LIMIT])
+def test_true_reaction_gives_unit_residuals(echo_fit, kind):
+    hot_r = np.concatenate(echo_fit.residuals(echo(), kind))
+    cold = dataclasses.replace(echo(), excite=dataclasses.replace(echo().excite, react=None))
+    cold_r = np.concatenate(echo_fit.residuals(cold, kind))
+    assert hot_r.min() >= 0
+    assert hot_r.mean() == pytest.approx(1, abs=0.03)
+    assert hot_r.var() == pytest.approx(1, abs=0.08)
+    assert abs(cold_r.mean() - 1) > 0.05 or cold_r.var() > 1.15
+
+
+def test_reacting_flow_keeps_the_book_sound():
+    bot = SymmetricQuoter(0.5, size=1, max_position=20)
+    lag = Latency(feed=0.001, entry=0.001, response=0.001)
+    sim = Simulator(QueueReactive(echo(), seed=5), [bot], seed=5, latency={bot: lag})
+    sim.seed(100, 101)
+    sim.run(20.0)
+    assert sim.contexts[0].account.fills
+    assert sim.book.audit() == "" and sim.contexts[0]._view.audit() == ""

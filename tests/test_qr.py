@@ -371,7 +371,7 @@ def regime_params():
 
 
 def regimes_seen(flow, book, bid, ask):
-    actions, weights = flow._menu(book, bid, ask)
+    actions, weights, _ = flow._menu(book, bid, ask)
     return {(a[1], a[2]): int(w) % 1000 - 1 for a, w in zip(actions, weights, strict=True)}
 
 
@@ -433,7 +433,7 @@ def test_fit_and_flow_agree_on_the_state():
     flow = QueueReactive(p)
     flow.gap.update(99, 100, False)
     flow.gap.up = True
-    actions, weights = flow._menu(book, 99, 100)
+    actions, weights, _ = flow._menu(book, 99, 100)
     got = {(a[1], a[2]): (a[3], a[4]) for a in actions}
     assert (int(n[0]), int(regime[0])) == got[B, 0]
 
