@@ -1219,6 +1219,95 @@ mid moves and the AAPL overshoot both point at the same next step: the excitatio
 should probably reach cancels at the touch too, which this model leaves alone. `examples/order_memory.py` prints the tables and
 draws the chart in about 22 minutes.
 
+## The cancel race
+
+A market order on the tape is followed by a storm at the touch. In the first tenth
+of a millisecond after one, CSCO's touch cancels arrive at 2,350 times their
+average rate on the side that was hit and 16,000 times on the other side; touch
+limit orders at 950 and 26,000 times. Market makers pull and repost their quotes
+the moment they see a print. The model from the last section only lets market
+orders excite market orders, so it shows 86 and 524 for cancels: what is left
+comes from the queue-reactive states alone.
+
+`Fit.react(params)` adds the same kind of Hawkes term to the cancels and limit
+orders at the best queue of each side (Bacry, Jaisson and Muzy model the first
+level the same way, with market, limit and cancel events per side). The sources
+are the flow's market orders and the timescales are the ones already fitted for
+them, so with the betas fixed the log-likelihood is
+
+    sum over events of log(psi_g * mu(q) + X theta) - psi . M - C . theta
+
+which is concave in the baseline scales `psi` and the kernel weights `theta`. `X`
+holds the decayed counts of earlier market orders at each event and `C` their
+integrals over the time the touch could actually fire, both computed once. L-BFGS
+with nonnegative bounds finishes in 1.5 s for both kinds on CSCO's 129,000 touch cancels and
+139,000 touch limits. One rule keeps
+the fit and the simulator honest with each other: a touch state whose table rate
+is zero is dead, its events drop out of the likelihood and the flow never fires an
+excited event there. `QueueReactive` adds the excitation to the touch actions and
+samples everything with the same thinning step as before.
+
+On a simulated feed with known kernels (cancels own 0.3, cross 0.05; limits 0.2,
+0.1) twelve 600-minute runs recover 0.295, 0.0445, 0.1995 and 0.1017, with
+standard errors near 0.003, 0.0016, 0.004 and 0.004. The cross term on cancels
+comes back about 11% low, three standard errors; each kernel alone is recovered
+without bias, and I have not found where the joint fit loses it.
+
+On CSCO, per market order:
+
+| touch | side | 0.20 ms | 5.6 ms | 0.60 s | total |
+| --- | --- | ---: | ---: | ---: | ---: |
+| cancels | hit | 1.00 | 1.24 | 1.36 | 3.60 |
+| cancels | other | 4.69 | 3.08 | 2.95 | 10.71 |
+| limits | hit | 0.49 | 0.92 | 1.42 | 2.83 |
+| limits | other | 13.68 | 1.20 | 1.37 | 16.25 |
+
+Each market order sets off about 14 cancels and 19 limit orders at the touch, most
+of them on the side that was not hit. That is about 44% of all touch cancels and
+55% of touch limits. These are not ITCH replace messages; replaces are 27,000 of
+the 250,000 removals. The fit improves a lot and is still rejected:
+
+| touch | model | residual variance | KS distance | log-likelihood gain per event |
+| --- | --- | ---: | ---: | ---: |
+| cancels | market kernels | 9.38 | 0.541 | |
+| cancels | + touch reaction | 4.25 | 0.362 | 1.65 |
+| limits | market kernels | 15.25 | 0.614 | |
+| limits | + touch reaction | 6.51 | 0.434 | 2.52 |
+
+![The cancel race](docs/cancel_race.png)
+
+The left two panels are the same event study on the tape and on six 120-minute
+runs of each model, fitted back with `qr.fit` from `qr.messages`. The reaction
+puts the model within about a factor of two of the tape below a millisecond,
+where the market kernels alone were off by up to thirty times. Three exponentials give a bump around
+10 ms that the tape does not have and too little at 100 ms.
+
+Then the sessions. Forty-eight of CSCO with the join-the-touch bot:
+
+| | pnl (se) | adverse | inventory | shares | moves/min | eta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| tape | -0.117 (0.112) | -0.727 | 0.096 | 11,550 | 11.16 | 0.598 |
+| market kernels | -0.258 (0.080) | -0.666 | -0.103 | 12,342 | 9.08 | 0.619 |
+| + touch reaction | -0.088 (0.046) | -0.615 | 0.003 | 14,274 | 18.16 | 0.323 |
+
+The bot's P&L lands on the tape's, but for the wrong reason. Mid moves were 19%
+short and are now 63% over, and eta halves (continuations over twice the
+reversals, the Robert-Rosenbaum measure; below 0.5 means the mid mean-reverts). The book flickers. On the tape a reaction is mostly a quote being
+pulled and put back, so the queue barely changes. The model draws the cancel and
+the new limit independently, each from its own size distribution, so a burst can
+empty a thin touch and refill it a tick away a moment later. Adverse selection
+moves away from the tape.
+
+Across symbols (twelve sessions each), the moves panel on the right: the three
+large-tick names go from short to far over (CSCO 18.7, INTC 27.0, CMCSA 23.1
+against 11.2, 18.6, 11.4), MSFT and AAPL get a little closer (77 against 118, 180
+against 373) and QQQ moves away (257 against 297). The AAPL adverse overshoot that
+motivated this gets worse, -3.03 against -1.96 on the tape. So the cancel
+excitation is real and large, and the right way to put it in a simulator is a
+paired event (pull and repost) that conserves the queue, not two independent
+streams. `examples/cancel_race.py` prints the tables and draws the chart in about
+25 minutes.
+
 ## Install
 
 ```
