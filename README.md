@@ -22,7 +22,8 @@ same tape it estimates Stoikov's microprice and the Cont-Kukanov-Stoikov
 order-flow imbalance, checks both out of sample, and runs a quoter centred on
 the microprice. The Cartea-Jaimungal-Penalva market maker with a short-term
 alpha is solved numerically, calibrated from the replay's own fills, and run on
-the same sessions.
+the same sessions, along with a measurement of how much of each signal is left
+after a given latency.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -1615,6 +1616,54 @@ the model choose between the touch and one tick back is the next step.
 eps is negative on most fits: right after the tick-through the new touch is
 thin and the microprice expects part of the move back. The move itself is in
 `impact`. The example runs 432 sessions and 24 solves in about 6 minutes.
+
+## How fast the signal goes stale
+
+Both quoters above react the instant the book changes. `examples/signal_latency.py`
+asks how much of the signal is left for a bot that sees it L later. With b(h) the
+slope of the mid change over h on the signal, the share of the 10 s move still
+ahead after a delay L is 1 - b(L)/b(10 s). The answer depends on when you look.
+Sampled at the moment the top of book changes (when a fast bot would act), the
+microprice on the six names fitted on the other half gives:
+
+| delay  | 10 us        | 100 us       | 1 ms         | 10 ms        | 100 ms       |
+|--------|--------------|--------------|--------------|--------------|--------------|
+| ahead  | 0.97 to 0.99 | 0.79 to 0.88 | 0.52 to 0.69 | 0.42 to 0.59 | 0.34 to 0.48 |
+
+Sampled once a second instead, at least 98% of the move is still ahead at 1 ms
+and 74 to 95% at 100 ms on five of the six (AAPL 0.77 at 10 ms). The once a
+second view sees mostly old states whose information has already been used; the
+states that carry the move are the ones that just changed, and a third to a half
+of their move is gone within a millisecond. The plain imbalance I - 1/2 gives the
+same numbers within 0.02. AAPL's once a second response at 10 s is close to zero,
+so its ratio is meaningless and the chart leaves that line out.
+
+The replay says the same thing in dollars. Feed and entry each take the
+one-way latency, twelve sessions per cell, parameters fitted on the other half:
+
+| quoters, sum of five symbols | 0      | 10 us  | 100 us | 1 ms   | 10 ms  |
+|------------------------------|--------|--------|--------|--------|--------|
+| mid                          | -317.7 | -347.1 | -429.4 | -591.9 | -573.3 |
+| micro 0.0                    | 35.7   | 12.6   | 40.5   | -64.8  | -152.0 |
+| cjp alpha                    | 9.8    | -1.7   | -32.0  | -136.9 | -188.5 |
+
+($ per 30-minute session, summed over CSCO, INTC, CMCSA, MSFT and QQQ; AAPL loses
+hundreds a session for the first two at every latency and the third never
+trades it.)
+
+![share of the signal left after a delay, and P&L by latency](docs/signal_latency.png)
+
+The microprice quoter stays positive up to 100 us, the CJP bot only at zero, and
+both are negative from 1 ms. They also
+trade more as they get slower: at 10 ms the microprice quoter trades 26,586 QQQ
+shares a session instead of 5,511, and the CJP bot 54,901 instead of 8,688. A
+slow bot decides to pull on a book that has already moved, the cancel arrives
+after the market order that fills it, and those fills are the toxic ones (the
+microprice quoter's adverse term on CSCO goes from +0.03 to -0.31 cents a share
+at 1 ms). The mid quoter has no signal to lose; its losses grow from 0 to 1 ms
+for the queue reasons in the latency section above. The 100 us microprice cell
+looks better than zero latency only because of MSFT (+43.8, se 32.6). The run
+takes about 15 minutes for 1,152 sessions.
 
 ## Install
 
