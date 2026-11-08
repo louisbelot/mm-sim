@@ -1240,3 +1240,51 @@ Design notes and what went wrong:
 Next: depth as a control (touch or one tick back) with fill rate and impact
 calibrated per depth from the bot's own fills, a microprice with memory of the
 last move, and the Gymnasium environment for an RL market maker.
+
+## 2026-11-08: Memory in the microprice chain
+
+The microprice is miscalibrated on the large-tick names (the mid travels 1.5 to
+1.75 times g* on INTC and CMCSA, about 0.5 times on AAPL). The obvious guess was
+that the chain needs to know which way the mid last moved. It does not help.
+
+Built:
+
+- `micro.last_move(top, ttl)`: 0 (down), 1 (neither) or 2 (up) for the last mid
+  move, forgotten after ttl top-of-book updates.
+- `fit(..., memory=ttl)`: states become (spread, imbalance bucket, flag), the
+  mirror maps down to up, and `Microprice.adjust` takes the flag.
+- `examples/micro_memory.py`: four memory lengths against the plain chain,
+  calibration slopes with 30-minute clustered errors, out-of-sample R^2 at 10 s
+  and two moves, and a linear baseline in imbalance and last-move sign.
+
+Checks:
+
+- 436 tests. A 6-state chain with momentum built into the kernel, simulated
+  for 300,000 steps: the memory fit's g* is within 0.03 of the chain's closed
+  form, and the momentum is large (0.2 ticks between the up and down states).
+  Swapping the mirror's flag order or the flag itself fails these tests.
+- The real-data gap below survives fitting without the mirror.
+
+Results (fitted on one half, tested on the other):
+
+- A permanent flag makes the chain believe in momentum (+0.20 ticks for a
+  balanced CSCO book right after an up move) that the tape does not have: from
+  those states the next move averages +0.04 ticks after a down move, against a
+  chain prediction of -0.13. Out of sample its slopes fall to 0.3 to 0.9 and its
+  R^2 goes negative on CSCO and INTC at 10 s.
+- Remembering only the move into the current state keeps the chain Markov; INTC
+  and CMCSA slopes at two moves go from 1.63 and 1.46 to 1.37 and 1.25, R^2 is
+  unchanged within 0.01.
+- Ten updates brings INTC and CMCSA to 0.95 and 0.83 while pulling MSFT from 0.89
+  to 0.69. No version gains more than 0.02 of R^2 anywhere.
+
+Design notes: a flag that lasts longer than one transition is hidden state, so
+the fitted chain averages states seen just after a move with the same states
+seen long after and then propagates that average forward. That is what produced
+the momentum. The remaining miscalibration looks like a scale problem rather
+than a missing direction: the slope is above one on the names with deep queues
+relative to their trading and below one on AAPL.
+
+Next: condition the chain on time since the last move or on the Hawkes intensity
+of recent market orders instead of the direction, and see whether either moves
+the slopes without hurting MSFT and QQQ.
