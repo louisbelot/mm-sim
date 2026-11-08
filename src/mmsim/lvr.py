@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -46,3 +47,48 @@ def fee_income(z, gamma: float) -> np.ndarray:
     up = s * (1 - np.exp(-(z - gamma) / 2))
     down = s * (np.exp(-(z + gamma) / 2) - 1)
     return np.where(z > gamma, up, np.where(z < -gamma, down, 0.0))
+
+
+@dataclass(frozen=True)
+class Chain:
+    arb: float
+    fee: float
+    trade: float
+    arb_se: float
+    fee_se: float
+
+
+def mispricing(
+    sigma: float,
+    lam: float,
+    gamma: float,
+    *,
+    chains: int = 2000,
+    blocks: int = 2000,
+    burn: int = 200,
+    fixed: bool = False,
+    seed: int = 0,
+) -> Chain:
+    rng = np.random.default_rng(seed)
+    z = np.zeros(chains)
+    arb = np.zeros(chains)
+    fee = np.zeros(chains)
+    time = np.zeros(chains)
+    trades = 0
+    for i in range(burn + blocks):
+        tau = np.full(chains, 1 / lam) if fixed else rng.exponential(1 / lam, chains)
+        z += sigma * np.sqrt(tau) * rng.standard_normal(chains)
+        if i >= burn:
+            arb += arb_profit(z, gamma)
+            fee += fee_income(z, gamma)
+            time += tau
+            trades += np.count_nonzero(np.abs(z) > gamma)
+        np.clip(z, -gamma, gamma, out=z)
+    T = time.sum()
+    return Chain(
+        arb.sum() / T,
+        fee.sum() / T,
+        trades / (chains * blocks),
+        np.std(arb / time, ddof=1) / math.sqrt(chains),
+        np.std(fee / time, ddof=1) / math.sqrt(chains),
+    )

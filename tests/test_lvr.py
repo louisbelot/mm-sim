@@ -44,3 +44,21 @@ def test_fees_and_arbitrage_split_lvr_when_blocks_are_fast():
 def test_slow_blocks_blow_up():
     assert lvr.arb_rate(4.0, 2.0, 0.1) == math.inf
     assert lvr.fee_rate(4.0, 2.0, 0.1) == math.inf
+
+
+@pytest.mark.parametrize("gamma", [0.0, 0.05, 0.2, 0.5])
+def test_mispricing_chain_matches_closed_forms(gamma):
+    sigma, lam = 1.0, 50.0
+    c = lvr.mispricing(sigma, lam, gamma, chains=2000, blocks=1000, seed=4)
+    assert abs(c.arb - lvr.arb_rate(sigma, lam, gamma)) < 4 * c.arb_se
+    assert abs(c.fee - lvr.fee_rate(sigma, lam, gamma)) < 4 * c.fee_se + 1e-12
+    n = 2000 * 1000
+    pt = lvr.p_trade(sigma, lam, gamma)
+    assert abs(c.trade - pt) < 4 * math.sqrt(pt * (1 - pt) / n) + 1e-3
+
+
+def test_fixed_blocks_trade_less_than_poisson():
+    sigma, lam, gamma = 1.0, 50.0, 0.2
+    poisson = lvr.mispricing(sigma, lam, gamma, chains=1000, blocks=500, seed=1)
+    fixed = lvr.mispricing(sigma, lam, gamma, chains=1000, blocks=500, fixed=True, seed=1)
+    assert fixed.arb < poisson.arb - 4 * poisson.arb_se
