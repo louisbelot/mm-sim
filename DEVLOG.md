@@ -1270,8 +1270,8 @@ Results (fitted on one half, tested on the other):
 - A permanent flag makes the chain believe in momentum (+0.20 ticks for a
   balanced CSCO book right after an up move) that the tape does not have: from
   those states the next move averages +0.04 ticks after a down move, against a
-  chain prediction of -0.13. Out of sample its slopes fall to 0.3 to 0.9 and its
-  R^2 goes negative on CSCO and INTC at 10 s.
+  chain prediction of -0.13. Out of sample its slopes on CSCO and INTC fall to
+  0.34 to 0.86 and its R^2 at 10 s goes negative on both.
 - Remembering only the move into the current state keeps the chain Markov; INTC
   and CMCSA slopes at two moves go from 1.63 and 1.46 to 1.37 and 1.25, R^2 is
   unchanged within 0.01.
@@ -1281,9 +1281,9 @@ Results (fitted on one half, tested on the other):
 Design notes: a flag that lasts longer than one transition is hidden state, so
 the fitted chain averages states seen just after a move with the same states
 seen long after and then propagates that average forward. That is what produced
-the momentum. The remaining miscalibration looks like a scale problem rather
-than a missing direction: the slope is above one on the names with deep queues
-relative to their trading and below one on AAPL.
+the momentum. My guess is that the remaining miscalibration is about scale (how
+far the mid goes once it moves) rather than direction, since no direction flag
+moves INTC up and AAPL down at the same time.
 
 Next: condition the chain on time since the last move or on the Hawkes intensity
 of recent market orders instead of the direction, and see whether either moves
