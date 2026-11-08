@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 import pytest
 from scipy.integrate import quad
 
@@ -44,6 +45,7 @@ def test_fees_and_arbitrage_split_lvr_when_blocks_are_fast():
 def test_slow_blocks_blow_up():
     assert lvr.arb_rate(4.0, 2.0, 0.1) == math.inf
     assert lvr.fee_rate(4.0, 2.0, 0.1) == math.inf
+    assert lvr.stale_quote_loss(2.0, 1.0, 0.01) == math.inf
 
 
 @pytest.mark.parametrize("gamma", [0.0, 0.05, 0.2, 0.5])
@@ -62,3 +64,13 @@ def test_fixed_blocks_trade_less_than_poisson():
     poisson = lvr.mispricing(sigma, lam, gamma, chains=1000, blocks=500, seed=1)
     fixed = lvr.mispricing(sigma, lam, gamma, chains=1000, blocks=500, fixed=True, seed=1)
     assert fixed.arb < poisson.arb - 4 * poisson.arb_se
+
+
+def test_stale_quote_loss_is_laplace_tail():
+    sigma, lam, h = 0.02, 400.0, 0.003
+    b = sigma / math.sqrt(2 * lam)
+    rng = np.random.default_rng(2)
+    X = sigma * np.sqrt(rng.exponential(1 / lam, 2_000_000)) * rng.standard_normal(2_000_000)
+    loss = np.maximum(np.exp(X) - 1 - h, 0) + np.maximum(1 - h - np.exp(X), 0)
+    assert lvr.stale_quote_loss(sigma, lam, h) == pytest.approx(loss.mean(), rel=0.02)
+    assert lvr.stale_quote_loss(sigma, lam, h) == pytest.approx(b * math.exp(-h / b), rel=0.05)

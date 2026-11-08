@@ -36,6 +36,14 @@ def fee_rate(sigma: float, lam: float, gamma: float) -> float:
     return lam * p_trade(sigma, lam, gamma) * math.sinh(gamma / 2) * 2 * zeta / (4 * zeta**2 - 1)
 
 
+def stale_quote_loss(sigma: float, lam: float, half: float) -> float:
+    b = sigma / math.sqrt(2 * lam)
+    if b >= 1:
+        return math.inf
+    c, d = math.log1p(half), math.log1p(-half)
+    return b / 2 * (math.exp(c * (1 - 1 / b)) / (1 - b) + math.exp(d * (1 + 1 / b)) / (1 + b))
+
+
 def arb_profit(z, gamma: float) -> np.ndarray:
     up = math.exp(gamma / 2) * (np.cosh((z - gamma) / 2) - 1)
     down = math.exp(-gamma / 2) * (np.cosh((z + gamma) / 2) - 1)

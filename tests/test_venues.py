@@ -41,6 +41,15 @@ def test_noise_and_arbitrage_edges_sum_to_minus_lvr():
     assert abs(edge.mean() + s.lvr.mean()) < 4 * se(edge + s.lvr)
 
 
+def test_quoter_loses_the_stale_quote_tail():
+    h = 0.004
+    s = vn.run(FAST, 0.3, 1e4, 0.05, vn.Quoter(half=h, limit=1e12), paths=400, seed=2)
+    m = FAST
+    drift = math.expm1(m.sigma**2 * m.hours / 2) / (m.sigma**2 * m.hours / 2)
+    want = m.lam * m.hours * m.size * m.P0 * drift * lvr.stale_quote_loss(m.sigma, m.lam, h)
+    assert abs(-s.mm.arb.mean() - want) < 4 * se(s.mm.arb)
+
+
 def test_noise_goes_to_the_cheaper_venue():
     calm = replace(FAST, sigma=0.01)
     tight = vn.run(calm, math.inf, 1e6, 0.01, vn.Quoter(half=0.0005, limit=1e12), paths=20)
