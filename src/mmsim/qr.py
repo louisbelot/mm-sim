@@ -280,8 +280,8 @@ class Fit:
         psi[free] = res.x[:F]
         k = len(p.excite.beta)
         own, cross = (tuple(float(v) for v in res.x[F + j * k : F + (j + 1) * k]) for j in (0, 1))
-        cells = {int(c): float(v) for c, v in zip(cells, psi[1:], strict=True)}
-        return Reaction(own, cross, float(psi[0]), cells)
+        scale = {int(c): float(v) for c, v in zip(cells, psi[1:], strict=True)}
+        return Reaction(own, cross, float(psi[0]), scale)
 
     def loglik(self, p: Params, kind: int = MARKET) -> float:
         mu, dt, rows, side, key = self._path(p, kind)
