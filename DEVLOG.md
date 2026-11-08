@@ -1134,3 +1134,109 @@ the reservation price by the expected drift instead of the hard one-tick step
 used here), give the microprice chain a memory of the last move to fix the
 large-tick calibration, and measure how much of each signal survives the latency
 legs.
+
+## 2026-11-08: A market maker that prices its alpha, and how fast the alpha goes stale
+
+The microprice quoter from this morning used a hard rule (step back a tick when
+g* points against you). This entry solves for the rule instead, with the
+Cartea-Jaimungal-Penalva market maker with short-term alpha, calibrates it from
+the replay's own fills, and then measures how much of the signal a slower bot
+still gets.
+
+Built:
+
+- `alpha.Model` and `alpha.solve(model, T, policy=None)`: the at-the-touch
+  dynamic programming equation of CJP section 10.4.2 (after Cartea, Jaimungal and
+  Ricci 2014) on an (alpha, q) grid, 201 x 21 by default. alpha follows
+  d alpha = -zeta alpha dt + eta dB + eps (dM+ - dM-); each side is posted or not;
+  a posted order fills on the next market order on its side (rate lambda).
+  One term added to the book's model: the mid jumps `impact` against the bot at
+  each fill, so the posting gain is spread/2 - impact + h(alpha +- eps, q -+ 1) -
+  h(alpha +- eps, q). With `policy` given it evaluates that policy instead of
+  maximizing.
+- Time stepping: drift and diffusion in alpha implicit (upwind, a tridiagonal
+  M-matrix solved with `solve_banded`), the jumps and the max explicit with
+  lambda dt <= 0.05. Monotone, so it converges to the viscosity solution. The
+  first, fully explicit version needed zeta width / d alpha in the step rate,
+  which for QQQ (zeta = 338 a minute) meant over a million steps; now 69k steps
+  and 10 s. Jumps that land between grid nodes are interpolated linearly, and
+  linearly extrapolated past the edge.
+- `alpha.simulate`: Monte Carlo of the model under a stored policy, exact OU
+  transitions between Poisson arrivals and the conditional mean of the running
+  integral (unbiased by the tower property).
+- Calibration: `responses` (slope of the mid change h later on a signal),
+  `decay` (fit c (1 - e^-zeta h) with 1/h weights), `implied_eta` (from
+  Var alpha = (eta^2 + 2 lambda eps^2) / (2 zeta)) and `fill_fit` (impact = mid
+  move against the fill within delta, net of the pre-fill alpha's prediction;
+  eps = alpha at delta minus the decayed pre-fill alpha).
+- `bots.AlphaTouch`: joins the best bid and ask as the policy says, with alpha =
+  scale x the signal's lean and q = position in lots.
+- `examples/alpha_quotes.py` and `examples/signal_latency.py`, two charts, two
+  README sections.
+
+Checks:
+
+- 432 tests (was 408); each commit passes its own tests in a clean worktree.
+- Always-post closed form: h(0, a, q) = lambda spread T + a q (1 - e^-zeta T)/zeta
+  - (2 lambda eps/zeta)(T - (1 - e^-zeta T)/zeta) - (spread/2) E|q + K| with K
+  Skellam(lambda T, lambda T). I first left out the terminal Skellam term and
+  the solver looked 1.8 off; the Monte Carlo agreed with the solver, not with me.
+  Now within 0.02 at three (a, q) points.
+- Policy evaluation against 80k simulated paths: gaps 0.049, 0.020, 0.007 at 30,
+  60, 120 nodes per side (Monte Carlo se 0.009). Optimal value >= any fixed
+  policy's value everywhere; mirror symmetry; ask posting monotone in alpha;
+  impact costs exactly 2 lambda T impact when always posting; with no alpha the
+  bot posts iff spread/2 > impact.
+- Policy at 20 minutes to go equals the one at 40 for the CSCO, MSFT and QQQ
+  fits; doubling the grid moves the q = 0 thresholds by under 0.002.
+- Four injected bugs (jump sign, impact left out of the solver, impact left out
+  of the simulator, a shifted band in the implicit matrix) each fail a test.
+- Estimators: `decay` recovers (1.3, 25) exactly from a clean curve and (1, 30)
+  within 5% and 10% from a simulated OU drift; `implied_eta` within 5% from a
+  simulated jump-OU; `fill_fit` recovers impact and eps from synthetic fills.
+- The mid and micro rows of both experiments reproduce the earlier tables
+  exactly, and the zero-latency mid rows match the latency table.
+
+Results (2019-12-30, each half's sessions use parameters fitted on the other):
+
+- Signal half-lives from 0.12 s (QQQ morning) to 4.8 s (CSCO afternoon); c is
+  about 1 on CSCO, INTC and CMCSA, 0.7 to 0.85 on MSFT and QQQ, 0.41 to 0.56 on
+  AAPL, which matches the calibration slopes found this morning.
+- Fill impact 0.40 to 0.67 ticks on the one-tick names, 1.5 to 1.9 on AAPL. On
+  CSCO, INTC and AAPL it exceeds half the spread, so the flat model never posts.
+- CJP with alpha against the microprice rule, $ per session: CSCO 4.2 vs 7.6,
+  INTC 1.7 vs 12.2, CMCSA 0.7 vs 14.5, MSFT -0.9 vs 8.5 (all inside 2 se), QQQ
+  4.0 vs -7.0, AAPL 0 (no trades) vs -553.8.
+- At book changes, 1.5 to 3% of the 10 s microprice move happens within 10 us,
+  12 to 21% within 100 us and 31 to 48% within 1 ms. Sampled once a second, at
+  least 99% is still ahead at 1 ms.
+- Summed over the five large-tick names, the microprice quoter goes from +35.7
+  a session at zero latency to -64.8 at 1 ms and -152.0 at 10 ms; the CJP bot
+  from +9.8 to -136.9 and -188.5. Both trade more when slow (QQQ CJP 8,688 ->
+  54,901 shares) because their pulls arrive after the fills.
+
+Design notes and what went wrong:
+
+- The textbook model has no instant price move at a fill. Markouts of an
+  always-post bot on CSCO are 0.28 ticks at the fill's own timestamp and 0.75
+  half a second later, then flat for a minute; the tick-through comes in the
+  next ITCH batch. Without `impact` the model saw a 0.27-tick edge where the
+  replay has a loss.
+- Fitting impact and eps jointly on the markout curve is collinear once
+  (1 - e^-zeta h)/zeta is flat over the horizons, which it is for half-lives
+  under a second. AAPL came out with impact -0.55 and eps +502. Reading eps off
+  the signal itself, one second after the fill, is always identified.
+- eps comes out negative on 9 of 12 fits: after the tick-through the new touch
+  is thin and the microprice expects some of the move back.
+- A single exponential is a rough fit to the response curves, which keep rising
+  slowly after the fast part (a mix of time scales). The 1/h weights fit the fast
+  part, which is what the quotes act on.
+- Why CJP trails the hard rule on the large-tick names: it can only post at the
+  touch or pull, and a pulled order rejoins at the back. The rule steps one tick
+  back and keeps a place in that queue, and its fills are less toxic (INTC
+  adverse -0.39 vs -0.51). lambda and impact also come from a bot that never
+  pulls.
+
+Next: depth as a control (touch or one tick back) with fill rate and impact
+calibrated per depth from the bot's own fills, a microprice with memory of the
+last move, and the Gymnasium environment for an RL market maker.
