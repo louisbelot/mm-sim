@@ -3,6 +3,7 @@ import pytest
 
 from mmsim.bots import SymmetricQuoter
 from mmsim.flow import CSTParams, ZeroIntelligence
+from mmsim.informed import Fundamental, InformedTrader
 from mmsim.tournament import session, standings
 
 SKY = CSTParams.sky_perfect()
@@ -52,3 +53,20 @@ def test_standings_wins_sum_to_one_and_sort_by_mean():
     assert rows[0].mean >= rows[1].mean
     for r in rows:
         assert r.crowding[0] == pytest.approx(np.mean(r.pnl - r.solo))
+
+
+def test_exposure_is_bounded_by_the_position_limit():
+    capped = {"c": lambda: SymmetricQuoter(0.5, max_position=2)}
+    res = session(capped, 3, flow=flow, minutes=60)["c"]
+    assert res.fills > 0
+    assert 0 < res.exposure <= 4 * 60
+
+
+def test_crowd_trades_but_is_not_scored():
+    def crowd(seed):
+        return [InformedTrader(Fundamental(1.0, seed), 2.0, seed=seed)]
+
+    plain = session({"a": ENTRANTS["a"]}, 5, flow=flow, minutes=60)
+    toxic = session({"a": ENTRANTS["a"]}, 5, flow=flow, minutes=60, crowd=crowd)
+    assert set(toxic) == {"a"}
+    assert toxic["a"].adverse < plain["a"].adverse

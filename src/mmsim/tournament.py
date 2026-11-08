@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .accounting import exposure
 from .attribution import attribute
 from .book import Book
 from .flow import ZeroIntelligence
@@ -22,6 +23,7 @@ class Result:
     spread: float
     adverse: float
     inventory: float
+    exposure: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,17 +62,20 @@ def session(
     minutes: float = 390.0,
     book: Callable[[], Book] = Book,
     horizon: float = 1.0,
+    crowd: Callable[[int], Sequence[Agent]] | None = None,
 ) -> dict[str, Result]:
     names = list(entrants)
     random.Random(f"seats{seed}").shuffle(names)
     agents = {name: entrants[name]() for name in names}
-    sim = Simulator(flow(), list(agents.values()), seed=seed, book=book)
+    others = [] if crowd is None else list(crowd(seed))
+    sim = Simulator(flow(), [*agents.values(), *others], seed=seed, book=book)
     sim.seed(10_000, 10_001)
     sim.warm_up(warm)
+    start = sim.t
     sim.run(minutes)
     close = float(sim.tape.at(sim.end))
     out = {}
-    for name, ctx in zip(agents, sim.contexts, strict=True):
+    for name, ctx in zip(agents, sim.contexts[: len(agents)], strict=True):
         a = attribute(ctx.account.fills, sim.tape, horizon, sim.end)
         out[name] = Result(
             ctx.account.value(close),
@@ -79,6 +84,7 @@ def session(
             a.spread,
             a.adverse,
             a.inventory,
+            exposure(ctx.account.fills, start, sim.end),
         )
     return out
 
