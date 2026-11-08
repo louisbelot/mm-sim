@@ -17,7 +17,10 @@ The background market can also be a real day of NASDAQ ITCH data for one stock,
 the flow models can be calibrated from it, and a queue-reactive model fitted to
 that feed reproduces the real mid-move rate and most of a quoter's adverse
 selection. A second replay fill rule bounds the fills the usual no-impact
-assumption leaves out, and every fill is labelled with what caused it.
+assumption leaves out, and every fill is labelled with what caused it. On the
+same tape it estimates Stoikov's microprice and the Cont-Kukanov-Stoikov
+order-flow imbalance, checks both out of sample, and runs a quoter centred on
+the microprice.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -1307,6 +1310,182 @@ excitation is real and large, and the right way to put it in a simulator is a
 paired event (pull and repost) that conserves the queue, not two independent
 streams. `examples/cancel_race.py` prints the tables and draws the chart in about
 25 minutes.
+
+## The microprice
+
+The mid is a poor fair value on a large-tick stock. When the bid queue holds
+9000 shares and the ask 1000, the next move is much more likely up, and a quoter
+centred on the mid is selling to people who know that. `micro.py` estimates
+Stoikov's microprice (2018), the limit of expected future mids given the
+current imbalance I = bid size / (bid size + ask size) and spread, as a Markov
+chain on the replayed top of book.
+
+The state is the spread (1 or 2 ticks, more for AAPL) and I in 11 buckets. Each
+change of the best quotes is one step. Steps that keep the mid fill Q, steps
+that move it by half a tick or a tick fill T (by size of move) and R (by the
+state they land in). Then G1 = (1 - Q)^-1 T K is the expected size of the next
+mid move, B = (1 - Q)^-1 R is where the chain is after it, and the microprice
+adjustment is g* = G1 + B G1 + B^2 G1 + ... The data is symmetrized first (every
+step is also added mirrored, I to 1 - I and the move negated), so the
+stationary distribution pi of B puts zero weight on G1 and the series converges.
+Instead of truncating it, `Chain.gstar` sums it in closed form with the
+fundamental matrix: g* = (1 - B + 1 pi)^-1 G1. The bucket count is odd so a
+balanced book (11% of AAPL's quote updates have equal sizes) is its own mirror and gets exactly
+zero. With an even count it falls on a bucket edge and picks up the drift of
+one side.
+
+Tests check two two-state chains against closed forms (with and without
+persistent imbalance after a move, g* = G1 / (1 - rho)), a random symmetric
+5-state chain against the average drift of 40,000 simulated paths of 150 steps
+per state (all within 4 standard errors), and that `fit` recovers the g* of a
+known chain from 200,000 simulated quotes (0.0559 against 0.0551).
+
+CSCO, fitted on 09:35 to 12:35, in ticks above the mid:
+
+| imbalance  | 0.05   | 0.14   | 0.23   | 0.32   | 0.41   | 0.50 | 0.59  | 0.68  | 0.77  | 0.86  | 0.95  |
+|------------|--------|--------|--------|--------|--------|------|-------|-------|-------|-------|-------|
+| g*, 1 tick | -0.383 | -0.276 | -0.202 | -0.134 | -0.068 | 0    | 0.068 | 0.134 | 0.202 | 0.276 | 0.383 |
+| g*, 2 ticks| -0.275 | -0.209 | -0.180 | -0.134 | -0.076 | 0    | 0.076 | 0.134 | 0.180 | 0.209 | 0.275 |
+| G1, 1 tick | -0.323 | -0.236 | -0.174 | -0.116 | -0.059 | 0    | 0.059 | 0.116 | 0.174 | 0.236 | 0.323 |
+
+![microprice by imbalance and its calibration across symbols](docs/microprice.png)
+
+The weighted mid, I times the ask plus (1 - I) times the bid, would put a 95%
+bid queue 0.45 ticks above the mid. The microprice says 0.38, and INTC, CMCSA,
+MSFT and QQQ land between 0.37 and 0.39. AAPL says 0.53.
+
+Is it a better forecast? Fitted on one half of the day and tested on the other
+(both ways round), sampled every second, out-of-sample R^2 against predicting no
+change:
+
+| symbol | spreads | 10 s: weighted mid | microprice | linear in I | after 2 moves: weighted mid | microprice | linear in I |
+|--------|---------|--------------------|------------|-------------|-----------------------------|------------|-------------|
+| CSCO   | 2       | 0.036              | 0.044      | 0.035       | 0.042                       | 0.044      | 0.019       |
+| INTC   | 2       | 0.033              | 0.033      | 0.035       | 0.083                       | 0.067      | 0.093       |
+| CMCSA  | 2       | 0.022              | 0.037      | 0.036       | 0.057                       | 0.048      | 0.036       |
+| MSFT   | 2       | 0.009              | 0.010      | 0.010       | 0.034                       | 0.057      | 0.063       |
+| AAPL   | 4       | -0.009             | -0.001     | -0.002      | -0.277                      | 0.010      | 0.018       |
+| QQQ    | 2       | 0.010              | 0.012      | 0.013       | 0.102                       | 0.119      | 0.117       |
+
+Imbalance explains a few percent of the next moves, and the microprice is about
+as good as a straight line in I fitted by least squares. On this day g* is
+nearly linear in I, so the line has little to lose. The weighted mid falls apart
+on AAPL, where the spread is often 3 or 4 ticks and I times the spread is a
+large number with no information in it.
+
+The right panel is the more useful test. If g* is the expected change of the
+mid, the realized change after k mid moves regressed on g* should have slope 1
+for large k (standard errors clustered by 30-minute block, since one-second
+samples overlap):
+
+| symbol | k = 1       | k = 2       | k = 5       | k = 20       | G1 at k = 1 |
+|--------|-------------|-------------|-------------|--------------|-------------|
+| CSCO   | 0.69 (0.11) | 1.08 (0.18) | 1.36 (0.27) | 1.41 (0.59)  | 0.82 (0.13) |
+| INTC   | 1.06 (0.06) | 1.63 (0.12) | 1.75 (0.32) | 1.55 (0.74)  | 1.24 (0.07) |
+| CMCSA  | 1.03 (0.10) | 1.46 (0.20) | 1.52 (0.21) | 0.03 (0.85)  | 1.13 (0.11) |
+| MSFT   | 0.59 (0.02) | 0.89 (0.03) | 0.88 (0.05) | 0.94 (0.08)  | 0.59 (0.02) |
+| AAPL   | 0.41 (0.02) | 0.58 (0.04) | 0.57 (0.11) | 0.06 (0.18)  | 0.61 (0.04) |
+| QQQ    | 0.69 (0.02) | 1.07 (0.04) | 0.96 (0.04) | 0.92 (0.05)  | 0.68 (0.02) |
+
+QQQ and MSFT are close to calibrated from two moves on. On INTC and CMCSA the
+mid keeps going: after five moves it has travelled 1.5 to 1.75 times what the
+microprice expected. That looks like the order-flow memory from the Hawkes
+section: the chain only knows the current imbalance and spread, and nothing in
+its state says the last move was up. AAPL goes the other way, with slopes of 0.4
+to 0.6 at every horizon. Its queues at the touch average 220 to 245 shares, so
+the imbalance at one instant says less than the chain, fitted on the other half
+of the day, expects.
+
+## Order-flow imbalance
+
+Cont, Kukanov and Stoikov (2014) explain price changes with one number: the
+order-flow imbalance, the net of what arrives at the best bid minus what arrives
+at the best ask. For consecutive top-of-book states n - 1 and n,
+
+    e_n = q_b(n) 1{P_b(n) >= P_b(n-1)} - q_b(n-1) 1{P_b(n) <= P_b(n-1)}
+        - q_a(n) 1{P_a(n) <= P_a(n-1)} + q_a(n-1) 1{P_a(n) >= P_a(n-1)}
+
+and the mid change over an interval is close to OFI / (2 depth) in their
+stylized book. `ofi.py` computes e_n from the same top-of-book series, sums it
+over 10-second intervals and regresses the mid change on it in each 30-minute
+window, with White standard errors. Tests check each of the six cases of the
+definition, that with fixed prices OFI telescopes to the change in bid size minus
+the change in ask size, that a mirrored book has the opposite flow, and the
+time-weighted depth integral against brute force.
+
+| symbol | mean R^2 | median t | beta x depth | log-slope on depth (se) | afternoon R^2, morning beta | morning beta / depth | next 10 s |
+|--------|----------|----------|--------------|-------------------------|-----------------------------|----------------------|-----------|
+| CSCO   | 0.77     | 14.0     | 0.21         | -0.91 (0.07)            | -0.49                       | 0.79                 | 0.002     |
+| INTC   | 0.75     | 17.4     | 0.23         | -0.31 (0.59)            | 0.76                        | 0.76                 | -0.000    |
+| CMCSA  | 0.80     | 16.4     | 0.23         | -0.89 (0.09)            | 0.30                        | 0.79                 | 0.002     |
+| MSFT   | 0.84     | 24.5     | 0.27         | -0.74 (0.20)            | 0.61                        | 0.84                 | -0.012    |
+| AAPL   | 0.73     | 10.7     | 0.34         | -1.55 (0.34)            | 0.66                        | 0.79                 | -0.003    |
+| QQQ    | 0.82     | 25.0     | 0.24         | -1.00 (0.05)            | 0.57                        | 0.75                 | -0.001    |
+
+![OFI against the mid change, and the impact coefficient against depth](docs/ofi.png)
+
+One number explains 73 to 84% of the variance of 10-second mid changes, a bit
+more than the 65% average the paper found on 50 stocks in 2010. Across all 72
+windows the impact coefficient falls with depth with a log-log slope of -1.13
+(se 0.02), close to the inverse proportionality the paper reports, and beta times
+depth sits between 0.21 and 0.34 against the 0.5 of the stylized model. The
+depth dependence matters out of sample: CSCO's book is thicker in the afternoon,
+so a morning beta applied to the afternoon is worse than no model (R^2 -0.49),
+while a morning fit of the mid change on OFI / depth gives 0.79. And it is a
+contemporaneous relation. OFI over the last 10 seconds predicts nothing about
+the next 10 (R^2 between -0.012 and 0.002), as the paper also found.
+
+## Quoting around the microprice
+
+`Microprice` plugs into any quoter as its signal: `fair` becomes the mid plus
+g* for the current state of everyone else's quotes (the bot's own shares are
+left out of the imbalance). With `SymmetricQuoter(0.5 - c)` the bid is
+floor(microprice - 0.5 + c) and the ask ceil(microprice + 0.5 - c), so on a
+one-tick spread the bot stays at the touch on a side unless g* points against it
+by more than c ticks, and then waits one tick back. c = 0 steps back on one
+side whenever the book is not exactly balanced.
+
+Same replay as the tables above: twelve 30-minute sessions, 100 shares a side,
+1000 share limit, no latency or fees, P&L split at one minute. The microprice for
+morning sessions is fitted on the afternoon and the other way round, so nothing
+is in sample.
+
+| symbol | quotes    | P&L (se)      | spread | adverse | inventory | $/session | shares/session |
+|--------|-----------|---------------|--------|---------|-----------|-----------|----------------|
+| CSCO   | mid       | -0.117 (0.112) | 0.514 | -0.727  | 0.096     | -13.5     | 11,550         |
+| CSCO   | micro 0.0 | 0.569 (0.556)  | 0.652 | 0.029   | -0.112    | 7.6       | 1,327          |
+| INTC   | mid       | -0.256 (0.055) | 0.509 | -0.718  | -0.047    | -53.0     | 20,668         |
+| INTC   | micro 0.0 | 0.608 (0.590)  | 0.614 | -0.388  | 0.383     | 12.2      | 2,007          |
+| CMCSA  | mid       | 0.112 (0.062)  | 0.514 | -0.658  | 0.255     | 15.6      | 14,003         |
+| CMCSA  | micro 0.0 | 0.723 (0.534)  | 0.601 | -0.233  | 0.355     | 14.5      | 1,999          |
+| MSFT   | mid       | -0.361 (0.095) | 0.537 | -0.765  | -0.133    | -148.7    | 41,181         |
+| MSFT   | micro 0.0 | 0.087 (0.301)  | 0.685 | -0.562  | -0.035    | 8.5       | 9,752          |
+| AAPL   | mid       | -0.962 (0.254) | 0.674 | -1.962  | 0.326     | -810.3    | 84,215         |
+| AAPL   | micro 0.0 | -0.867 (0.342) | 0.781 | -1.995  | 0.348     | -553.8    | 63,896         |
+| QQQ    | mid       | -0.353 (0.198) | 0.529 | -0.661  | -0.221    | -118.3    | 33,529         |
+| QQQ    | micro 0.0 | -0.127 (0.762) | 0.715 | 0.108   | -0.950    | -7.0      | 5,511          |
+
+![adverse selection and net P&L by threshold](docs/micro_quotes.png)
+
+On the three large-tick names the adverse term drops from about -0.7 cents a
+share to between +0.03 and -0.39, and on CSCO and QQQ it is gone. The fills that
+are left are the ones where the queue on the bot's side was the strong one. The
+cost is volume: the bot trades 86 to 90% fewer shares on the large-tick names,
+because most of the time it is one tick behind on one side. Five of the six
+symbols lose less or make a little in dollars (MSFT from -149 to +9 a session).
+The per-share P&L looks large but its standard errors are as large: twelve
+sessions of a bot that trades 1300 shares each cannot tell 0.57 cents from zero.
+What the table does show is that quoting around the microprice removes most of
+the adverse selection that made joining the touch lose, at the price of most of
+the volume.
+
+Raising c brings the volume back and most of the adverse selection with it; by
+c = 0.3 the rows are close to the mid-quoter's (the chart; the example prints
+all five rows per symbol). AAPL barely changes at any c, which fits the
+calibration slopes above: the imbalance at its touch carries less than the chain
+thinks. `examples/microprice.py` and `examples/ofi.py` take a few seconds
+once the top-of-book series is cached in `data/` (25 s for six symbols the first
+time); `examples/micro_quotes.py` runs 360 sessions in about 6 minutes.
 
 ## Install
 
