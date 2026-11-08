@@ -956,3 +956,89 @@ Next: let the excitation reach cancels and limit orders at the touch, since move
 are now short of the tape and the excited model overshoots on AAPL, and let a
 bot's own market orders excite the flow. Then the fill-weighted kappa for the
 flow lean.
+
+## 2026-11-07: Market orders excite the touch
+
+After a market order on CSCO, touch cancels arrive at 2,350 times their average
+rate on the hit side and 16,000 times on the other side within 0.1 ms. The flow
+now has that reaction, fitted by maximum likelihood, and it matches the tape's
+burst to within about a factor of two where the old model was 30 times short. In
+sessions it overshoots: mid moves go from 9.1 a minute to 18.2 against 11.2 on
+the tape, because the model draws the pull and the repost independently.
+
+Built:
+
+- `qr.fit` records the limit orders and cancels at each side's best queue as
+  `Fit.quotes` (row, side, kind).
+- `qr.Reaction` (own, cross per kernel, a baseline scale for the touch cells with
+  enough events and one shared scale for the rest) on `Excite.react`, keyed by
+  kind.
+- `Fit.react(params)`: maximum likelihood for cancels and limits at the touch,
+  sources are the flow's market orders, betas fixed from `Fit.excite`. With the
+  betas fixed the design matrix of decayed counts and the integrated kernels are
+  computed once, and the problem is concave in the scales and weights, so
+  L-BFGS-B with nonnegative bounds on the raw parameters. 1.5 s on CSCO.
+- `Fit.loglik(params, kind)` and `Fit.residuals(params, kind)` for any of the
+  three kinds; the market path became `_path(params, kind)`.
+- `QueueReactive` adds the excitation to touch cancels and limits and scales
+  their baselines; the thinning step covers all excited actions.
+- `qr.messages(params, minutes)`: the flow written out as ITCH messages,
+  including partial cancels as X messages (the test helper it replaces dropped
+  them). Fitting the model's own output with `qr.fit` gives the event study on
+  model and tape with the same code.
+- `examples/cancel_race.py`, a README section and `docs/cancel_race.png`.
+
+Checks:
+
+- 384 tests (was 369). Every intermediate commit passes on its own.
+- `loglik` matches an O(n^2) brute force for markets and touch cancels, with dead
+  rows, tied timestamps and per-cell scales, to 1e-9.
+- At the fitted reaction, scaling every parameter by 1 +- 0.001 lowers the
+  likelihood and the slope is zero to 1e-4 of the event count (at the maximum the
+  compensator equals the number of events).
+- Replaying `qr.messages` through `ReplayBook` rebuilds the flow's book order for
+  order, partial cancels included.
+- A zero reaction gives the same tape as no reaction, draw for draw. Feeds where
+  quotes ignore trades give own + cross under 0.02.
+- Twelve 600-minute simulated feeds with cancels (0.3, 0.05) and limits
+  (0.2, 0.1) recover 0.295, 0.0445, 0.1995, 0.1017 (se about 0.003, 0.0016,
+  0.004, 0.004). Touch baselines come back within 7% at level 0. The cancel cross
+  term is 11% low, 3.4 standard errors. Fitting own alone (0.297) or cross alone
+  (0.305) is unbiased, apart from the usual positive bias of the other term at
+  its zero bound (0.003 to 0.005). I did not find where the joint fit loses it.
+
+Results (CSCO, 2019-12-30):
+
+- Per market order: 3.6 cancels and 2.8 limits on the hit side's touch, 10.7 and
+  16.3 on the other side, the other side's limits almost all inside 0.2 ms. That
+  is 44% of touch cancels and 55% of touch limits. Replace messages are 27k of
+  250k removals, so this is plain delete-and-add.
+- Residual variance for touch cancels 9.38 -> 4.25 (KS 0.541 -> 0.362), limits
+  15.25 -> 6.51 (0.614 -> 0.434). Log-likelihood gain 1.65 and 2.52 per event.
+- Sessions: P&L -0.088 against -0.117 on the tape (was -0.258), inventory term
+  0.003 against 0.096. Moves 18.16 against 11.16, eta 0.32 against 0.60, adverse
+  -0.615 against -0.727 (was -0.666).
+- Six symbols: moves go from short to far over on CSCO, INTC and CMCSA, closer on
+  MSFT and AAPL, further on QQQ. The AAPL adverse overshoot grows to -3.03
+  against -1.96.
+
+Design notes and what went wrong:
+
+- The first recovery test compared the fitted baseline scale with 1 and got 0.83.
+  The queue-reactive rates were fitted on the excited feed, so they already
+  contain the average excitation; the right check is scale times fitted rate
+  against the true rate, cell by cell.
+- The cell scales only apply at the touch. A cell (level, regime, queue) can be
+  the touch in one row and behind it in another (level 1 is the touch only when
+  the spread is two ticks), so rescaling the shared rate table would have changed
+  cancels deeper in the book too.
+- Dead cells are decided on the table rate before the time-of-day clock, so a slot
+  with no cancels does not make the fit and the simulator disagree about where an
+  excited cancel can happen.
+- The overshoot is the main finding. On the tape a reaction mostly pulls a quote
+  and puts it back, so the queue size barely moves. Two independent streams with
+  their own size distributions empty thin touches and refill them a tick away.
+
+Next: model the reaction as a paired event, a pull and a repost of the same size
+drawn together, and check that it keeps the event study while bringing moves and
+eta back. Then let bot market orders excite the flow, and the fill-weighted kappa.
