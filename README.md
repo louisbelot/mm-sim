@@ -20,7 +20,9 @@ selection. A second replay fill rule bounds the fills the usual no-impact
 assumption leaves out, and every fill is labelled with what caused it. On the
 same tape it estimates Stoikov's microprice and the Cont-Kukanov-Stoikov
 order-flow imbalance, checks both out of sample, and runs a quoter centred on
-the microprice.
+the microprice. The Cartea-Jaimungal-Penalva market maker with a short-term
+alpha is solved numerically, calibrated from the replay's own fills, and run on
+the same sessions.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -1486,6 +1488,133 @@ calibration slopes above: the imbalance at its touch carries less than the chain
 thinks. `examples/microprice.py` and `examples/ofi.py` take a few seconds
 once the top-of-book series is cached in `data/` (25 s for six symbols the first
 time); `examples/micro_quotes.py` runs 360 sessions in about 6 minutes.
+
+## Market making with a short-term alpha
+
+The microprice quoter above uses a hard rule. Cartea, Jaimungal and Penalva
+(*Algorithmic and High-Frequency Trading*, 2015, section 10.4.2, after Cartea,
+Jaimungal and Ricci 2014) derive the rule instead. The mid drifts at a rate
+alpha that mean-reverts and jumps when market orders arrive:
+
+```
+dS = alpha dt + sigma dW
+d alpha = -zeta alpha dt + eta dB + eps dM+ - eps dM-
+```
+
+The bot either posts one lot at the touch or does not, and a posted order is
+filled by the next market order on its side, which arrives at rate lambda. It
+maximizes E[X_T + Q_T S_T - (spread/2)|Q_T| - phi * integral of Q^2 dt]. I added
+one term to the book's model: the mid jumps by `impact` against the bot at each
+fill. On the replay most of the adverse selection happens within half a second
+of the fill (the queue the bot was in gets eaten and the price ticks through),
+and without that term the model cannot see it. Writing the value function as
+x + qS + h(t, alpha, q):
+
+```
+0 = h_t - zeta alpha h_alpha + eta^2/2 h_alpha,alpha + alpha q - phi q^2
+    + lambda [h(alpha + eps, q) - h + max(0, spread/2 - impact + h(alpha + eps, q - 1) - h(alpha + eps, q))]
+    + lambda [h(alpha - eps, q) - h + max(0, spread/2 - impact + h(alpha - eps, q + 1) - h(alpha - eps, q))]
+```
+
+`alpha.solve` steps this backward on a 201 x 21 grid in (alpha, q). The drift and
+diffusion in alpha are implicit (upwind differences give a tridiagonal M-matrix)
+and the jumps and the max are explicit with lambda dt at most 0.05, so the scheme
+is monotone. A fully explicit version needed over a million steps for QQQ, whose
+signal decays at zeta = 338 a minute; this one takes 70k steps and 10 seconds.
+The policy at 20 minutes to go equals the one at 40, so the bot uses it as the
+stationary rule.
+
+Checks in `tests/test_alpha.py`:
+
+- Posting on every arrival has a closed form. With K a Skellam(lambda T,
+  lambda T) variable, h(0, a, q) = lambda spread T + a q (1 - e^-zeta T)/zeta -
+  (2 lambda eps / zeta)(T - (1 - e^-zeta T)/zeta) - (spread/2) E|q + K|. The last
+  part of the drift term is the adverse selection: every fill moves alpha
+  against the new inventory. The solver matches it within 0.02 on values between
+  1.9 and 7.4.
+- The solver's value of its own policy against 80,000 simulated paths of the
+  model (exact OU steps between Poisson arrivals): the gap is 0.049, 0.020 and
+  0.007 at 30, 60 and 120 grid nodes per side,
+  against a Monte Carlo standard error of 0.009.
+- The optimal value is at least the value of any fixed policy everywhere, the
+  solution is symmetric under (alpha, q) -> (-alpha, -q), and posting on the ask
+  is monotone in alpha. Four injected bugs (jump direction, dropped impact in the
+  solver or in the simulator, a shifted band in the implicit matrix) each fail
+  at least one test.
+
+Calibration uses only the other half of the day, like the microprice. The slope
+of the mid change h later on g* is fitted to c (1 - e^-zeta h) over 0.1 s to 60 s,
+weighted by 1/h, and the bot's alpha is zeta c g*. Then a bot that always posts
+at the touch is replayed on that half, and its fills give lambda (lots filled
+per side per minute), `impact` (the mid move against it within one second, net
+of what alpha already predicted) and eps (alpha one second after the fill minus
+the decayed alpha before it). eta comes from the stationary variance,
+Var(alpha) = (eta^2 + 2 lambda eps^2) / (2 zeta). My first version fitted
+`impact` and eps together on the markout curve, which breaks when the signal's
+half-life is under a second: (1 - e^-zeta h)/zeta is flat over the horizons, the
+two are collinear, and AAPL came out with impact -0.55 and eps +502.
+
+| symbol | half | c    | half-life | lambda /min | impact | spread |
+|--------|------|------|-----------|-------------|--------|--------|
+| CSCO   | am   | 1.09 | 1.4 s     | 2.82        | 0.645  | 1.01   |
+| CSCO   | pm   | 1.09 | 4.8 s     | 1.03        | 0.607  | 1.00   |
+| INTC   | am   | 1.16 | 0.7 s     | 4.85        | 0.573  | 1.01   |
+| CMCSA  | pm   | 1.07 | 2.5 s     | 1.49        | 0.454  | 1.00   |
+| MSFT   | pm   | 0.85 | 0.7 s     | 4.38        | 0.483  | 1.15   |
+| AAPL   | am   | 0.56 | 0.16 s    | 7.54        | 1.851  | 2.93   |
+| QQQ    | am   | 0.76 | 0.12 s    | 7.48        | 0.464  | 1.21   |
+
+(`examples/alpha_quotes.py` prints all twelve fits.) The fill impact is 0.40 to
+0.67 ticks on the one-tick names, close to the whole half spread, and on CSCO,
+INTC and AAPL it is larger than half the spread in both halves. There the model
+without alpha ("cjp flat") never posts at all, which is its way of saying what
+the mid rows already show: joining the touch on those names loses money.
+
+Same twelve sessions, parameters from the other half, phi = 0.01:
+
+| symbol | quotes    | P&L (se)       | adverse | $/session | shares/session |
+|--------|-----------|----------------|---------|-----------|----------------|
+| CSCO   | mid       | -0.117 (0.112) | -0.727  | -13.5     | 11,550         |
+| CSCO   | micro 0.0 | 0.569 (0.556)  | 0.029   | 7.6       | 1,327          |
+| CSCO   | cjp alpha | 0.594 (0.468)  | 0.159   | 4.2       | 710            |
+| INTC   | mid       | -0.256 (0.055) | -0.718  | -53.0     | 20,668         |
+| INTC   | micro 0.0 | 0.608 (0.590)  | -0.388  | 12.2      | 2,007          |
+| INTC   | cjp alpha | 0.102 (0.109)  | -0.510  | 1.7       | 1,647          |
+| CMCSA  | mid       | 0.112 (0.062)  | -0.658  | 15.6      | 14,003         |
+| CMCSA  | micro 0.0 | 0.723 (0.534)  | -0.233  | 14.5      | 1,999          |
+| CMCSA  | cjp flat  | -0.146 (0.048) | -0.685  | -12.4     | 8,461          |
+| CMCSA  | cjp alpha | 0.029 (0.133)  | -0.496  | 0.7       | 2,485          |
+| MSFT   | mid       | -0.361 (0.095) | -0.765  | -148.7    | 41,181         |
+| MSFT   | micro 0.0 | 0.087 (0.301)  | -0.562  | 8.5       | 9,752          |
+| MSFT   | cjp flat  | -0.270 (0.050) | -0.737  | -66.7     | 24,750         |
+| MSFT   | cjp alpha | -0.009 (0.117) | -0.633  | -0.9      | 9,631          |
+| AAPL   | mid       | -0.962 (0.254) | -1.962  | -810.3    | 84,215         |
+| AAPL   | micro 0.0 | -0.867 (0.342) | -1.995  | -553.8    | 63,896         |
+| AAPL   | cjp alpha | no fills       |         | 0         | 0              |
+| QQQ    | mid       | -0.353 (0.198) | -0.661  | -118.3    | 33,529         |
+| QQQ    | micro 0.0 | -0.127 (0.762) | 0.108   | -7.0      | 5,511          |
+| QQQ    | cjp flat  | -0.188 (0.133) | -0.623  | -58.5     | 31,089         |
+| QQQ    | cjp alpha | 0.046 (0.199)  | -0.530  | 4.0       | 8,688          |
+
+![net dollars per session and adverse selection by quoter](docs/alpha_quotes.png)
+
+The model gets the large decisions right. It stays out of AAPL entirely, where
+every other quoter loses hundreds of dollars a session, and it is the only
+quoter with a positive mean on QQQ. Against the hard microprice rule on the four
+large-tick names it does worse in dollars (4.2 against 7.6 on CSCO, 1.7 against
+12.2 on INTC, 0.7 against 14.5 on CMCSA, -0.9 against 8.5 on MSFT), though
+every one of those gaps is inside two standard errors. I think the reason is
+that the two bots have different controls. The CJP bot can only post at the
+touch or pull, and a pulled order rejoins at the back of the queue. The
+microprice rule steps one tick back instead, so its order is already in the
+queue when the price comes to it, and those fills are much less toxic (adverse
+-0.39 against -0.51 on INTC). The fill rate and impact the model was calibrated
+with also come from a bot that never pulls and so sits near the front. Letting
+the model choose between the touch and one tick back is the next step.
+
+eps is negative on most fits: right after the tick-through the new touch is
+thin and the microprice expects part of the move back. The move itself is in
+`impact`. The example runs 432 sessions and 24 solves in about 6 minutes.
 
 ## Install
 
