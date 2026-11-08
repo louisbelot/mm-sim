@@ -1,10 +1,12 @@
+import math
+
 import numpy as np
 import pytest
 from scripted import ScriptedFlow, limit
 
 from mmsim.book import Side
 from mmsim.itch import NS_PER_MINUTE, Msg
-from mmsim.micro import Chain, K, Tops, bucket, chain, fit, spreads, tops
+from mmsim.micro import Chain, K, Tops, bucket, chain, fit, last_move, spreads, tops
 from mmsim.sim import Agent, Simulator
 
 B, S = Side.BUY, Side.SELL
@@ -217,3 +219,81 @@ def test_lean_ignores_own_quotes():
     sim.run(2.0)
     assert seen == pytest.approx([0.0, 0.0, 45], abs=1e-12)
     assert m.lean(sim.contexts[0]) == pytest.approx(m.g[0, 2])
+
+
+def momentum_kernel(seed):
+    rng = np.random.default_rng(seed)
+    A = rng.random((3, 2, 3, 3))
+    A[:, :, :, 1] += 2.0
+    A[:, 1, :, 2] *= 3.0
+    A = A + A[::-1, ::-1, ::-1, ::-1]
+    return A / A.sum(axis=(2, 3), keepdims=True)
+
+
+def memory_chain(A):
+    Q, R, T = np.zeros((6, 6)), np.zeros((6, 6)), np.zeros((6, len(K)))
+    for x in range(3):
+        for up in range(2):
+            i = 2 * x + up
+            for y in range(3):
+                Q[i, 2 * y + up] += A[x, up, y, 1]
+                R[i, 2 * y] += A[x, up, y, 0]
+                R[i, 2 * y + 1] += A[x, up, y, 2]
+                T[i, 0] += A[x, up, y, 0]
+                T[i, 3] += A[x, up, y, 2]
+    return Chain(np.arange(6), Q, T, R)
+
+
+def memory_tops(A, steps, seed):
+    rng = np.random.default_rng(seed)
+    flat = A.reshape(3, 2, 9).cumsum(axis=2)
+    u = rng.random(steps)
+    x, up, mid2 = 1, 1, 2001
+    xs, mids = [x], [mid2]
+    for k in range(steps):
+        y, dm = divmod(int(np.searchsorted(flat[x, up], u[k] * flat[x, up, -1])), 3)
+        if dm != 1:
+            up = int(dm == 2)
+            mid2 += 2 * (dm - 1)
+        x = y
+        xs.append(x)
+        mids.append(mid2)
+    sizes = np.array([(1, 4), (1, 1), (4, 1)])
+    xs, bid = np.array(xs), (np.array(mids) - 1) // 2
+    return Tops(np.arange(len(xs), dtype=float), bid, bid + 1, sizes[xs, 0], sizes[xs, 1])
+
+
+def test_last_move_carries_forward():
+    top = Tops(
+        np.arange(6.0),
+        np.array([100, 100, 101, 101, 100, 100]),
+        np.array([101, 101, 102, 103, 101, 101]),
+        np.ones(6, dtype=np.int64),
+        np.ones(6, dtype=np.int64),
+    )
+    assert list(last_move(top)) == [1, 1, 2, 2, 0, 0]
+    assert list(last_move(top, 1)) == [1, 1, 2, 2, 0, 1]
+    assert list(last_move(top, 2)) == [1, 1, 2, 2, 0, 0]
+
+
+def test_memory_mirror_flips_the_last_move():
+    m = fit(memory_tops(momentum_kernel(6), 50_000, 7), n_imb=3, n_spread=1, memory=math.inf)
+    assert m.memory
+    assert m.g.shape == (1, 3, 3)
+    assert m.g[0] == pytest.approx(-m.g[0, ::-1, ::-1], nan_ok=True)
+
+
+def test_memory_fit_recovers_momentum_chain():
+    A = momentum_kernel(6)
+    truth = memory_chain(A).gstar().reshape(3, 2)
+    m = fit(memory_tops(A, 300_000, 8), n_imb=3, n_spread=1, memory=math.inf)
+    assert m.g[0][:, [0, 2]] == pytest.approx(truth, abs=0.03)
+    assert truth[1, 1] - truth[1, 0] > 0.2
+
+
+def test_memory_adjust_indexes_the_flag():
+    m = fit(memory_tops(momentum_kernel(6), 50_000, 9), n_imb=3, n_spread=1, memory=math.inf)
+    s, bq, aq, last = (np.array(v) for v in ([1, 1, 2], [4, 1, 4], [1, 4, 1], [2, 0, 2]))
+    got = m.adjust(s, bq, aq, last)
+    assert got[:2] == pytest.approx([m.g[0, 2, 2], m.g[0, 0, 0]])
+    assert np.isnan(got[2])

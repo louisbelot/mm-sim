@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
@@ -153,11 +154,18 @@ class Microprice:
     def n_imb(self) -> int:
         return self.g.shape[1]
 
-    def adjust(self, spread, bq, aq) -> np.ndarray:
+    @property
+    def memory(self) -> bool:
+        return self.g.ndim == 3
+
+    def adjust(self, spread, bq, aq, last=None) -> np.ndarray:
         s = np.asarray(spread)
         b = bucket(np.asarray(bq) / (np.asarray(bq) + np.asarray(aq)), self.n_imb)
         ok = (s >= 1) & (s <= self.n_spread)
-        return np.where(ok, self.g[np.clip(s - 1, 0, self.n_spread - 1), b], np.nan)
+        i = np.clip(s - 1, 0, self.n_spread - 1)
+        if not self.memory:
+            return np.where(ok, self.g[i, b], np.nan)
+        return np.where(ok, self.g[i, b, np.asarray(last)], np.nan)
 
     def price(self, bid, ask, bq, aq) -> np.ndarray:
         return (np.asarray(bid) + np.asarray(ask)) / 2 + self.adjust(
@@ -176,17 +184,29 @@ class Microprice:
     def observe(self, p: Print) -> None: ...
 
 
-def fit(top: Tops, n_imb: int = 11, n_spread: int = 2, step: int = 1) -> Microprice:
+def last_move(top: Tops, ttl: float = math.inf) -> np.ndarray:
+    dm = np.diff(top.bid + top.ask, prepend=top.bid[0] + top.ask[0])
+    n = np.arange(len(dm))
+    pos = np.maximum.accumulate(np.where(dm != 0, n, -1))
+    flag = np.where(dm[np.maximum(pos, 0)] > 0, 2, 0)
+    return np.where((pos >= 0) & (n - pos < ttl), flag, 1).astype(np.int64)
+
+
+def fit(
+    top: Tops, n_imb: int = 11, n_spread: int = 2, step: int = 1, memory: float = 0
+) -> Microprice:
     if n_imb % 2 == 0:
         raise ValueError("n_imb must be odd so a balanced book is its own mirror")
     s = top.spread
     x = (s - 1) * n_imb + bucket(top.imbalance, n_imb)
     valid = (s >= 1) & (s <= n_spread)
+    if memory:
+        x = 3 * x + last_move(top, memory)
     dm = (top.bid + top.ask)[step:] - (top.bid + top.ask)[:-step]
     ok = valid[:-step] & valid[step:] & (np.abs(dm) <= 2)
     cur, nxt, dm = x[:-step][ok], x[step:][ok], dm[ok]
-    size = n_imb * n_spread
-    mirror = _mirror(n_imb, n_spread)
+    size = n_imb * n_spread * (3 if memory else 1)
+    mirror = _mirror(n_imb, n_spread, memory)
     c = chain(
         np.concatenate([cur, mirror[cur]]),
         np.concatenate([nxt, mirror[nxt]]),
@@ -197,14 +217,17 @@ def fit(top: Tops, n_imb: int = 11, n_spread: int = 2, step: int = 1) -> Micropr
     g[c.states] = c.gstar()
     G1[c.states] = c.G1
     counts = np.bincount(cur, minlength=size)
-    shape = (n_spread, n_imb)
+    shape = (n_spread, n_imb, 3) if memory else (n_spread, n_imb)
     return Microprice(g.reshape(shape), G1.reshape(shape), counts.reshape(shape))
 
 
-def _mirror(n_imb: int, n_spread: int) -> np.ndarray:
+def _mirror(n_imb: int, n_spread: int, memory: float = 0) -> np.ndarray:
     x = np.arange(n_imb * n_spread)
     s, b = divmod(x, n_imb)
-    return s * n_imb + (n_imb - 1 - b)
+    flip = s * n_imb + (n_imb - 1 - b)
+    if not memory:
+        return flip
+    return (3 * flip[:, None] + np.array([2, 1, 0])).ravel()
 
 
 def _others(book: Book, side: Side, px: int, owner: int) -> int:
