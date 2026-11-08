@@ -18,7 +18,8 @@ dependencies = [
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.7"]
-dev = ["pytest>=7", "ruff>=0.4", "matplotlib>=3.7"]
+rl = ["gymnasium>=1.0"]
+dev = ["pytest>=7", "ruff>=0.4", "matplotlib>=3.7", "gymnasium>=1.0"]
 
 [project.urls]
 Homepage = "https://github.com/louisbelot/mm-sim"
