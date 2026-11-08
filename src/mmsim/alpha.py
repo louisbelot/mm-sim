@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
 from scipy.linalg import solve_banded
+from scipy.optimize import minimize_scalar
 
 
 @dataclass(frozen=True)
@@ -144,3 +146,35 @@ def simulate(
         a[k] += np.where(lifted, m.eps, -m.eps)
     return out - m.spread / 2 * np.abs(q) - m.varphi * q**2
 
+
+def responses(
+    t: np.ndarray, g: np.ndarray, mid: Callable[[np.ndarray], np.ndarray], horizons: Sequence
+) -> np.ndarray:
+    m0 = mid(t)
+    return np.array([g @ (mid(t + h) - m0) / (g @ g) for h in horizons])
+
+
+def decay(horizons: Sequence, b: np.ndarray) -> tuple[float, float]:
+    h = np.asarray(horizons, dtype=float)
+    w = 1 / h
+
+    def fit(log_zeta: float) -> tuple[float, float]:
+        f = 1 - np.exp(-math.exp(log_zeta) * h)
+        c = float((w * f) @ b / ((w * f) @ f))
+        return c, float(w @ (b - c * f) ** 2)
+
+    lo, hi = math.log(0.01 / h.max()), math.log(100 / h.min())
+    r = minimize_scalar(lambda x: fit(x)[1], bounds=(lo, hi), method="bounded")
+    return fit(r.x)[0], math.exp(r.x)
+
+
+def implied_eta(var: float, zeta: float, eps: float, lam: float) -> float:
+    return math.sqrt(max(2 * zeta * var - 2 * lam * eps**2, 0.0))
+
+
+def fill_fit(
+    y: np.ndarray, before: np.ndarray, after: np.ndarray, w: np.ndarray, delta: float, zeta: float
+) -> tuple[float, float]:
+    impact = np.average(y - before * (1 - math.exp(-zeta * delta)) / zeta, weights=w)
+    eps = np.average(after - before * math.exp(-zeta * delta), weights=w)
+    return float(impact), float(eps)
