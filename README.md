@@ -26,7 +26,10 @@ the same sessions, along with a measurement of how much of each signal is left
 after a given latency. Finally, the simulator is wrapped as a Gymnasium
 environment, a PPO market maker written from scratch in numpy is trained on it
 and compared with the tuned inventory models, and every bot is stress-tested on
-volatility spikes, a thinning book and informed flow.
+volatility spikes, a thinning book and informed flow. Next to the book sits a
+concentrated-liquidity pool, with its loss-versus-rebalancing replicated in
+closed form and in simulation, and a comparison with a quoter on the same
+price path.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -1865,6 +1868,117 @@ and the two that do not lose money. Training on the mixture moves PPO by less
 than one standard error of the difference in every scenario. The calm policy already generalizes as far as this action space lets
 it.
 
+## A pool next to the book: loss-versus-rebalancing
+
+`amm.py` is a Uniswap v3 style position: liquidity L on a price range
+[pa, pb], holding x = L(1/sqrt(p) - 1/sqrt(pb)) of the risky asset and
+y = L(sqrt(p) - sqrt(pa)) of cash at pool price p. Fees are charged on the cash
+leg the way Milionis, Moallemi and Roughgarden model them: a buyer pays e^gamma
+times the cash leg and a seller receives e^-gamma times it, so an arbitrageur
+trades only once the outside price leaves [p e^-gamma, p e^gamma], and then
+pushes the pool to the edge of that band, not all the way to the market. The
+pool reproduces the worked example in the Uniswap v3 book (1 ETH and 5000 USDC
+on 4545 to 5500 give L = 1517.88 and use 0.998977 ETH) to twelve digits, and
+every operation is vectorized over paths.
+
+Loss-versus-rebalancing (Milionis, Moallemi, Roughgarden and Zhang 2022) is
+what the LP loses against a portfolio that holds the same x(P) but trades at
+the market price. For a Black-Scholes price it accrues at
+sigma^2 P^2 / 2 |x'(P)|, which is sigma^2/4 L sqrt(P) inside the range and
+sigma^2/8 of the pool value for a full-range pool. With a fee and blocks at
+Poisson rate lambda, the log mispricing z = log(P/p) diffuses between blocks
+and is clipped to [-gamma, gamma] at each one. Its stationary law is uniform on
+the band with exponential tails, a block trades with probability
+P_trade = 1/(1 + eta) with eta = gamma / (sigma sqrt(dt/2)), and for a constant
+product pool the arbitrage profit is exactly (their 2023 paper, Corollary 2)
+
+```
+ARB / V = sigma^2/8 * P_trade * cosh(gamma/2) / (1 - sigma^2 / (8 lambda))
+```
+
+The paper leaves fee income as an integral over the tails. For the constant
+product pool the fee paid in a block, over V, is
+sinh(gamma/2)(1 - e^-(z - gamma)/2) above the band and the mirror image below,
+and integrating against the tail gives
+
+```
+FEE / V = lambda * P_trade * sinh(gamma/2) * 2 zeta / (4 zeta^2 - 1),   zeta = sqrt(2 lambda) / sigma
+```
+
+As blocks get faster this tends to LVR (1 - P_trade): the arbitrageurs keep
+P_trade of the LVR and hand the rest back as fees. `lvr.mispricing` simulates
+the chain exactly (exponential gaps, Gaussian steps, clip) on 2000 chains at
+once. `examples/amm_lvr.py`, rates over the frictionless LVR:
+
+| eta | P_trade | ARB exact | ARB Poisson MC | ARB fixed blocks | FEE exact | FEE Poisson MC |
+| --- | ------- | --------- | -------------- | ---------------- | --------- | -------------- |
+| 0.1 | 0.9091  | 0.9091    | 0.9099         | 0.8970           | 0.0909    | 0.0910         |
+| 0.3 | 0.7692  | 0.7693    | 0.7699         | 0.7377           | 0.2308    | 0.2310         |
+| 1   | 0.5000  | 0.5000    | 0.5000         | 0.4519           | 0.5000    | 0.5004         |
+| 3   | 0.2500  | 0.2500    | 0.2498         | 0.2156           | 0.7500    | 0.7499         |
+| 10  | 0.0909  | 0.0910    | 0.0904         | 0.0761           | 0.9095    | 0.9078         |
+| 30  | 0.0323  | 0.0326    | 0.0321         | 0.0270           | 0.9714    | 0.9641         |
+
+Blocks on a fixed clock instead of a Poisson one, at the same mean gap, leave
+the arbitrageurs 1% less at eta = 0.1 and 16% less from eta = 10 on: the long
+gaps of an exponential clock are where the big mispricings come from.
+
+![LVR and fee tiers](docs/amm_lvr.png)
+
+### The same price path through an order book quoter
+
+`venues.run` puts the pool and a quoter on one geometric Brownian price
+(ETH-like: 2000, 60% a year, 12-second blocks, 60 noise trades of 1 ETH an
+hour). Block events and noise events share one Poisson clock. At a block the
+arbitrageur trades the pool to its band and takes any quote that the new price
+has gone through, then the quoter requotes around the new price with the
+Avellaneda-Stoikov reservation price and a fixed half spread h. A noise trader
+goes to whichever venue fills it cheaper, the pool's price including its impact
+and fee. Both venues keep the same ledger: the edge of every trade against the
+price at that moment, fees, and the inventory term (x or q times dP), and the
+four add up to the marked P&L to 1e-9 of capital. "Hedged" below is P&L
+without the inventory term, what is left after delta-hedging.
+
+The quoter's loss to stale quotes has its own closed form. A Brownian increment
+over an exponential gap is Laplace with scale b = sigma sqrt(dt/2), so with
+c = log(1 + h) and d = log(1 - h) the loss per block per unit notional is
+b/2 (e^(c(1 - 1/b))/(1 - b) + e^(d(1 + 1/b))/(1 + b)), which is about
+b e^(-h/b). It matches the simulator within 2% at h/b from 0.3 to 5. The scale b is
+the same one that sets the pool's eta, so the chart puts both on one axis: a
+quote that is refreshed every block loses e^-eta of its zero-spread loss, a pool
+loses 1/(1 + eta). The pool's mispricing carries over from block to block,
+while the quoter starts from zero at every block, and that difference is a
+polynomial tail against an exponential one.
+
+The pool's edge against noise trades plus its edge against arbitrageurs comes
+to minus LVR in every one of the 44 runs (between -1226 and -1299 against an
+LVR of 1294 a day), however much noise flow it gets. The argument is short:
+hedged P&L is V_T - V_0 minus the sum of x dP, the rebalancing portfolio earns
+the sum of x*(P) dP minus LVR, and what separates the two is the terminal
+mispricing plus a sum of (x*(P) - x) dP, which has almost no drift because x is
+known before each price step. What noise trades pay the pool, the
+arbitrageurs take back when they re-center it, so LP hedged P&L is fees minus
+LVR whatever the flow. On a $1M pool on +-20%:
+
+| pool fee | quoter half spread | LP fees | LVR  | LP hedged | pool share of noise | quoter hedged |
+| -------- | ------------------ | ------- | ---- | --------- | ------------------- | ------------- |
+| 30 bp    | none               | 10710   | 1294 | 9428      | 1.00                |               |
+| 1 bp     | 5 bp               | 570     | 1294 | -724      | 0.53                | 81            |
+| 30 bp    | 5 bp               | 1271    | 1294 | -18       | 0.05                | 781           |
+| 5 bp     | 15 bp              | 2657    | 1294 | 1361      | 0.95                | 203           |
+| 15 bp    | 15 bp              | 2060    | 1294 | 762       | 0.32                | 2901          |
+| 15 bp    | 30 bp              | 4750    | 1294 | 3452      | 0.82                | 1572          |
+| 30 bp    | 30 bp              | 3456    | 1294 | 2161      | 0.36                | 5525          |
+
+Alone, the pool earns more at every higher fee, since noise demand here does
+not react to price. Next to a quoter at 5 bp it loses money at every fee tier:
+it wins flow only when its stale price happens to sit on the right side of the
+band or the quoter is at its inventory limit, and it pays the arbitrageurs
+either way. The best tier sits below the quoter's half spread (5 bp against 15,
+15 against 30). At equal fee and half
+spread the pool still gets a third of the flow, from the times its stale price
+is better than the market.
+
 ## Install
 
 ```
@@ -1986,6 +2100,19 @@ r = session({"ppo": bot}, 1, flow=sky, minutes=60.0)["ppo"]
 r.pnl, r.fills, r.exposure       # (17.5, 23, 133.3): exposure is the integral of q^2 dt
 ```
 
+```python
+from mmsim import lvr, venues
+from mmsim.amm import Pool
+
+pool = Pool.around(2000.0, width=0.2, capital=1e6, gamma=0.003)   # +-20% in log price
+pool.reserves()                               # (250.0, 500000.0): half and half at the centre
+lvr.p_trade(0.6 / 8760**0.5, 300.0, 0.003)    # 0.080 with 12-second blocks and 60% vol
+
+quoter = venues.Quoter(half=0.0015, gamma=3e-4, limit=50)
+s = venues.run(venues.Market(), 0.2, 1e6, 0.003, quoter, paths=200, seed=31)
+s.lp.hedged.mean(), s.lvr.mean(), s.mm.hedged.mean()   # (288, 1294, 3762) dollars a day
+```
+
 `python examples/as_replication.py`, `cst_sessions.py`, `glft_quotes.py`,
 `informed_flow.py`, `why_spreads.py`, `queue_value.py`, `latency_cost.py`,
 `hawkes_flow.py`, `flow_lean.py`, `tournament.py` and `itch_replay.py` redraw the
@@ -1994,6 +2121,7 @@ experiments run 1600 to 6800 sessions on all cores; `latency_cost.py` is the
 longest at 8 minutes here, `flow_lean.py` takes 6 and `tournament.py` 1.
 `rl_market_maker.py` trains the three PPO seeds and saves them under `data/`
 (14 minutes), and `stress.py` reads seed 0 from there (9 minutes).
+`amm_lvr.py` redraws the pool chart in a minute.
 
 ## Notes
 
