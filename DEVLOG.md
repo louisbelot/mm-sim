@@ -1362,3 +1362,86 @@ Design notes:
 Next: give PPO the inside price as an action (and a faster decision clock) to see
 whether it learns when improving pays, then the Spooner-Savani adversarial
 version on the regime flows.
+
+## 2026-11-08: A pool next to the book, and prediction markets
+
+Built:
+
+- `amm.py`: a concentrated-liquidity position (Uniswap v3 reserves on
+  [pa, pb]) with the fee on the cash leg as in Milionis, Moallemi and
+  Roughgarden (2023): buys pay e^gamma times the cash leg, sells get e^-gamma.
+  Arbitrage pushes the pool to the edge of its no-trade band. Vectorized over
+  paths: a path that should not trade is given its own price as the target, so
+  every flow is exactly zero there and no masks are needed.
+- `lvr.py`: P_trade = 1/(1 + eta), Corollary 2's arbitrage profit for a
+  constant product pool, a closed form for fee income that the paper leaves as
+  an integral, and an exact simulation of the mispricing chain with Poisson or
+  fixed blocks. Also the loss of a quote refreshed every block, which has a
+  closed form because a Brownian step over an exponential gap is Laplace.
+- `venues.py`: the pool and an Avellaneda-Stoikov quoter on one price path, with
+  arbitrageurs at each block and noise traders routed to the cheaper venue.
+  Every trade is booked as edge against the price at that moment, so both
+  ledgers split into noise edge, arbitrage edge, fees and inventory.
+- `prediction.py`: LMSR, the Gnosis fixed-product market maker and the
+  Glosten-Milgrom quoter as binary-outcome makers with one interface.
+
+Checks:
+
+- The pool reproduces the Uniswap v3 book's liquidity example to twelve
+  digits, keeps the virtual-reserve product at L^2, and its rebalanced value has
+  slope x and curvature equal to the LVR rate (finite differences).
+- The arbitrage profit and fee of a real swap on the pool, over V, equal the
+  normalized functions used in the theory to 1e-14; integrating those against
+  the stationary law (scipy quad) gives the two closed forms to 1e-8; the
+  chain Monte Carlo lands within one or two standard errors of them for eta
+  from 0.1 to 30; the full simulator's arbitrage profit and fees on a constant
+  product pool match too.
+- Venue ledgers add up to marked P&L to 1e-9 of capital. The stale-quote loss
+  matches the simulator within 2% at h/b from 0.3 to 5 (and a direct Laplace
+  draw within 2%).
+- Prediction makers: LMSR P&L is -b ln(p_T(w)/p_0(w)) and FPMM P&L follows
+  its reserve curve, both to 1e-9 on every market. The quoter's belief is the
+  closed-form posterior, and its mean P&L is zero within 4 se.
+- Mutation pass: wrong sell fee, arbitrage overshooting to the market price,
+  a dropped cosh factor, a skewed inventory term, a quoter that never
+  requotes, a missing complete-set dollar in LMSR, the wrong reserve in the
+  FPMM root and a flipped quoter update. Each fails at least one test.
+
+Results:
+
+- ARB/LVR: 0.9099, 0.5000 and 0.0904 by simulation at eta 0.1, 1 and 10
+  against 0.9091, 0.5000 and 0.0910 exact. Fixed blocks leave the arbitrageurs
+  1% less at eta 0.1 and 16% less from eta 10 on.
+- The pool's noise edge plus arbitrage edge came to between -1226 and -1299 a
+  day against an LVR of 1294 in all 44 venue runs, whatever its share of the
+  noise flow. LP hedged P&L is fees minus LVR.
+- Next to a quoter at 5 bp the pool loses money at every fee tier from 1 to
+  100 bp. The best tier against a 15 bp quoter is 5 bp (+1361 a day), against
+  30 bp it is 15 bp (+3452).
+- Prediction markets: the quoter knowing alpha = 0.2 has |p - w| = 0.031
+  after 100 trades and breaks even, LMSR b = 10 is at 0.153 and pays 6.91.
+  A quoter that assumes alpha = 0.1 loses 1.94 a market.
+
+Design notes:
+
+- The fee income closed form: per block the fee over V is
+  sinh(gamma/2)(1 - e^-(z - gamma)/2) above the band, the tail is exponential
+  with rate zeta = sqrt(2 lambda)/sigma, and the two expectations are
+  1/(2 zeta + 1) and 1/(2 zeta - 1). It reduces to LVR (1 - P_trade) for fast
+  blocks, which is a good check on its own.
+- The argument for "edges sum to minus LVR" is three lines (hedged P&L, the
+  rebalancing portfolio, and a difference with no drift because x is
+  predictable), and the 44 runs agree with it, which is why the README states
+  it. It also says that noise flow only matters to an LP through fees.
+- The first routing test failed for a real reason: a small pool takes 2%
+  impact per trade, so three noise buys in a row between blocks made a 5%
+  quoter cheaper. The pool's band edge can also offer exactly the fair price,
+  which beats a 5 bp ask, so "all flow goes to the tighter venue" is false in
+  this model. The test asserts a share now.
+- The arbitrageur trades against the fundamental, a frictionless outside
+  venue. Hedging on the quoter's book instead would widen its trigger to
+  gamma plus the quoter's half spread.
+
+Next: arbitrageurs who hedge on the quoter's book instead of a frictionless
+venue, then fees that move with volatility (dynamic fees) in the same LVR
+framework.
