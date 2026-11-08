@@ -1399,6 +1399,50 @@ to 0.6 at every horizon. Its queues at the touch average 220 to 245 shares, so
 the imbalance at one instant says less than the chain, fitted on the other half
 of the day, expects.
 
+### Adding the last move to the state
+
+`fit(..., memory=k)` adds a flag to every state: down, up, or neither, where the
+flag remembers the last mid move for k top-of-book updates (`memory=math.inf`
+never forgets). The mirror maps down to up, so the symmetrized fit stays
+antisymmetric. On a simulated chain with momentum built in, the fit recovers g*
+within 0.03 of the closed form.
+
+On the tape it does not fix the slopes. Out of sample, on the same one-second
+grid, slope of the change after k moves on g* (se):
+
+| symbol | memory      | k = 2       | k = 5       |
+|--------|-------------|-------------|-------------|
+| CSCO   | none        | 1.08 (0.18) | 1.36 (0.27) |
+| CSCO   | 1 update    | 0.96 (0.17) | 1.22 (0.24) |
+| CSCO   | 10 updates  | 0.70 (0.13) | 0.91 (0.18) |
+| CSCO   | forever     | 0.52 (0.17) | 0.66 (0.24) |
+| INTC   | none        | 1.63 (0.12) | 1.75 (0.32) |
+| INTC   | 1 update    | 1.37 (0.10) | 1.47 (0.27) |
+| INTC   | 10 updates  | 0.95 (0.07) | 1.02 (0.20) |
+| INTC   | forever     | 0.63 (0.18) | 0.86 (0.30) |
+| MSFT   | none        | 0.89 (0.03) | 0.88 (0.05) |
+| MSFT   | 10 updates  | 0.69 (0.03) | 0.68 (0.04) |
+| AAPL   | none        | 0.58 (0.04) | 0.57 (0.11) |
+| AAPL   | 10 updates  | 0.46 (0.03) | 0.53 (0.09) |
+
+![calibration slopes with and without memory](docs/micro_memory.png)
+
+The chain with a permanent flag believes in momentum: on CSCO a balanced book
+right after an up move is worth +0.20 ticks. The tape disagrees. From balanced
+one-tick CSCO states in the morning, the next mid move averages +0.04 ticks after
+a down move and 0.00 after an up move, while the chain fitted on that same
+morning predicts -0.13 after a down move. The unsymmetrized chain gives the same
+numbers, so it is not the mirror. The flag breaks the Markov property: a state
+seen right after a move and the same state seen a hundred updates later behave
+differently, and a chain that lumps them together extrapolates the first into
+the second. Remembering only the move that led into the current state (k = 1)
+keeps the chain Markov and gives g* = -0.05 for that state; the INTC and CMCSA
+slopes at k = 2 fall from 1.63 and 1.46 to 1.37 and 1.25. Ten updates bring them
+to 0.95 and 0.83, but by overshooting the names that were calibrated before (MSFT 0.89 to 0.69), and no
+version improves out-of-sample R^2 by more than 0.02 anywhere. The last move is
+not what the chain is missing. `examples/micro_memory.py` prints all six symbols
+and four memory lengths in a few seconds.
+
 ## Order-flow imbalance
 
 Cont, Kukanov and Stoikov (2014) explain price changes with one number: the
