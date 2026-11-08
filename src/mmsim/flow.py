@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from bisect import bisect_right
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from itertools import accumulate
 
@@ -30,6 +30,11 @@ class CSTParams:
 
     def theta_at(self, i: int) -> float:
         return self.theta[min(i, len(self.theta)) - 1]
+
+    def scale(self, lam: float = 1.0, theta: float = 1.0, mu: float = 1.0) -> CSTParams:
+        return CSTParams(
+            tuple(lam * x for x in self.lam), tuple(theta * x for x in self.theta), mu * self.mu
+        )
 
 
 class ZeroIntelligence:
@@ -102,6 +107,44 @@ class ZeroIntelligence:
         i = 1 + bisect_right(self._cum_lam, rng.random() * lam, 0, len(self._cum_lam) - 1)
         px = self._ask - i if arg == Side.BUY else self._bid + i
         return lambda b: b.submit(oid, arg, px, 1, owner=self.owner)
+
+
+class RegimeFlow(ZeroIntelligence):
+    def __init__(self, schedule: Sequence[tuple[float, CSTParams]], owner: int = 0) -> None:
+        times = [t for t, _ in schedule]
+        if not times or times[0] != 0 or np.any(np.diff(times) <= 0):
+            raise ValueError("schedule has to start at 0 and increase")
+        super().__init__(schedule[0][1], owner)
+        self.schedule = list(schedule)
+        self.t = 0.0
+        self._k = 0
+
+    def _switch(self) -> None:
+        self._k += 1
+        self.params = self.schedule[self._k][1]
+        self._cum_lam = list(accumulate(self.params.lam))
+
+    def step(
+        self, book: Book, rng: random.Random, horizon: float, ids: Iterator[int]
+    ) -> tuple[float, Callable[[Book], list[Event]]] | None:
+        elapsed = 0.0
+        while self._k + 1 < len(self.schedule):
+            gap = self.schedule[self._k + 1][0] - self.t
+            if gap >= horizon - elapsed:
+                break
+            out = super().step(book, rng, gap, ids)
+            if out is not None:
+                self.t += out[0]
+                return elapsed + out[0], out[1]
+            self.t += gap
+            elapsed += gap
+            self._switch()
+        out = super().step(book, rng, horizon - elapsed, ids)
+        if out is None:
+            self.t += horizon - elapsed
+            return None
+        self.t += out[0]
+        return elapsed + out[0], out[1]
 
 
 class HawkesFlow(ZeroIntelligence):

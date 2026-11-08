@@ -8,10 +8,17 @@ import pytest
 
 from mmsim.book import Book, EventType, Side
 from mmsim.bots import GLFT
-from mmsim.flow import CSTParams, HawkesFlow, ZeroIntelligence, prob_fill_first, prob_mid_up
+from mmsim.flow import (
+    CSTParams,
+    HawkesFlow,
+    RegimeFlow,
+    ZeroIntelligence,
+    prob_fill_first,
+    prob_mid_up,
+)
 from mmsim.glft import Model
 from mmsim.hawkes import Hawkes, fit
-from mmsim.sim import Latency, Simulator
+from mmsim.sim import Agent, Latency, Simulator
 
 SKY = CSTParams.sky_perfect()
 LAM1, MU, THETA1 = SKY.lam[0], SKY.mu, SKY.theta[0]
@@ -173,3 +180,47 @@ def test_hawkes_flow_keeps_time_with_the_simulator():
 def test_hawkes_flow_needs_two_dimensions():
     with pytest.raises(ValueError):
         HawkesFlow(SKY, Hawkes.make(1.0, 0.5, 1.0))
+
+
+class Prints(Agent):
+    def __init__(self):
+        self.t = []
+
+    def on_book(self, ctx):
+        pass
+
+    def on_trade(self, ctx, p):
+        self.t.append(p.t)
+
+
+def test_regime_flow_with_one_regime_is_zero_intelligence():
+    a = Simulator(ZeroIntelligence(SKY), seed=3)
+    b = Simulator(RegimeFlow([(0.0, SKY)]), seed=3)
+    for sim in (a, b):
+        sim.seed(10_000, 10_001)
+        sim.warm_up(50.0)
+    assert a.tape.t == b.tape.t and a.tape.mid == b.tape.mid
+
+
+def test_regime_flow_switches_market_rate_on_time():
+    fast = SKY.scale(mu=4.0)
+    rec = Prints()
+    flow = RegimeFlow([(0.0, SKY), (200.0, fast)])
+    sim = Simulator(flow, [rec], seed=8)
+    sim.seed(10_000, 10_001)
+    sim.run(400.0)
+    t = np.array(rec.t)
+    for n, mu in ((np.sum(t < 200), SKY.mu), (np.sum(t >= 200), fast.mu)):
+        want = 2 * mu * 200
+        assert abs(n - want) < 4 * want**0.5
+    assert flow.params == fast and flow.t == pytest.approx(sim.t)
+
+
+def test_scale_and_schedule_checks():
+    p = SKY.scale(lam=2.0, theta=0.5, mu=3.0)
+    assert p.lam[0] == 2 * SKY.lam[0] and p.theta[-1] == 0.5 * SKY.theta[-1]
+    assert p.mu == pytest.approx(3 * SKY.mu)
+    with pytest.raises(ValueError):
+        RegimeFlow([(1.0, SKY)])
+    with pytest.raises(ValueError):
+        RegimeFlow([(0.0, SKY), (5.0, SKY), (5.0, SKY)])
