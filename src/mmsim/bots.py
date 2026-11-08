@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from typing import Protocol
 
 import numpy as np
 
@@ -38,6 +39,15 @@ class FlowLean:
         e = self.tracker.excess(t)
         return self.kappa * float(e[Side.BUY] - e[Side.SELL])
 
+    def lean(self, ctx: Context) -> float:
+        return self.shift(ctx.t)
+
+
+class Signal(Protocol):
+    def lean(self, ctx: Context) -> float: ...
+
+    def observe(self, p: Print) -> None: ...
+
 
 class Quoter(Agent):
     def __init__(
@@ -45,7 +55,7 @@ class Quoter(Agent):
         size: int = 1,
         max_position: int | None = None,
         keep: int = 0,
-        signal: FlowLean | None = None,
+        signal: Signal | None = None,
     ) -> None:
         self.size = size
         self.max_position = max_position
@@ -60,7 +70,7 @@ class Quoter(Agent):
         mid = ctx.mid
         if mid is None or self.signal is None:
             return mid
-        return mid + self.signal.shift(ctx.t)
+        return mid + self.signal.lean(ctx)
 
     def on_trade(self, ctx: Context, p: Print) -> None:
         if self.signal is not None:
@@ -104,7 +114,7 @@ class SymmetricQuoter(Quoter):
         size: int = 1,
         max_position: int | None = None,
         keep: int = 0,
-        signal: FlowLean | None = None,
+        signal: Signal | None = None,
     ) -> None:
         super().__init__(size, max_position, keep, signal)
         self.half_spread = half_spread
@@ -129,7 +139,7 @@ class AvellanedaStoikov(Quoter):
         size: int = 1,
         max_position: int | None = None,
         keep: int = 0,
-        signal: FlowLean | None = None,
+        signal: Signal | None = None,
     ) -> None:
         super().__init__(size, max_position, keep, signal)
         self.gamma = gamma
@@ -155,7 +165,7 @@ class GLFT(Quoter):
         *,
         size: int = 1,
         keep: int = 0,
-        signal: FlowLean | None = None,
+        signal: Signal | None = None,
     ) -> None:
         super().__init__(size, model.Q * size, keep, signal)
         self.model = model
