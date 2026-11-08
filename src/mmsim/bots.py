@@ -5,7 +5,7 @@ from typing import Protocol
 
 import numpy as np
 
-from . import avellaneda, glft
+from . import alpha, avellaneda, glft
 from .accounting import Fill
 from .book import Side
 from .hawkes import Hawkes, Tracker
@@ -181,3 +181,25 @@ class GLFT(Quoter):
         bid = None if math.isnan(db) else min(math.floor(s - db), ctx.ask - 1)
         ask = None if math.isnan(da) else max(math.ceil(s + da), ctx.bid + 1)
         return bid, ask
+
+
+class AlphaTouch(Quoter):
+    def __init__(
+        self,
+        sol: alpha.Solution,
+        signal: Signal | None = None,
+        scale: float = 1.0,
+        *,
+        size: int = 1,
+        keep: int = 0,
+    ) -> None:
+        super().__init__(size, sol.Q * size, keep, signal)
+        self.sol = sol
+        self.scale = scale
+
+    def targets(self, ctx: Context) -> tuple[int | None, int | None]:
+        if ctx.bid is None or ctx.ask is None:
+            return None, None
+        a = 0.0 if self.signal is None else self.scale * self.signal.lean(ctx)
+        bid, ask = self.sol.post(a, round(ctx.position / self.size))
+        return (ctx.bid if bid else None), (ctx.ask if ask else None)

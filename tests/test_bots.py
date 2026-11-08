@@ -1,11 +1,13 @@
 import math
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from scripted import limit, make, market
 
+from mmsim.alpha import Solution
 from mmsim.book import Side
-from mmsim.bots import GLFT, AvellanedaStoikov, Quoter, SymmetricQuoter
+from mmsim.bots import GLFT, AlphaTouch, AvellanedaStoikov, Quoter, SymmetricQuoter
 from mmsim.flow import CSTParams, ZeroIntelligence
 from mmsim.glft import Model
 from mmsim.sim import Simulator
@@ -163,3 +165,48 @@ def test_glft_on_cst_flow_respects_its_bound():
     assert sim.book.audit() == ""
     assert max(abs(s.position) for s in ctx.history) <= 3
     assert len(ctx.account.fills) > 50
+
+
+class Lean:
+    def __init__(self, g):
+        self.g = g
+
+    def lean(self, ctx):
+        return self.g
+
+    def observe(self, p): ...
+
+
+def ladder():
+    bid = np.array([[False, True, True], [False, True, True], [False, False, False]])
+    ask = np.array([[False, False, False], [True, True, False], [True, True, False]])
+    return Solution(np.array([-1.0, 0.0, 1.0]), np.zeros((3, 3)), bid, ask)
+
+
+@pytest.mark.parametrize(
+    "g, want",
+    [
+        (0.0, [(Side.BUY, 99), (Side.SELL, 102)]),
+        (0.5, [(Side.BUY, 99)]),
+        (-0.5, [(Side.SELL, 102)]),
+    ],
+)
+def test_alpha_touch_follows_the_policy(g, want):
+    sim = make([], AlphaTouch(ladder(), Lean(g), 2.0))
+    sim.run(1.0)
+    assert quotes(sim.contexts[0]) == want
+
+
+def test_alpha_touch_without_a_signal_quotes_flat():
+    sim = make([], AlphaTouch(ladder()))
+    sim.run(1.0)
+    assert quotes(sim.contexts[0]) == [(Side.BUY, 99), (Side.SELL, 102)]
+
+
+def test_alpha_touch_counts_inventory_in_lots():
+    script = [(0.5, limit(Side.BUY, 98, 5)), (1.0, market(Side.SELL, 7))]
+    sim = make(script, AlphaTouch(ladder(), size=2))
+    sim.run(2.0)
+    ctx = sim.contexts[0]
+    assert ctx.position == 2
+    assert quotes(ctx) == [(Side.SELL, 102)]
