@@ -1613,3 +1613,88 @@ Design notes:
 
 Next: the multi-asset quoter on correlated assets in the event simulator, and
 an ETF market maker that hedges in the basket.
+
+## 2026-11-09: ETF market making, hedged in the basket
+
+Built:
+
+- `hy.py`: previous-tick sampling, the Hayashi-Yoshida covariance for
+  asynchronous series (two `searchsorted` calls, no grid), a HY matrix over a
+  window, and the Hoffmann-Rosenbaum-Yoshida lead-lag scan (HY with one series
+  shifted, maximised over the shift).
+- `etf.py`: `hedge` (minimum-variance hedge with a subset of names, from a
+  joint covariance with the ETF first) and `stepwise` (greedy selection).
+  `Fund` holds the basket weights, the stock covariance and the ETF's residual
+  variance. `Dealer` quotes the ETF and trades hedge names with quadratic
+  impact. The hedge enters the Bergault-Gueant Riccati equation as extra
+  assets with D = 1/(2 eta), and the terminal penalty is either a separate
+  unwind of every leg or a redemption that leaves only the net stock exposure.
+  `simulate` runs the dealer with a ledger split into spread, carry, hedging
+  cost, closing cost and the risk penalty. `Band` and `arbitrage` are the
+  creation/redemption band with Poisson checks.
+- Extracted 31 more NASDAQ-100 names from the 2019-12-30 ITCH file (78 s for
+  one pass over 8.3 GB) and built their top-of-book series.
+- `examples/etf_hedge.py` and `examples/etf_dealer.py` with charts and a README
+  section.
+
+Design notes:
+
+- With a terminal penalty the Riccati solution is no longer the tanh form. In
+  the scaled variable R A R the stationary solution K is a matrix square root,
+  and Delta = R A R - K solves Delta' = -2(K Delta + Delta K + Delta^2). Writing
+  Delta = E F E with E = e^(-2 K tau) gives F' = -2 F E^2 F, whose inverse has
+  a closed-form integral, so Delta = E Delta0 (I + 2 G Delta0)^-1 E. Only
+  decaying exponentials appear. The obvious alternative, the Radon
+  linearization with a matrix exponential, grows like e^(2 K tau) and loses
+  precision for stiff hedge names.
+- The dealer's stationary hedge is not the regression hedge. (1, -w) is a
+  null vector of Gamma when the basket is complete, so the dealer still hedges
+  exactly -w q there. With a partial basket, names that trade slowly relative
+  to the client flow are under-hedged, and the target converges to the
+  regression hedge only as client flow goes to zero.
+- Only Gamma matters for the carry, so the simulator draws (1 + m)-dimensional
+  increments with covariance Gamma instead of all 36 stock moves.
+- Impact per name is spread / NASDAQ volume, so a full spread per share at
+  NASDAQ's own volume rate. That is a modelling choice, not a fit.
+
+Checks:
+
+- HY equals the realized covariance on synchronous data, is unbiased (200
+  paths, 4 se) on Poisson observation times where previous-tick sampling on a
+  fine grid loses most of the covariance, and the lead-lag scan finds a
+  planted 3 ms delay in both directions.
+- `hedge` matches least squares on 200,000 simulated returns to 1e-10, the full
+  basket leaves exactly the residual, and stepwise variances fall and match
+  the best single name.
+- Riccati against `solve_ivp` on the matrix ODE to 1e-10 for no close, unwind,
+  redeem, the full basket and logistic flow; equal to `multi.Market` with no
+  hedge names; stationary hedge to the regression hedge as flow dries up;
+  -w exactly with a complete basket.
+- With no client fills the problem is deterministic LQ: the simulated cost
+  equals x0' A(T) x0 to 1e-4 for both closes, and scaling the hedge rate by 0.8
+  or 1.2 costs more.
+- Band closed forms (trade probability, trades, units, AP profit, premium sd)
+  against simulation at three widths.
+
+Results:
+
+- Hedging QQQ fit 10:00 to 13:00, scored 13:00 to 15:50 at one minute: MSFT
+  alone 0.635, five names 0.877, all 36 0.931 (0.967 at five minutes). At
+  one-second sampling the same hedge removes 0.43, but ratios fit at one
+  second keep 0.913 at one minute. Epps shrinks what is hedgeable over a second
+  more than it shrinks the ratios.
+- HY on ticks gets 4 to 16% of the one-minute covariance with QQQ, and HY on
+  staggered 100 ms grids 32 to 67%, a few points above previous tick. What is
+  left is delay, not asynchrony. A tick-level HY hedge removes only 0.79.
+- Lead-lag ratio: 32 of 36 names move before QQQ on the NASDAQ book, AMZN most
+  (LLR 0.09, peak -40 ms). INTC (3.01), CSCO, AMD and CMCSA follow it.
+- Dealer on the fitted fund: objective 3270 unhedged, 4126 with three names,
+  4555 with 36 (P&L sd 4793 to 3015). Most of the gain is spread: the hedged
+  dealer carries 8,452 shares of ETF at the close against 3,768 and skews less.
+- Redemption at the close is worth 0.019 cents a share (se 0.055) on QQQ. With
+  components 100 times less liquid it loses about 4 cents a share to
+  unwinding, because it hands over the illiquid basket.
+
+Next: the stale-NAV problem (an ETF whose basket trades in another time zone,
+so the dealer's fair value is a forecast), and multi-day dealing with
+overnight inventory and redemptions in creation units.
