@@ -87,3 +87,121 @@ def test_prices_converge_to_the_outcome():
         r = pm.run(make, 0.3, 300, 400, seed=5)
         assert r.error[-1] < 0.05 < r.error[0]
         assert np.all((r.price > 0) & (r.price < 1))
+
+
+def test_ls_prices_are_the_cost_gradient():
+    mm = pm.LSLMSR(0.05, 1)
+    rng = np.random.default_rng(8)
+    q = rng.uniform(0.5, 40.0, (20, 2))
+    h = 1e-6
+    for i, e in enumerate(np.eye(2)):
+        fd = (mm.cost(q + h * e) - mm.cost(q - h * e)) / (2 * h)
+        assert mm.prices(q)[:, i] == pytest.approx(fd, rel=1e-7, abs=1e-8)
+
+
+def test_ls_is_homogeneous_with_a_bounded_vig():
+    v = 0.08
+    mm = pm.LSLMSR(v, 1)
+    q = np.random.default_rng(9).uniform(0.1, 30.0, (50, 2))
+    assert mm.cost(3.7 * q) == pytest.approx(3.7 * mm.cost(q), rel=1e-12)
+    assert mm.prices(3.7 * q) == pytest.approx(mm.prices(q), rel=1e-12)
+    total = mm.prices(q).sum(axis=1)
+    assert np.all(total >= 1) and np.all(total <= 1 + v + 1e-12)
+    even = mm.prices(np.array([[5.0, 5.0]])).sum()
+    assert even == pytest.approx(1 + v)
+
+
+@pytest.mark.parametrize("p0", [0.5, 0.2, 0.75])
+def test_ls_starts_at_the_prior(p0):
+    assert pm.LSLMSR(0.05, 3, p0).price == pytest.approx(np.full(3, p0), rel=1e-9)
+
+
+def test_ls_loss_is_at_most_v_times_seed():
+    v, x = 0.05, 2.0
+    r = pm.run(lambda n: pm.LSLMSR(v, n, x=x), 1.0, 400, 200, seed=10)
+    assert np.all(r.maker >= -v * x - 1e-9)
+    assert r.maker.min() < -0.9 * v * x
+
+
+def test_ls_deepens_with_volume():
+    mm = pm.LSLMSR(0.05, 1, x=1.0)
+    up0, _ = mm.quote()
+    for _ in range(200):
+        mm.buy(np.array([True]))
+        mm.buy(np.array([False]))
+    up1, _ = mm.quote()
+    p = mm.prices()[0, 0]
+    assert up1[0] - p < 0.05 * (up0[0] - pm.LSLMSR(0.05, 1, x=1.0).prices()[0, 0])
+
+
+def test_ls_pnl_is_revenue_minus_payout():
+    v, x = 0.05, 1.5
+    made = []
+
+    def make(n):
+        made.append(pm.LSLMSR(v, n, 0.4, x=x))
+        return made[0]
+
+    r = pm.run(make, 0.4, 150, 300, rho=0.7, p0=0.4, seed=11)
+    mm = made[0]
+    q0 = pm.LSLMSR(v, 1, 0.4, x=x).q[0]
+    sold = mm.q - q0
+    payout = np.where(r.outcome, sold[:, 0], sold[:, 1])
+    revenue = mm.cost(mm.q) - mm.cost(q0[None, :])
+    assert r.maker == pytest.approx(revenue - payout, abs=1e-9)
+
+
+def test_belief_is_bayes_with_the_price_as_prior():
+    p = np.array([0.1, 0.5, 0.8])
+    rho = 0.7
+    for signal, lr in ((True, rho / (1 - rho)), (False, (1 - rho) / rho)):
+        odds = p / (1 - p) * lr
+        assert pm.belief(p, signal, rho) == pytest.approx(odds / (1 + odds))
+
+
+@pytest.mark.parametrize(
+    "make",
+    [lambda n: pm.LMSR(5.0, n), lambda n: pm.FPMM(5.0, n), lambda n: pm.LSLMSR(0.05, n)],
+)
+def test_useless_signals_never_trade(make):
+    r = pm.run(make, 1.0, 50, 100, rho=0.5, seed=12)
+    assert r.volume.sum() == 0 and np.all(r.maker == 0)
+
+
+def test_lmsr_log_score_holds_when_bettors_decline():
+    b = 0.8
+    made = []
+    r = pm.run(lambda n: made.append(pm.LMSR(b, n)) or made[0], 0.6, 200, 500, rho=0.65, seed=13)
+    assert 0 < r.volume.mean() < 200
+    z = np.where(r.outcome, 1, -1) * made[0].q / b
+    assert r.maker == pytest.approx(b * (np.logaddexp(0, -z) + math.log(0.5)), abs=1e-9)
+
+
+def test_bayes_benchmark_has_the_binomial_brier():
+    from scipy.special import expit
+    from scipy.stats import binom
+
+    T, rho = 12, 0.6
+    r = pm.run(lambda n: pm.LMSR(5.0, n), 1.0, T, 40_000, rho=rho, seed=14)
+    j = np.arange(T + 1)
+    post = expit((2 * j - T) * math.log(rho / (1 - rho)))
+    want = float(np.sum(binom.pmf(j, T, rho) * (1 - post) ** 2))
+    err = (r.bayes - r.outcome) ** 2
+    assert abs(err.mean() - want) < 4 * err.std() / math.sqrt(len(err))
+    assert r.brier(r.bayes) == pytest.approx(err.mean())
+
+
+def test_lmsr_at_the_flow_likelihood_is_the_glosten_milgrom_belief():
+    alpha, rho = 0.3, 0.7
+    a = alpha * (2 * rho - 1)
+    b = 1 / math.log((1 + a) / (1 - a))
+    lm = pm.run(lambda n: pm.LMSR(b, n), alpha, 80, 400, rho=rho, seed=15)
+    gm = pm.run(lambda n: pm.Quoter(a, n), alpha, 80, 400, rho=rho, seed=15)
+    assert lm.volume.min() == 80 and gm.volume.min() == 80
+    assert lm.price == pytest.approx(gm.price, rel=1e-9)
+
+
+@pytest.mark.parametrize("assumed, trades", [(0.19, True), (0.21, False), (0.3, False)])
+def test_quoter_shuts_out_bettors_once_it_assumes_2rho_minus_1(assumed, trades):
+    r = pm.run(lambda n: pm.Quoter(assumed, n), 1.0, 30, 200, rho=0.6, seed=16)
+    assert (r.volume.sum() > 0) == trades
