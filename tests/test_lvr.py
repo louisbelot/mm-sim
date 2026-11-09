@@ -7,24 +7,53 @@ from scipy.integrate import quad
 from mmsim import lvr
 
 
-def stationary(fn, sigma, lam, gamma):
+def stationary(fn, sigma, lam, band):
     zeta = math.sqrt(2 * lam) / sigma
 
     def tails(x):
-        return (fn(gamma + x, gamma) + fn(-gamma - x, gamma)) / 2 * math.exp(-zeta * x)
+        return (fn(band + x) + fn(-band - x)) / 2 * math.exp(-zeta * x)
 
     top = 60 / (zeta - 0.5)
-    return lam * lvr.p_trade(sigma, lam, gamma) * zeta * quad(tails, 0, top, limit=200)[0]
+    return lam * lvr.p_trade(sigma, lam, band) * zeta * quad(tails, 0, top, limit=200)[0]
 
 
 @pytest.mark.parametrize("sigma,lam,gamma", [(1.0, 50.0, 0.05), (0.8, 3.0, 0.3), (2.0, 1.0, 0.01)])
 def test_closed_forms_match_theorem_2_integrals(sigma, lam, gamma):
     assert lvr.arb_rate(sigma, lam, gamma) == pytest.approx(
-        stationary(lvr.arb_profit, sigma, lam, gamma), rel=1e-8
+        stationary(lambda z: lvr.arb_profit(z, gamma), sigma, lam, gamma), rel=1e-8
     )
     assert lvr.fee_rate(sigma, lam, gamma) == pytest.approx(
-        stationary(lvr.fee_income, sigma, lam, gamma), rel=1e-8
+        stationary(lambda z: lvr.fee_income(z, gamma), sigma, lam, gamma), rel=1e-8
     )
+
+
+@pytest.mark.parametrize("gamma,h", [(0.05, 0.1), (0.3, 0.02), (0.0, 0.2), (0.1, 0.0)])
+def test_hedged_closed_forms_match_the_integrals(gamma, h):
+    sigma, lam = 0.8, 20.0
+    for rate, fn in (
+        (lvr.arb_rate, lvr.arb_profit),
+        (lvr.fee_rate, lvr.fee_income),
+        (lvr.hedge_rate, lvr.hedge_income),
+    ):
+        want = stationary(lambda z, fn=fn: fn(z, gamma, h), sigma, lam, gamma + h)
+        assert rate(sigma, lam, gamma, h) == pytest.approx(want, rel=1e-8, abs=1e-15)
+
+
+def test_fee_and_hedge_swap_roles():
+    for gamma, h in ((0.05, 0.1), (0.3, 0.02)):
+        assert lvr.hedge_rate(1.0, 50.0, gamma, h) == pytest.approx(
+            lvr.fee_rate(1.0, 50.0, h, gamma), rel=1e-14
+        )
+    assert lvr.hedge_rate(1.0, 50.0, 0.1, 0.0) == 0
+
+
+@pytest.mark.parametrize("gamma,h", [(0.05, 0.1), (0.2, 0.2)])
+def test_hedged_chain_matches_closed_forms(gamma, h):
+    sigma, lam = 1.0, 50.0
+    c = lvr.mispricing(sigma, lam, gamma, chains=2000, blocks=1000, h=h, seed=4)
+    assert abs(c.arb - lvr.arb_rate(sigma, lam, gamma, h)) < 4 * c.arb_se
+    assert abs(c.fee - lvr.fee_rate(sigma, lam, gamma, h)) < 4 * c.fee_se
+    assert abs(c.hedge - lvr.hedge_rate(sigma, lam, gamma, h)) < 4 * c.hedge_se
 
 
 def test_no_fee_fast_blocks_recover_lvr():
