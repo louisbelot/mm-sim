@@ -1445,3 +1445,85 @@ Design notes:
 Next: arbitrageurs who hedge on the quoter's book instead of a frictionless
 venue, then fees that move with volatility (dynamic fees) in the same LVR
 framework.
+
+## 2026-11-08: Hedged arbitrage, fixed blocks and a multi-asset market maker
+
+Built:
+
+- `lvr.py`: arbitrageurs who hedge on a quoter at half spread h instead of a
+  frictionless venue. They are the frictionless arbitrageur against P e^-h or
+  P e^h, so the chain keeps its shape with band gamma + h, and arbitrage
+  profit, fee income and the quoter's take all have closed forms
+  (`hedge_rate`, `hedge_income`). `Pool.arb_target` takes the hedge cost.
+- `lvr.py`: the fixed-block formulas of Nezlobin and Tassy (2025),
+  P_trade ~ 1/(eta + |zeta(1/2)|/sqrt(pi)) and
+  ARB ~ LVR/(1 + sqrt(pi) eta/|zeta(1/2)|), converted to this repo's band
+  convention.
+- `multi.py`: the closed-form multi-asset market maker of Bergault,
+  Evangelista, Gueant and Vieira (2021) in the mean-variance model, with
+  exponential and logistic intensities; an exact HJB solver on the inventory
+  grid with risk limits; exact policy evaluation for any quoting rule; and a
+  vectorized simulator with correlated prices.
+
+Checks:
+
+- Hedged arbitrage: on a real pool swap, arbitrage profit, fee and quoter
+  edge over V match the per-block functions to 1e-14 and sum with the LP's
+  edge to zero. The three rates match quad integrals over the stationary
+  tails to 1e-8 and the simulated chain within 4 se. The fee and the quoter's
+  take are the same formula with gamma and h swapped, which a test pins.
+- Fixed blocks: the zeta(1/2) formula is within 3 se of the exact chain from
+  eta = 1 to 30, and the trade probability within 0.5%.
+- Multi-asset: the logistic Hamiltonian and best quote (Lambert W) match a
+  brute-force maximization; the tanh closed form matches a Radau solve of
+  the Riccati and linear ODEs to 1e-7 on a three-asset market with mixed
+  intensities and sizes; the stationary A is the paper's sqrt(gamma) Gamma / 2;
+  one asset reproduces `glft.Model.approx` at small gamma; a diagonal Sigma
+  decouples the assets exactly.
+- The grid solver matches the linearized HJB (v = e^(k theta), common k)
+  through `expm_multiply` to 1e-8, and an uncorrelated logistic grid
+  separates into two one-asset grids. Evaluating the optimal policy returns
+  the HJB value. The simulator's P&L, penalty and objective are within 3 se of
+  `evaluate` (z-scores within 1.6 on five more seeds).
+- Mutation pass: a flipped B, the wrong neighbour in the grid HJB, a missing
+  spread term in `evaluate`, no own-asset term in the quotes, a broken
+  inventory update, a wrong stationary B, the wrong H'' for either intensity,
+  the risk penalty doubled, the drift dropped from the price, cosh of
+  gamma + h, swapped tail weights, the chain clipped at gamma instead of
+  gamma + h, and sqrt(2 pi) for sqrt(pi). Each fails at least one test.
+
+Results:
+
+- ETH-like pool at 30 bp with a 5 bp hedge: the quoter takes 13% of LVR, the
+  LP's fees fall from 92% to 80%, and the arbitrageur's share only from 8.0%
+  to 7.0%. The three always add to LVR with fast blocks.
+- Fixed blocks leave arbitrageurs |zeta(1/2)|/sqrt(pi) = 0.8239 of the Poisson
+  profit for wide bands, which accounts for the 16% found by simulation in the
+  previous entry.
+- Two assets with the paper's parameters: the closed form keeps 99.9% of the
+  optimal value at every correlation without drift and up to rho = 0.8 with
+  drift. At rho = 0.9 its Markowitz target of 128,000 shares is past the
+  70,000 limit and it drops to 83% (20% at 0.95). Quoting each asset alone
+  costs 4% at |rho| = 0.9 without drift and up to 60% with drift.
+
+Design notes:
+
+- The target inventory -A^-1 B / 2 is Sigma^-1 mu / gamma, which follows from
+  the two stationary equations in one line. It is also why the closed form
+  breaks down: it has no idea the limits exist, and once the Markowitz
+  portfolio is outside them it keeps leaning towards a position it cannot
+  hold.
+- Monte Carlo could not separate the strategies (paired se about 480 on
+  values of 34,000), so the comparison uses the policy-evaluation equation on
+  the grid instead and keeps the simulator as a check on it.
+- The logistic intensity looked like it would need a root finder for the best
+  quote. The first-order condition reduces to w e^w = e^-(1 + alpha + beta p),
+  so H and delta* are one Lambert W call, vectorized.
+- Paper conventions bit twice: Nezlobin and Tassy's gamma is the full band
+  width (2 gamma here), and the Poisson rate in this repo carries MMRZ's
+  cosh(gamma/2) fee factor, so the zeta ratio is only tested where gamma is
+  small.
+
+Next: dynamic fees that track realized volatility in the same fees-minus-LVR
+ledger, then the multi-asset quoter run on correlated assets in the event
+simulator.
