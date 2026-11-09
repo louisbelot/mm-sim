@@ -30,7 +30,8 @@ volatility spikes, a thinning book and informed flow. Next to the book sits a
 concentrated-liquidity pool, with its loss-versus-rebalancing replicated in
 closed form and in simulation, and compared with a quoter on the same price
 path, including arbitrageurs who pay a quoter's spread to hedge and the
-fixed-block correction that involves zeta(1/2). The same comparison runs for
+fixed-block correction that involves zeta(1/2), and pool fees that follow a
+volatility estimate through calm hours and spikes. The same comparison runs for
 prediction markets: Hanson's LMSR and a constant-product pool against a
 Glosten-Milgrom quoter. Last, a multi-asset market maker quotes correlated
 assets with the Bergault-Evangelista-Gueant-Vieira closed form, checked against
@@ -2051,6 +2052,91 @@ error term is not small yet and the trade probability is 7% too high.
 
 ![Hedged arbitrage and fixed blocks](docs/hedged_arb.png)
 
+### Dynamic fees
+
+One static fee has to serve calm hours and volatile ones. `fees.py` lets the
+fee follow a volatility estimate. `venues.run` takes a fee rule in place of a
+number, a two-state volatility regime (`Regimes`: a calm sigma and a spike at
+3x, switching at Poisson rates) and the source of the estimate: the true
+regime, an EWMA of squared returns of the market price (what a pool with a
+price oracle can compute), or an EWMA of the pool's own price. The rules are
+`Static`, `Threshold(low, high, cut)`, the two-level schedule that Campbell,
+Bergault, Milionis and Nutz (2025) suggest, and `Power(base, k, p)`, which with
+p = 2 has the shape of Liquidity Book's variable fee base + A (v s)^2. The
+quoter can widen its half spread in proportion to the current vol, the way an
+exchange market maker would.
+
+The checks: with the true regime as input, the arbitrage profit and the
+arbitrage fees are quasi-static, the per-regime closed forms from above
+weighted by the LVR accrued in each regime (within 4 standard errors on 1000
+paths). Time spent in the spike from a calm start matches
+pi (1 - (1 - e^(-kT)) / (kT)) with k the sum of the two switching rates. The
+ledgers still add up to the marked P&L, the edges still sum to minus LVR with
+the fee moving, and the EWMA is unbiased for Poisson-spaced returns.
+
+The pool's own price is a poor volatility source. It sits still between
+arbitrage trades and jumps by the overshoot past the band at each one, and for
+Poisson blocks the overshoot is exponential with mean square sigma^2/lambda.
+Trades come at rate lambda P_trade, so the pool price's quadratic variation
+grows at sigma^2 P_trade = sigma^2 / (1 + eta). A 30 bp pool on ETH with only
+arbitrage flow sees 28% of the true vol. The tests check sigma sqrt(P_trade) to
+2% at three fees. Noise trades add some variance back, by an amount that
+depends on the flow, so the pool cannot undo the bias from its own price alone.
+
+`examples/dynamic_fees.py` uses the ETH-like market and $1M pool from above, a
+spike to 180% vol that starts at rate 1/20 per hour and lasts 4 hours on
+average, and a quoter at 15 bp in calm hours and 45 bp in the spike. All rules
+run on the same 200 price paths, so the gains below are paired. First, static
+fees in each regime on its own:
+
+| market           | best static fee | LP hedged per day | flat region          |
+| ---------------- | --------------- | ----------------- | -------------------- |
+| calm only        | 5 bp            | 1360 (5)          | 1190 to 1224, 6-10 bp |
+| spike only       | 20 bp           | 2648 (28)         | 2311 to 2326, 22-30 bp |
+| regime switching | 12 bp           | 851 (20)          | 807 to 850, 10-13 bp |
+
+Both optima sit at a kink. The pool's price is within gamma of the market, so
+its worst ask is about P e^(2 gamma), plus half the impact of the trade, and as
+long as that is inside the quoter's half spread h the pool wins every noise
+trade on both sides. One 1 ETH trade moves this pool 7.62 bp, so the kink is
+at (h - 3.81 bp) / 2, which is 5.6 bp for the calm quoter and 20.6 bp in the
+spike, against 5 and 20 from the sweeps. Below the kink the pool gives fees
+away. Above it the pool starts losing the trades that arrive while its price
+sits on the wrong side of the band. That is the result of
+Campbell et al. (the best fee undercuts the exchange's cost, about half of it
+with no volatility), with the impact term added.
+
+Then the rules in the switching market, paired against the best static fee:
+
+| rule                         | mean fee | noise fees | arb fees | LVR  | LP hedged | gain over static |
+| ---------------------------- | -------- | ---------- | -------- | ---- | --------- | ---------------- |
+| static 12 bp                 | 12.0     | 1826       | 1660     | 2637 | 851 (20)  |                  |
+| threshold 5/20, true regime  | 6.9      | 1895       | 2268     | 2637 | 1517 (16) | 666 (32)         |
+| threshold, EWMA 15 min       | 7.0      | 1864       | 2235     | 2637 | 1453 (14) | 602 (30)         |
+| threshold, EWMA 1 h          | 7.1      | 1788       | 2149     | 2637 | 1290 (12) | 439 (24)         |
+| proportional, EWMA 15 min    | 6.4      | 1707       | 2153     | 2637 | 1220 (11) | 369 (12)         |
+| affine, EWMA 15 min          | 7.0      | 1821       | 2215     | 2637 | 1391 (13) | 539 (28)         |
+| quadratic, EWMA 15 min       | 6.9      | 1824       | 2223     | 2637 | 1401 (11) | 550 (26)         |
+| threshold, pool price 15 min | 6.5      | 1762       | 2092     | 2637 | 1213 (13) | 362 (12)         |
+
+The spike is 13% of the time and 41% of the LVR. Knowing the regime is worth
+78% more LP P&L than the best static fee, and a 15-minute EWMA of the oracle
+price keeps 90% of that gain. With a one-hour half-life the estimate crosses the
+cut about 45 minutes into the spike on the day in the chart, and the slower
+switch costs a third of the gain.
+The cut sits at twice the calm vol, so EWMA noise in calm hours never moves the
+threshold fee, and the threshold beats the smooth rules for that reason: every
+smooth rule passes estimation noise into the fee, and with a kink at the
+optimum any wobble costs. The proportional rule (gamma / sigma fixed, so eta
+fixed) reaches only 15 bp in the spike, far down the steep side of the spike
+curve. The affine and quadratic rules go through both optima and land between.
+The threshold on the pool's own price still gains 362, but it switches later
+and less often (mean fee 6.5 bp). Tuning the two levels directly in the
+switching market, on a 4 by 6 grid with the true regime, picks 5 and 20 bp
+again, so the per-regime optima carry over.
+
+![Dynamic fees](docs/dynamic_fees.png)
+
 ## Prediction markets: LMSR, a constant-product pool and a quoter
 
 `prediction.py` runs a binary event, a share that pays 1 if it happens, with
@@ -2358,7 +2444,8 @@ longest at 8 minutes here, `flow_lean.py` takes 6 and `tournament.py` 1.
 (14 minutes), and `stress.py` reads seed 0 from there (9 minutes).
 `amm_lvr.py` redraws the pool chart in a minute, `hedged_arb.py` and
 `prediction_markets.py` theirs in a few seconds, and `multi_asset.py` the
-multi-asset one in about two minutes.
+multi-asset one in about two minutes. `dynamic_fees.py` runs 68 sessions of
+200 paths and takes under two minutes.
 
 ## Notes
 
