@@ -2,12 +2,14 @@ import math
 
 import numpy as np
 import pytest
+from scipy import sparse
 from scipy.integrate import solve_ivp
 from scipy.linalg import sqrtm
 from scipy.optimize import minimize_scalar
+from scipy.sparse.linalg import expm_multiply
 
 from mmsim.glft import Model
-from mmsim.multi import Exponential, Logistic, Market
+from mmsim.multi import Exact, Exponential, Logistic, Market
 
 RFQ = Logistic(30, 0.7, 30)
 PAIR = Market.of([1.2, 0.6], 0.5, RFQ, 8e-6, z=1e4, mu=[0.1, -0.1])
@@ -96,6 +98,37 @@ def test_a_long_position_moves_the_other_book(rho):
     shift = np.sign(rho)
     assert np.sign(b1[1] - b0[1]) == shift and np.sign(a1[1] - a0[1]) == -shift
     assert b1[0] > b0[0] and a1[0] < a0[0]
+
+
+def test_grid_matches_the_linearized_hjb():
+    k = 1.3
+    m = Market.of([0.7, 0.4], 0.6, (Exponential(2.0, k), Exponential(3.5, k)), 0.4, mu=[0.05, 0])
+    ex = Exact(m, (3, 5), 2.0, rtol=1e-11)
+    n = ex.nodes
+    q = n * m.z
+    run = q @ m.mu - m.gamma / 2 * np.einsum("pi,ij,pj->p", q, m.Sigma, q)
+    L = sparse.diags(k * run).tolil()
+    N = np.array(ex.N)
+    index = {tuple(x): j for j, x in enumerate(n)}
+    for j, x in enumerate(n):
+        for i, f in enumerate(m.flow):
+            for s in (1, -1):
+                y = x.copy()
+                y[i] += s
+                if abs(y[i]) <= N[i]:
+                    L[j, index[tuple(y)]] += f.A / math.e
+    v = expm_multiply(ex.T * L.tocsr(), np.ones(len(n)))
+    assert np.allclose(ex.theta(ex.T).ravel(), np.log(v) / k, atol=1e-8)
+
+
+def test_uncorrelated_grid_separates():
+    m = Market.of([1.2, 0.6], 0.0, RFQ, 8e-6, z=1e4, mu=[0.1, -0.1])
+    th = Exact(m, SMALL, 2.0).theta(2.0)
+    parts = [
+        Exact(Market.of([s], 0.0, RFQ, 8e-6, z=1e4, mu=u), (n,), 2.0).theta(2.0)
+        for s, u, n in zip([1.2, 0.6], [0.1, -0.1], SMALL, strict=True)
+    ]
+    assert np.allclose(th, parts[0][:, None] + parts[1][None, :], rtol=1e-7, atol=1e-3)
 
 
 @pytest.mark.parametrize("rho", [-0.9, 0.0, 0.5, 0.95])

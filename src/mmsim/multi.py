@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from functools import cached_property
 
 import numpy as np
+from scipy.integrate import solve_ivp
 from scipy.special import lambertw
 
 
@@ -126,3 +127,71 @@ class Market:
 
     def _delta(self, p: np.ndarray) -> np.ndarray:
         return np.stack([f.delta(p[..., i]) for i, f in enumerate(self.flow)], axis=-1)
+
+
+def _axis(i: int, s: slice) -> tuple:
+    return (slice(None),) * i + (s,)
+
+
+@dataclass(frozen=True)
+class Exact:
+    m: Market
+    N: tuple[int, ...]
+    T: float
+    rtol: float = 1e-9
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return tuple(2 * n + 1 for n in self.N)
+
+    @cached_property
+    def q(self) -> np.ndarray:
+        axes = [np.arange(-n, n + 1) * z for n, z in zip(self.N, self.m.z, strict=True)]
+        return np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1)
+
+    def rhs(self, theta: np.ndarray) -> np.ndarray:
+        m, q = self.m, self.q
+        out = q @ m.mu - m.gamma / 2 * np.einsum("...i,ij,...j->...", q, m.Sigma, q)
+        for i, (f, z) in enumerate(zip(m.flow, m.z, strict=True)):
+            lo, hi = _axis(i, slice(None, -1)), _axis(i, slice(1, None))
+            gap = (theta[lo] - theta[hi]) / z
+            out[lo] += z * f.H(gap)
+            out[hi] += z * f.H(-gap)
+        return out
+
+    @cached_property
+    def _sol(self):
+        shape = self.shape
+        return solve_ivp(
+            lambda _, th: self.rhs(th.reshape(shape)).ravel(),
+            (0, self.T),
+            np.zeros(math.prod(shape)),
+            method="DOP853",
+            rtol=self.rtol,
+            atol=self.rtol,
+            dense_output=True,
+        )
+
+    def theta(self, tau: float) -> np.ndarray:
+        return self._sol.sol(tau).reshape(self.shape)
+
+    @cached_property
+    def nodes(self) -> np.ndarray:
+        return np.indices(self.shape).reshape(self.m.d, -1).T - np.array(self.N)
+
+    def value(self) -> float:
+        return float(self.theta(self.T)[tuple(self.N)])
+
+    def policy(self, tau: float, n: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        th = self.theta(tau)
+        N = np.array(self.N)
+        at = th[tuple((n + N).T)]
+        bid, ask = np.full(n.shape, np.nan), np.full(n.shape, np.nan)
+        for i, (f, z) in enumerate(zip(self.m.flow, self.m.z, strict=True)):
+            e = np.zeros_like(n)
+            e[:, i] = 1
+            up = th[tuple(np.minimum(n + e + N, 2 * N).T)]
+            dn = th[tuple(np.maximum(n - e + N, 0).T)]
+            bid[:, i] = np.where(n[:, i] < N[i], f.delta((at - up) / z), np.nan)
+            ask[:, i] = np.where(n[:, i] > -N[i], f.delta((at - dn) / z), np.nan)
+        return bid, ask
