@@ -1527,3 +1527,89 @@ Design notes:
 Next: dynamic fees that track realized volatility in the same fees-minus-LVR
 ledger, then the multi-asset quoter run on correlated assets in the event
 simulator.
+
+## 2026-11-09: Dynamic pool fees, and bettors with noisy signals
+
+Built:
+
+- `fees.py`: fee rules that take a volatility estimate (`Static`,
+  `Threshold(low, high, cut)`, `Power(base, k, p)` with a floor and cap),
+  a two-state volatility regime (`Regimes`) and an EWMA of squared returns
+  normalized so that it estimates sigma^2 per hour.
+- `venues.run` takes a fee rule in place of a number, a regime, and where the
+  estimate comes from: the true regime, the market price (an oracle) or the
+  pool's own price. `Pool` takes a fee per path. The quoter can widen its half
+  spread with the current vol. Sessions report the time-weighted fee, the time
+  in the spike and the LVR accrued in it.
+- `prediction.py`: every maker quotes both sides and takes a mask of who
+  trades. Bettors with a private signal of accuracy rho update the market
+  price by Bayes and trade only when the quote is worth it. `LSLMSR` is the
+  liquidity-sensitive LMSR of Othman, Pennock, Reeves and Sandholm, with the
+  price gradient derived by hand. Results carry the Bayes posterior from all
+  signals, the trade count, and Brier and log scores.
+- `examples/dynamic_fees.py` and `examples/signal_markets.py` with charts and
+  README sections.
+
+Checks:
+
+- Per-path fees give the same swaps as separate scalar-fee pools to 1e-14.
+- With the true regime as input, arbitrage profit and arbitrage fees match the
+  per-regime closed forms weighted by the LVR accrued in each regime (4 se,
+  1000 paths). Time in the spike from a calm start matches
+  pi (1 - (1 - e^-kT)/(kT)). Ledgers add up, and the edges still sum to minus
+  LVR with the fee moving.
+- The EWMA is unbiased for Poisson-spaced returns, and inside the simulator it
+  recovers sigma to 1%. The pool-price estimate matches
+  sigma sqrt(P_trade) to 2% at three fees, a result derived for this: the
+  pool moves only by the overshoot past the band, which is exponential with
+  mean square sigma^2/lambda, at rate lambda P_trade.
+- LS-LMSR: prices equal finite differences of C, C is homogeneous of degree
+  one, prices sum to between 1 and 1 + v, the start matches the prior, the
+  loss stays under v x, depth grows with volume, and maker P&L is revenue
+  minus payout on every market.
+- Bettors with rho = 0.5 never trade with any pool. The LMSR log-score loss
+  identity holds when bettors decline. The full-information Bayes posterior
+  has the binomial Brier score. The LMSR at b* = 1/ln((1 + a)/(1 - a)) has the
+  quoter's price after every trade to 1e-9, and the quoter shuts bettors out
+  exactly when it assumes a share above 2 rho - 1.
+- With rho = 1 the old prediction-market example prints the same table to the
+  last digit.
+- Mutations: the regime vol left out of the price step, and the EWMA decay
+  doubled, each fail a test.
+
+Results:
+
+- Static fees on the ETH-like pool next to a quoter: 5 bp is best in calm
+  hours (quoter at 15 bp) and 20 bp in the spike (quoter at 45 bp). Both sit at
+  the kink (h - impact/2)/2 = 5.6 and 20.6 bp, where the pool stops winning
+  every noise trade. With regime switching the best static fee is 12 bp,
+  851 a day.
+- A threshold fee at 5/20 bp that knows the regime makes 1517 (+666, se 32).
+  A 15-minute EWMA of the oracle price keeps 602 of that, a one-hour EWMA 439.
+  Smooth rules do worse (affine 539, quadratic 550, proportional 369) because
+  they pass estimator noise into the fee near a kink. The pool-price estimate
+  gains 362. Tuning both levels directly picks 5 and 20 again.
+- Signal bettors (half the flow, rho 0.6): the order flow looks like an
+  informed share 0.1 to a quoter. Bayes on the public flow scores Brier
+  0.0180, all private signals 0.0020. LMSR at b* = 4.98 matches the quoter's
+  price for a subsidy of 3.14; LS-LMSR with a 1% vig seeded at depth 2 gets the
+  same score for 1.08. LMSR at b = 1.2 cascades: wrong side in 44% of markets.
+
+Design notes:
+
+- The fee rule is any callable from an array of vol estimates to an array of
+  fees, so the venue simulator does not know about thresholds or powers. The
+  oracle and the estimators share the same call.
+- Common random numbers: every fee rule sees the same draws (the rule never
+  changes what is drawn), so paired differences have standard errors of 12 to
+  32 on values near 1000.
+- The quoter widening with vol matters. With a fixed 15 bp quoter the spike
+  optimum runs off to the largest fee tried, because the pool never wins noise
+  flow and only the arbitrage loss is left, sigma^3/(8 gamma sqrt(2 lambda))
+  for large eta.
+- For the LMSR the trade decision depends on the price only weakly (the cost
+  of a share and the belief are both shifts in log odds), which is why it
+  either takes nearly every signal or herds.
+
+Next: the multi-asset quoter on correlated assets in the event simulator, and
+an ETF market maker that hedges in the basket.
