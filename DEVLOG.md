@@ -1698,3 +1698,107 @@ Results:
 Next: the stale-NAV problem (an ETF whose basket trades in another time zone,
 so the dealer's fair value is a forecast), and multi-day dealing with
 overnight inventory and redemptions in creation units.
+
+## 2026-11-09: Options market making, and pre-averaged HY on the QQQ tape
+
+Built:
+
+- `options.py`: Black-Scholes price, delta, gamma, vega, theta, vanna and volga
+  (r = 0), a `Chain` of options on one spot, the Baldacci-Bergault-Gueant
+  request flow in vol units, `market` (the chain as a `multi.Market` with
+  Sigma = eta^2 V V' + eps^2 diag(V^2)), `closed` (the closed-form quotes
+  applied to the current vegas), `Reduced` (the paper's HJB in the portfolio
+  vega with a hard limit, solved with DOP853 on a grid) and `simulate` (spot,
+  common vol factor, per-strike noise, client fills, vega and dollar-gamma
+  limits, scheduled delta hedging with a half spread, exact P&L attribution).
+- `hy.py`: tent-weight pre-averaging, the Christensen-Kinnebrock-Podolskij
+  pre-averaged HY covariance, the Jacod et al. noise-corrected pre-averaged
+  variance, `matrix(..., theta)` and an eigenvalue-clipping `psd`.
+- `examples/options_mm.py` on a CBOE SPY snapshot through vol-lab's SVI fit, and
+  `examples/etf_basis.py` on the QQQ day.
+
+Design notes:
+
+- vol-lab is private, so mm-sim cannot install it in CI. The Greeks live in
+  mm-sim (fifteen lines) and a test compares them with vol-lab's to 1e-12 when
+  vol-lab is importable. The example uses vol-lab for the data and the SVI fit.
+- With a rank-one Sigma the Riccati matrix is c(tau) V V', so the skew of every
+  option is c V_i times the portfolio vega. The closed form already handles the
+  rank-one case at finite horizons (the tanh form has a tau limit when an
+  eigenvalue is zero).
+- First version of the policies read the vegas at t = 0. On the SPY run the
+  vegas of the wings drift with the spot, the books the policies thought were
+  near zero vega were not, and the reduced HJB scored -0.43M against a value of
+  3.5M. Policies now get the current vegas. The closed form rescales positions
+  to t = 0 vega lots (q z V_t / V_0), which keeps its structure and makes the
+  skew depend on the true portfolio vega.
+- Requests are sized in vega (2.5M per request) instead of the paper's 500k of
+  premium. With premium sizing the 110% call on the 27-day expiry was 12M
+  contracts, one request was 3.4 times the vega limit, and the wing could not
+  be quoted at all. Vega lots also put every jump of the portfolio vega on the
+  grid, so the reduced HJB needs no interpolation between visited states.
+- With the paper's gamma of 1e-3 the vega penalty was 3.4M a day against a vega
+  P&L sd of 93k, so the example uses 1e-5 and sweeps 1e-6 to 1e-3.
+- The attribution is exact by construction: "other" is the Taylor remainder of
+  each option's repricing, and the total is computed independently from cash,
+  shares and marks.
+
+Checks:
+
+- Greeks against central differences (calls and puts), put-call parity, and
+  vol-lab to 1e-12.
+- Same portfolio vega gives the same quotes; a vega-neutral book is not skewed
+  when eps = 0 and is when eps > 0; `closed` at the t = 0 vegas equals
+  `Market.policy`, and doubling the vegas equals doubling the inventory.
+- `Reduced` with one option equals `multi.Exact` on the inventory grid to
+  1e-7, values and quotes; its quotes rise and fall monotonically with the
+  portfolio vega and are mirror images.
+- Simulated in its own model (spot frozen, model vega bookkeeping, no extra
+  limit) the reduced HJB's average objective matches its value within 3 se.
+  On the SPY chain: 2,144,637 (se 6,829) at one-minute steps and 2,169,381
+  (6,514) at 12-second steps against 2,165,633.
+- Derman-Kamal: a short 1-month ATM option hedged 84 times has hedging error
+  sd within 5% of sqrt(pi/4/N) sigma V (0.218 against 0.223; at 21 hedges 0.428
+  against 0.445), mean zero within 3 se.
+- The attribution adds up to 1e-8 of the largest P&L, its residual is under 5%
+  of the vega term's sd, and the spread term of the no-skew quoter equals
+  fills times lot times quote.
+- Vega and gamma limits hold on every path.
+- Pre-averaging against a brute-force loop and the double sum to 1e-12. On 30
+  simulated noisy, asynchronous pairs where one series lags 200 fine steps, HY
+  gets under 0.1 of a 0.6 covariance and pre-averaging lands within 4 se;
+  realized variance is 8% too high and the corrected pre-averaged variance is
+  within 4 se of 1.
+
+Results:
+
+- SPY 2026-11-07, 20 OTM options from 27 to 174 days, one day, 1000 paths,
+  gamma 1e-5: closed form 2.044M mean (sd 219k), reduced HJB 2.112M (sd 209k),
+  each option against its own vega 2.005M, no skew 2.003M. Spread is 2.05M of
+  the closed form's 2.044M; vega, gamma and cross terms average about a
+  thousand dollars each, hedging cost -3,700.
+- The reduced HJB has the higher mean and lower sd up to gamma 1e-4. It skews
+  from 0.81 vol points at zero vega to 1.24 three lots long, the closed form
+  from 0.78 to 0.85. The limit, not the risk aversion, drives the skew.
+- Per-option risk aversion ignores offsets and loses spread: 1.55M at gamma
+  1e-3 against 2.03M for the portfolio-vega closed form.
+- The hard limit on true vega costs about 1% (2,144,637 on model vega,
+  2,120,795 on true vega, spot frozen).
+- Hedging every minute costs 3,660 a day and leaves 27k sd of delta plus gamma;
+  every 5, 15 and 60 minutes 57k, 101k and 195k; once a day 452k.
+- QQQ, 36 names, 10:00 to 13:00, as a share of the one-minute covariance:
+  HY on ticks 0.130 median, pre-averaged 0.967 (theta 1, IQR 0.915-1.048),
+  stable for theta 0.5 to 2. Pre-averaged variance 1.011 against 1.221 for
+  realized variance on ticks.
+- The pre-averaged 37-by-37 matrix has three negative eigenvalues; its raw
+  hedge scores -0.2 at one minute, 0.854 after clipping, against 0.931 for the
+  one-minute grid.
+- One-second R^2 of QQQ on the hedge basket: 0.416, with the five previous
+  seconds 0.417, with the five following 0.416, with both 0.418. On
+  size-weighted mids 0.497. The residual's variance ratio is 0.42 at 5 s, 0.12
+  at 60 s and 0.06 at 5 min. The basis level adds 0.024 of R^2 to QQQ's own
+  last move for the next second (0.033 against 0.009).
+
+Next: depth as a control for the options book (quote the smile on the
+exchange with queue position instead of answering requests), and the stale-NAV
+ETF with a fair value forecast from futures.

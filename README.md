@@ -39,7 +39,12 @@ assets with the Bergault-Evangelista-Gueant-Vieira closed form, checked against
 the exact HJB on an inventory grid, and an ETF dealer hedges QQQ in its
 components: measured on the tape with the Hayashi-Yoshida estimator and a
 lead-lag scan, then modelled with impact-costed hedging, redemption at the
-close and the creation/redemption arbitrage band.
+close and the creation/redemption arbitrage band. Pre-averaged HY recovers the
+covariance the tick-level estimator loses, and shows that the hedge's
+one-second shortfall is quote noise and a reverting basis rather than delay. An
+options market maker quotes a real SPY smile, delta hedges on a schedule and
+manages its portfolio vega with the Baldacci-Bergault-Gueant model, solved in
+closed form and as an exact one-dimensional HJB.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -2450,6 +2455,63 @@ both, are not in the file.
 
 ![QQQ against its components](docs/etf_hedge.png)
 
+### Pre-averaging, and what the one-second gap is
+
+Christensen, Kinnebrock and Podolskij (2010) make HY robust to quote noise by
+pre-averaging. Each series is replaced by overlapping weighted sums of k
+consecutive returns, with the tent weights g(x) = min(x, 1 - x), and HY is run
+on those blocks: two blocks are multiplied when their time spans overlap, and
+the sum is divided by (sum of g)^2. `hy.preaveraged` does it with one cumulative
+sum and two `searchsorted` calls, and picks k = theta sqrt(n) for each series
+from its own tick count. The variance needs a noise correction, the Jacod et
+al. (2009) one, in `hy.preaveraged_variance`. In the tests, on noisy Poisson
+observations of a pair where one series lags the other by 200 fine steps, HY
+recovers almost none of the 0.6 covariance and pre-averaging gets it within
+sampling error, while realized variance is 8% too high and the corrected
+pre-averaged variance is unbiased.
+
+On the tape (`examples/etf_basis.py`), as a share of the one-minute estimate:
+
+| estimator | cross covariance with QQQ, median over 36 names | IQR | variance, median |
+| --------- | ----------------------------------------------- | --- | ---------------- |
+| HY on ticks | 0.130 | 0.103-0.171 | 1.221 |
+| pre-averaged, theta 0.5 | 0.963 | 0.892-1.054 | 0.999 |
+| pre-averaged, theta 1 | 0.967 | 0.915-1.048 | 1.011 |
+| pre-averaged, theta 2 | 0.952 | 0.830-1.001 | 0.990 |
+
+The blocks span seconds to minutes, long enough to bridge the tens of
+milliseconds of delay, so the covariance comes back. The full matrix is a
+different story. Pairwise estimates do not have to form a positive
+semi-definite matrix, and this one has three negative eigenvalues (the
+smallest is -0.020 of the largest). Inverting the 36-name block gives a hedge
+that adds variance. Clipping the eigenvalues at 1e-3 of the largest (`hy.psd`)
+gives 0.854 at one minute, still below plain one-minute sampling at 0.931.
+With k = sqrt(n) a series has about sqrt(n) separate blocks: 400 to 550 for the
+busiest books over the three hours, around 100 for the quietest, against 180
+one-minute returns. That is not enough to pin down a 36-by-36 matrix.
+
+So why does the hedge remove only 42% of QQQ's one-second variance? Regressing
+QQQ's one-second move on the hedge basket's moves in the same second gives
+R^2 0.416 out of sample. Adding the basket's five previous seconds gives
+0.417, and adding its five following seconds instead, which no trader can use,
+gives 0.416 (0.418 with both). The gap is not timing. Two other things fill it:
+
+- Quote noise. Replacing every mid by the size-weighted mid (bid times ask
+  size plus ask times bid size, over both sizes) raises R^2 to 0.497 and halves
+  the one-second autocorrelations (-0.122 to -0.061 for QQQ, 0.148 to 0.054 for
+  the basket).
+- A basis that reverts. QQQ minus the basket has a variance ratio
+  var(k-second change) / (k var(one-second change)) of 0.42 at 5 s, 0.12 at
+  60 s and 0.06 at 5 min. Most of the one-second residual is gone within a
+  minute, which is why the same hedge removes 93% at one minute.
+
+The reversion is a small signal. The basis level (cumulative residual minus its
+10-second EWMA) together with QQQ's own last move forecasts the next second's
+mid move with R^2 0.033 out of sample, against 0.009 for the last move alone.
+On size-weighted mids it is 0.005 against 0.002.
+
+![Pre-averaged HY and the QQQ basis](docs/etf_basis.png)
+
 ### A dealer that quotes the ETF and hedges in the basket
 
 The dealer holds x = (q, h): q ETF shares from client requests and h shares of
@@ -2566,6 +2628,91 @@ here without the full basket and the fund's holdings file. What carries over
 is the shape. Once c is a few times the move between checks, s/sqrt(lambda),
 the premium's sd grows about linearly in the band and the AP's profit falls as
 1/(1 + zeta), the same trade-off as an AMM's fee.
+
+## Options market making
+
+`options.py` quotes a chain of options on one underlying, hedges the delta on
+the underlying and manages the vega, following Baldacci, Bergault and Gueant,
+"Algorithmic market making for options" (2021). Clients send requests for each
+option at a rate lambda_i / (1 + exp(alpha + beta delta / V_i)), where delta is
+the quote's distance from mid in dollars and V_i the option's vega, so the
+flow is set in vol points. The market maker is delta hedged, and with vegas
+held constant over the horizon its only risk is the implied vol: inventory q
+has P&L sum q_i V_i d sigma. The paper penalizes gamma/2 (eta sum q_i V_i)^2,
+where eta is the vol of the implied vol, and the value function then depends
+on q only through the portfolio vega v = sum q_i V_i.
+
+Two solutions sit side by side:
+
+- `market` turns the chain into the multi-asset problem from the previous
+  section with the rank-one covariance Sigma = eta^2 V V' (plus an optional
+  per-strike term eps^2 diag(V^2)), and the Bergault et al. closed form gives
+  the quotes. With a rank-one Sigma the skew of option i is proportional to
+  V_i v, so the tests check that two books with the same portfolio vega get
+  the same quotes and that a vega-neutral book is not skewed at all.
+- `Reduced` solves the paper's one-dimensional HJB in v on a grid, with the
+  vega limit abs(v) <= vbar. With one option it equals `multi.Exact` on the
+  inventory grid to 1e-7, and simulated in its own model its value matches the
+  average objective within sampling error.
+
+The simulator moves SPY as a lognormal with the ATM vol plus a common implied
+vol factor (vol eta, correlation rho with the spot), adds per-strike noise,
+reprices every option with Black-Scholes at its own implied vol and rehedges
+the delta on a schedule at a half spread per share. P&L is split exactly into
+spread, delta (between rehedges), gamma plus theta, vega, the second-order
+vanna and volga terms, hedging cost, and a residual that is the Taylor
+remainder. The split adds up to the total to 1e-8. The hedging error of a lone
+short option hedged 84 times matches Derman and Kamal's sqrt(pi/4/N) sigma V
+within 5%, the number QuantLib's DiscreteHedging example checks.
+
+`examples/options_mm.py` fits vol-lab's SVI to a CBOE snapshot of SPY
+(2026-11-07, spot 735.29), takes the expiries nearest 30, 60, 91 and 182 days
+and strikes at 90 to 110% of spot, and quotes the 20 out-of-the-money options.
+The flow and risk numbers are the paper's (30 requests a day at the money,
+alpha 0.7, beta 150, eta 0.1, rho -0.5). Requests are sized at 2.5M of vega,
+about the paper's at-the-money lot, and the vega limit is four lots, the
+paper's 1e7. One simulated day, 1000 paths, rehedged every minute at half a
+cent a share, gamma 1e-5:
+
+| strategy | mean P&L | sd | objective (se) | fills |
+| -------- | -------- | -- | -------------- | ----- |
+| closed form, portfolio vega | 2,044,321 | 219,348 | 2,038,491 (6,952) | 106.0 |
+| reduced HJB | 2,111,964 | 208,531 | 2,108,465 (6,598) | 109.4 |
+| closed form, each option alone | 2,004,563 | 228,984 | 1,998,155 (7,265) | 101.9 |
+| no skew | 2,002,969 | 228,474 | 1,996,468 (7,255) | 102.6 |
+
+Spread is almost everything: 2.05M of the closed form's mean, against means of
+about a thousand dollars for the vega, gamma and cross terms and -3,700 of
+hedging cost. Sweeping gamma from 1e-6 to 1e-3 (bottom left), the reduced
+HJB has the higher mean and the lower sd up to gamma 1e-4, and the closed form
+only catches up at 3e-4. The reason is the tight vega limit. With four lots to
+the edge, being shut out of one side is costly, so the exact solution skews
+hard near the limit even when gamma is tiny (0.81 vol points at zero vega, 1.24
+three lots long), while the closed form, which knows nothing of the limit,
+moves from 0.78 to 0.85.
+Quoting each option against its own vega ignores that a long put and a short
+call offset, and its risk aversion turns into wider quotes and lost spread as
+gamma grows.
+
+The constant-vega assumption has a cost of its own. The policies read the true
+current vegas, but the hard limit binds on true vega too, so whenever the
+book's vega drifts up a lot can be refused that the model would take. With the
+spot frozen, the reduced HJB scores 2,144,637 (se 6,829) on its own vega
+bookkeeping and 2,120,795 (6,416) on true vegas, against its value of
+2,165,633. The first gap is the one-minute step: at 12-second steps it is
+2,169,381 (6,514).
+
+Rehedging less often trades hedging cost for delta and gamma noise (bottom
+right). Every minute costs 3,660 a day and leaves 27k of delta plus gamma sd.
+Once a day costs nothing and leaves 452k, twice the whole P&L sd under
+one-minute hedging.
+
+![Options market making on SPY](docs/options_mm.png)
+
+The example needs vol-lab installed (`pip install -e ../vol-lab`) for the CBOE
+snapshot, the surface and the SVI fit. mm-sim carries its own Black-Scholes
+Greeks, and a test compares them with vol-lab's to 1e-12 when vol-lab is
+importable.
 
 ## Install
 
@@ -2713,6 +2860,21 @@ m.target()              # (23148, -57870), the Markowitz portfolio Sigma^-1 mu /
 Exact(m, (7, 30), 7.0).evaluate(m.policy)[7, 30]   # 60161, against 60200 optimal
 ```
 
+```python
+import numpy as np
+from mmsim import options as o
+
+c = o.Chain.otm(100.0, [90, 100, 110], 0.25, [0.25, 0.2, 0.17])
+m = o.market(c, lam=o.requests(c), alpha=0.7, beta=150, z=1e6 / c.g.vega, eta=0.1, gamma=1e-5)
+q = np.array([2e6 / c.g.vega[0], 0, 0])     # 2M of vega, all in the 90 put
+bid, ask = m.quotes(q, 1 / 252)
+100 * bid / c.g.vega, 100 * ask / c.g.vega  # 0.84 and 0.73 vol points on every strike, 0.785 flat
+o.Reduced(m, c.g.vega, 0.1, 4e6, 1 / 252, points=81).value()   # 130223
+s = o.simulate(c, m, o.closed(m, c), T=1 / 252, dt=1 / 252 / 390, paths=200, vol=0.2, eta=0.1,
+               h=0.005)
+s.pnl.mean(), s.terms["spread"].mean(), s.terms["cost"].mean()  # 130595, 133623, -1998
+```
+
 `python examples/as_replication.py`, `cst_sessions.py`, `glft_quotes.py`,
 `informed_flow.py`, `why_spreads.py`, `queue_value.py`, `latency_cost.py`,
 `hawkes_flow.py`, `flow_lean.py`, `tournament.py` and `itch_replay.py` redraw the
@@ -2726,7 +2888,10 @@ longest at 8 minutes here, `flow_lean.py` takes 6 and `tournament.py` 1.
 multi-asset one in about two minutes. `dynamic_fees.py` runs 68 sessions of
 200 paths and takes under two minutes, `signal_markets.py` about one.
 `etf_hedge.py` and `etf_dealer.py` need QQQ and the 36 component ITCH files in
-`data/` and take about two minutes each.
+`data/` and take about two minutes each, `etf_basis.py` under one.
+`options_mm.py` reads vol-lab's SPY snapshot (from `../vol-lab/data/cboe`, or
+the folder in `VOLLAB_CBOE`) and runs 33 simulated batches in about three and a
+half minutes.
 
 ## Notes
 
