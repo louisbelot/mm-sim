@@ -127,3 +127,21 @@ def test_preaveraging_survives_noise_and_delay():
     assert abs(mean[1] - 0.6 * 0.998) < 4 * se[1]
     assert mean[2] > 1.05
     assert abs(mean[3] - 1.0) < 4 * se[3]
+
+
+def test_preaveraged_matrix_diagonal():
+    rng = np.random.default_rng(6)
+    tx, x, ty, y = noisy(rng, delay=1)
+    C = hy.matrix([(tx, x), (ty, y)], (0.0, 1.0), theta=1.0)
+    assert C[0, 0] == pytest.approx(hy.preaveraged_variance(x))
+    assert C[0, 1] == C[1, 0] == pytest.approx(hy.preaveraged(tx, x, ty, y))
+
+
+def test_psd_projection():
+    A = np.array([[1.0, 0.9, 0.0], [0.9, 1.0, 0.9], [0.0, 0.9, 1.0]])
+    assert np.linalg.eigvalsh(A).min() < 0
+    P = hy.psd(A)
+    assert np.linalg.eigvalsh(P).min() > -1e-12
+    np.testing.assert_allclose(hy.psd(P), P, atol=1e-12)
+    w = np.linalg.eigvalsh(hy.psd(A, 0.01))
+    assert w.min() == pytest.approx(0.01 * w.max())

@@ -55,14 +55,26 @@ def preaveraged_variance(x, *, theta: float = 1.0) -> float:
     return float(n / (len(b) * psi2) * (b @ b) - psi1 / (2 * psi2) * (dx @ dx))
 
 
-def matrix(series, window: tuple[float, float]) -> np.ndarray:
+def psd(C, floor: float = 0.0) -> np.ndarray:
+    w, V = np.linalg.eigh(np.asarray(C, dtype=float))
+    return (V * np.maximum(w, floor * w.max())) @ V.T
+
+
+def matrix(series, window: tuple[float, float], theta: float | None = None) -> np.ndarray:
     cut = [between(t, x, *window) for t, x in series]
     n = len(cut)
     C = np.empty((n, n))
     for i in range(n):
-        C[i, i] = np.sum(np.diff(cut[i][1]) ** 2)
+        if theta is None:
+            C[i, i] = np.sum(np.diff(cut[i][1]) ** 2)
+        else:
+            C[i, i] = preaveraged_variance(cut[i][1], theta=theta)
         for j in range(i):
-            C[i, j] = C[j, i] = covariance(*cut[i], *cut[j])
+            if theta is None:
+                C[i, j] = covariance(*cut[i], *cut[j])
+            else:
+                C[i, j] = preaveraged(*cut[i], *cut[j], theta=theta)
+            C[j, i] = C[i, j]
     return C
 
 
