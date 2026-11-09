@@ -187,3 +187,69 @@ def simulate(
         close += fee * np.abs(x[:, 0])
     return Run(spread, carry, hedging, close, penalty, fills, x)
 
+
+@dataclass(frozen=True)
+class Band:
+    s: float
+    lam: float
+    c: float
+    kappa: float
+
+    @property
+    def rate(self) -> float:
+        return math.sqrt(2 * self.lam) / self.s
+
+    @property
+    def zeta(self) -> float:
+        return self.c * self.rate
+
+    @property
+    def p_trade(self) -> float:
+        return 1 / (1 + self.zeta)
+
+    @property
+    def trades(self) -> float:
+        return self.lam * self.p_trade
+
+    @property
+    def units(self) -> float:
+        return self.trades / (self.rate * self.kappa)
+
+    @property
+    def profit(self) -> float:
+        return self.s**2 * self.p_trade / (2 * self.kappa)
+
+    @property
+    def sd(self) -> float:
+        c, e = self.c, self.rate
+        tail = c**2 / e + 2 * c / e**2 + 2 / e**3
+        return math.sqrt((2 * c**3 / 3 + 2 * tail) / (2 * c + 2 / e))
+
+
+@dataclass(frozen=True)
+class BandRun:
+    T: float
+    trades: int
+    units: float
+    profit: float
+    seen: np.ndarray
+
+
+def arbitrage(band: Band, T: float, *, seed: int = 0) -> BandRun:
+    rng = np.random.default_rng(seed)
+    n = rng.poisson(band.lam * T)
+    gaps = rng.exponential(1 / band.lam, n)
+    shocks = band.s * np.sqrt(gaps) * rng.standard_normal(n)
+    seen = np.empty(n)
+    b = units = profit = 0.0
+    trades = 0
+    for i in range(n):
+        b += shocks[i]
+        seen[i] = b
+        over = abs(b) - band.c
+        if over > 0:
+            trades += 1
+            units += over / band.kappa
+            profit += over**2 / (2 * band.kappa)
+            b = math.copysign(band.c, b)
+    return BandRun(T, trades, units, profit, seen)

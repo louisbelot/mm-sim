@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 from scipy.integrate import solve_ivp
 
-from mmsim.etf import Dealer, Fund, hedge, simulate, stepwise
+from mmsim.etf import Band, Dealer, Fund, arbitrage, hedge, simulate, stepwise
 from mmsim.multi import Exponential, Logistic, Market
 
 
@@ -149,3 +149,24 @@ def test_simulated_ledger_adds_up():
         r.close, np.einsum("pi,ij,pj->p", x, d.terminal, x) + 0.01 * np.abs(x[:, 0])
     )
 
+
+@pytest.mark.parametrize("c", [0.0, 0.01, 0.05])
+def test_band_closed_forms_match_simulation(c):
+    band = Band(s=0.2, lam=400.0, c=c, kappa=1e-6)
+    r = arbitrage(band, 500.0, seed=3)
+    n = len(r.seen)
+    p = r.trades / n
+    assert p == pytest.approx(band.p_trade, abs=4 * math.sqrt(p * (1 - p) / n))
+    assert r.trades / r.T == pytest.approx(band.trades, rel=0.03)
+    assert r.units / r.T == pytest.approx(band.units, rel=0.03)
+    assert r.profit / r.T == pytest.approx(band.profit, rel=0.05)
+    assert np.sqrt(np.mean(r.seen**2)) == pytest.approx(band.sd, rel=0.03)
+
+
+def test_band_without_costs_trades_at_every_check():
+    band = Band(s=0.2, lam=400.0, c=0.0, kappa=1e-6)
+    assert band.p_trade == 1.0
+    assert band.profit == pytest.approx(0.2**2 / 2e-6)
+    assert band.sd == pytest.approx(0.2 / math.sqrt(400.0))
+    wide = Band(s=0.2, lam=400.0, c=0.05, kappa=1e-6)
+    assert wide.profit < band.profit and wide.sd > band.sd
