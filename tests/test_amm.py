@@ -100,3 +100,12 @@ def test_cpmm_arb_matches_normalized_profit(z):
     V = pool.value_at(P)
     assert (-(P * dx + dy) - fee) / V == pytest.approx(lvr.arb_profit(z, g), abs=1e-14)
     assert fee / V == pytest.approx(lvr.fee_income(z, g), abs=1e-14)
+
+
+def test_hedge_cost_widens_the_no_trade_band():
+    g, h = 0.02, 0.01
+    pool = Pool(1.0, 1.0, gamma=g)
+    for P in (math.exp(0.029), math.exp(-0.029)):
+        assert pool.arb_target(P, h) == pool.sp
+    for P in (math.exp(0.031), math.exp(-0.031)):
+        assert pool.arb_target(P, h) != pool.sp

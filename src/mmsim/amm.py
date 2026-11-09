@@ -66,14 +66,14 @@ class Pool:
         self.fees = self.fees + fee
         return dx, dy, fee
 
-    def arb_target(self, P) -> np.ndarray:
-        sm = np.sqrt(P)
+    def arb_target(self, P, h: float = 0.0) -> np.ndarray:
+        up, down = P * math.exp(-h), P * math.exp(h)
         p = self.price
         g = self.gamma
         return np.where(
-            P > p * math.exp(g),
-            sm * math.exp(-g / 2),
-            np.where(P < p * math.exp(-g), sm * math.exp(g / 2), self.sp),
+            up > p * math.exp(g),
+            np.sqrt(up) * math.exp(-g / 2),
+            np.where(down < p * math.exp(-g), np.sqrt(down) * math.exp(g / 2), self.sp),
         )
 
     def buy_target(self, qty) -> tuple[np.ndarray, np.ndarray]:
