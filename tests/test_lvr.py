@@ -95,6 +95,24 @@ def test_fixed_blocks_trade_less_than_poisson():
     assert fixed.arb < poisson.arb - 4 * poisson.arb_se
 
 
+@pytest.mark.parametrize("e", [1.0, 3.0, 10.0, 30.0])
+def test_fixed_blocks_match_nezlobin_tassy(e):
+    sigma, lam = 1.0, 5000.0
+    g = e * sigma / math.sqrt(2 * lam)
+    n = max(1500, int(6 * e**2))
+    c = lvr.mispricing(sigma, lam, g, chains=2000, blocks=n, burn=300, fixed=True, seed=12)
+    assert abs(c.arb - lvr.arb_rate_fixed(sigma, lam, g)) < 4 * c.arb_se
+    assert c.trade == pytest.approx(lvr.p_trade_fixed(sigma, lam, g), rel=5e-3)
+
+
+def test_fixed_blocks_cut_arbitrage_by_the_zeta_ratio():
+    sigma, lam, g = 1.0, 1e10, 0.01
+    poisson = lvr.arb_rate(sigma, lam, g) / lvr.lvr_rate(sigma)
+    fixed = lvr.arb_rate_fixed(sigma, lam, g) / lvr.lvr_rate(sigma)
+    assert fixed / poisson == pytest.approx(abs(lvr.ZETA_HALF) / math.sqrt(math.pi), rel=2e-3)
+    assert lvr.ZETA_HALF == pytest.approx(-1.4603545088095868, rel=1e-14)
+
+
 def test_stale_quote_loss_is_laplace_tail():
     sigma, lam, h = 0.02, 400.0, 0.003
     b = sigma / math.sqrt(2 * lam)

@@ -4,6 +4,9 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.special import zeta
+
+ZETA_HALF = float(zeta(0.5))
 
 
 def eta(sigma: float, lam: float, gamma: float) -> float:
@@ -44,6 +47,14 @@ def fee_rate(sigma: float, lam: float, gamma: float, h: float = 0.0) -> float:
 def hedge_rate(sigma: float, lam: float, gamma: float, h: float) -> float:
     t = _tails(sigma, lam, math.exp(gamma / 2), math.exp(-gamma / 2))
     return lam * p_trade(sigma, lam, gamma + h) * math.sinh(h / 2) * t
+
+
+def p_trade_fixed(sigma: float, lam: float, gamma: float) -> float:
+    return 1 / (eta(sigma, lam, gamma) + abs(ZETA_HALF) / math.sqrt(math.pi))
+
+
+def arb_rate_fixed(sigma: float, lam: float, gamma: float) -> float:
+    return lvr_rate(sigma) / (1 + math.sqrt(math.pi) * eta(sigma, lam, gamma) / abs(ZETA_HALF))
 
 
 def stale_quote_loss(sigma: float, lam: float, half: float) -> float:
