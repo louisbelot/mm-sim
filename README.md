@@ -36,7 +36,10 @@ prediction markets: Hanson's LMSR and a constant-product pool against a
 Glosten-Milgrom quoter and the liquidity-sensitive LMSR, with bettors who hold
 noisy signals. Last, a multi-asset market maker quotes correlated
 assets with the Bergault-Evangelista-Gueant-Vieira closed form, checked against
-the exact HJB on an inventory grid.
+the exact HJB on an inventory grid, and an ETF dealer hedges QQQ in its
+components: measured on the tape with the Hayashi-Yoshida estimator and a
+lead-lag scan, then modelled with impact-costed hedging, redemption at the
+close and the creation/redemption arbitrage band.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -2375,6 +2378,195 @@ dt = 0.001 day) agrees with `evaluate`: 60,519 (se 1,932) simulated against
 60,200 for the optimal policy, 60,550 against 60,161 for the closed form and
 53,179 (se 1,338) against 53,552 for independent quoting.
 
+## ETF market making: hedging in the basket
+
+An ETF dealer quotes the fund to clients, and the inventory it picks up can be
+hedged in the stocks the fund holds. `etf.py` and `hy.py` cover three pieces:
+how well QQQ can be hedged with its components on the real tape, a dealer that
+quotes the ETF and trades the hedge with market impact, and the
+creation/redemption arbitrage that ties the ETF price to its basket.
+
+### Hedging QQQ on the tape
+
+`python -m mmsim.itch` pulls 36 of the largest NASDAQ-100 names out of the
+same ITCH day (2019-12-30) next to QQQ. `etf.hedge` is the minimum-variance
+hedge with a subset of names, h = -C_SS^-1 C_S0 (the regression of the ETF on
+those names), and `etf.stepwise` adds names greedily by variance removed. The
+hedge is fit on 10:00 to 13:00 and scored on 13:00 to 15:50 as the share of
+QQQ's variance it removes:
+
+| k  | added | fit 60 s, score 60 s | fit 60 s, score 5 min | fit 1 s, score 1 s | fit 1 s, score 60 s | fit 1 s, score 5 min |
+| -- | ----- | -------------------- | --------------------- | ------------------ | ------------------- | -------------------- |
+| 1  | MSFT  | 0.635                | 0.598                 | 0.186              | 0.590               | 0.569                |
+| 3  | AAPL  | 0.795                | 0.803                 | 0.335              | 0.808               | 0.818                |
+| 5  | GOOGL | 0.877                | 0.937                 | 0.365              | 0.870               | 0.903                |
+| 10 | VRTX  | 0.901                | 0.957                 | 0.393              | 0.890               | 0.928                |
+| 20 | GILD  | 0.919                | 0.972                 | 0.424              | 0.913               | 0.939                |
+| 36 | BIIB  | 0.931                | 0.967                 | 0.429              | 0.913               | 0.937                |
+
+Five names (MSFT, AMAT, AAPL, AMZN, GOOGL) take out 88% of the minute-by-minute
+variance and 94% at five minutes. All 36 leave a residual of 0.185 $/day
+against 1.17 for QQQ itself; the other 64 names in the index are what is left.
+At one-second sampling the same hedge removes only 43%. This is the Epps
+effect: correlations measured on short intervals collapse (left chart). The
+hedge ratios survive it, though. Ratios fit on one-second data and applied at
+one minute keep 0.913 against 0.931 for ratios fit at one minute. What shrinks
+is how much can be hedged over one second, not the ratios.
+
+The Hayashi-Yoshida estimator sums products of increments over every pair of
+overlapping observation intervals, which removes the bias from asynchronous
+observation without picking a grid. `hy.covariance` does it in O(n log n) with
+two `searchsorted` calls, and the test checks that it is unbiased on Poisson
+observation times where previous-tick sampling on a fine grid loses most of
+the covariance. On the tape it does not rescue the short horizons. Covariance
+with QQQ over 10:00 to 13:00, as a share of the one-minute estimate (the grid
+columns use staggered grids, so HY has real asynchrony to correct):
+
+| name | HY on ticks | HY on 100 ms grids | HY on 1 s grids | previous tick 100 ms | previous tick 1 s |
+| ---- | ----------- | ------------------ | --------------- | -------------------- | ----------------- |
+| AAPL | 0.162       | 0.668              | 0.836           | 0.599                | 0.760             |
+| MSFT | 0.126       | 0.649              | 0.850           | 0.580                | 0.741             |
+| AMZN | 0.123       | 0.322              | 0.499           | 0.298                | 0.396             |
+| INTC | 0.044       | 0.367              | 0.566           | 0.312                | 0.474             |
+
+Correcting asynchrony gains 2 to 11 points over previous-tick sampling at the
+same resolution, and most of the gap to one minute stays. A hedge built from
+the tick-level HY matrix removes 79% at one minute, worse than any fitted on a
+fixed interval. What is missing is delay: one book reacts to the other tens of
+milliseconds later, and increments that do not overlap in time are never
+multiplied together.
+
+`hy.lead_lag` measures that delay (Hoffmann, Rosenbaum and Yoshida 2013): the
+HY covariance with one series shifted by a lag, maximised over the lag. The
+right chart shows it for three names at 10 ms resolution. Summarised by the
+lead-lag ratio of Huth and Abergel (2014), the sum of squared
+cross-covariances at positive lags over the sum at negative lags, 32 of the 36
+names move before QQQ on the NASDAQ book. AMZN leads most clearly (LLR 0.09,
+peak at -40 ms), then GOOG, FB and INTU (0.19). INTC (3.01), CSCO (1.58), AMD
+(1.21) and CMCSA (1.17) follow QQQ: large, low-priced, heavily quoted names
+whose quotes move a tick at a time. This is NASDAQ's book only. The
+consolidated quote and the E-mini futures, which Hasbrouck (2003) found lead
+both, are not in the file.
+
+![QQQ against its components](docs/etf_hedge.png)
+
+### A dealer that quotes the ETF and hedges in the basket
+
+The dealer holds x = (q, h): q ETF shares from client requests and h shares of
+m hedge names, which it trades at a rate xi with temporary impact, paying
+eta_j xi_j^2 per unit of time (the externalization setup of Barzykin, Bergault
+and Gueant). The risk penalty is gamma/2 x' Gamma x, where Gamma = M' Sigma M
+plus the ETF's residual variance on q, and M maps x to share exposure in each
+stock (q w + P h). With the Bergault et al. quadratic approximation of the
+quoting Hamiltonian, the HJB keeps a quadratic solution theta = -x' A x, and
+the hedge term sup_xi (-2 (A x)_h xi - eta xi^2) = (A x)_h^2 / eta is quadratic
+already. Together:
+
+```
+dA/dtau = gamma/2 Gamma - 2 A D A,    D = diag(2 z H''(0), 1/(2 eta_1), ..., 1/(2 eta_m))
+```
+
+the same Riccati equation as the multi-asset quoter. A hedge name traded at
+quadratic cost enters as one more asset with Hamiltonian curvature 1/(2 eta).
+The quotes on the ETF are delta*(+-2 (A x)_0 + z A_00) and the hedge rate is
+xi = -(A x)_h / eta.
+
+The terminal condition is how the day ends. Unwinding everything over the last
+30 minutes costs x' A_T x with A_T = diag(kappa_etf, kappa_h). Redeeming swaps
+the ETF for the basket, so only the net stock exposure q w + P h has to be
+unwound: A_T = M' K M. With A(0) = A_T the solution is still closed form. With
+R = D^1/2, K the square root of gamma/4 R Gamma R and Delta = R A R - K, Delta
+solves Delta' = -2(K Delta + Delta K + Delta^2), and
+
+```
+Delta(tau) = E Delta0 (I + 2 G Delta0)^-1 E,    E = e^(-2 K tau),    G = (I - e^(-4 K tau)) / (4 K)
+```
+
+in the eigenbasis of K. Only decaying exponentials appear, so it is stable at
+any horizon, and with A_T = 0 it reduces to the tanh form. The tests check it
+against `solve_ivp` on the matrix ODE to 1e-10 for both closes and against
+`multi.Market` with no hedge names. They also check the whole loop with no
+client flow, where the problem is exactly linear-quadratic and deterministic:
+hedging cost plus risk penalty plus closing cost in the simulator equals
+x0' A(T) x0 to 1e-4, and scaling the hedge rate by 0.8 or 1.2 costs more.
+
+The target hedge, -A_hh^-1 A_hq q, is not the minimum-variance hedge. The
+dealer expects its quotes to work the ETF position off, so it hedges less in
+the names that are slow to trade. As client flow dries up the target converges
+to the regression hedge (tested), and with the full basket and no residual it
+is exactly -w q whatever the costs, because (1, -w) is a null vector of Gamma
+and so of A. On QQQ the gap is small in variance terms: the dealer's
+stationary hedge removes 92% (one name) to 99.5% (36 names) of the variance
+the regression hedge removes.
+
+`examples/etf_dealer.py` builds the fund from the tape: Sigma from one-minute
+moves over 10:00 to 13:00 scaled to a day, w the 36-name regression hedge, and
+eta_j = spread_j / volume_j from each name's NASDAQ volume and time-weighted
+spread that day, so trading at NASDAQ's whole volume rate costs one spread per
+share. Clients send 5,000-share requests at 150 e^(-100 delta) a day per side,
+gamma is 1e-4, and the close unwinds over 30 minutes. One day, 2000 paths
+(P&L se 67 to 107):
+
+| hedge names | close  | P&L   | sd    | P&L - penalty | spread | hedging | fills | E abs(q_T) |
+| ----------- | ------ | ----- | ----- | ------------- | ------ | ------- | ----- | ---------- |
+| 0           | unwind | 4,357 | 4,793 | 3,270         | 4,518  | 0       | 89.7  | 3,768      |
+| 1           | unwind | 4,546 | 4,131 | 3,653         | 4,778  | 117     | 90.4  | 4,668      |
+| 3           | unwind | 4,837 | 3,817 | 4,126         | 4,964  | 157     | 92.7  | 5,582      |
+| 5           | unwind | 4,866 | 3,609 | 4,253         | 5,076  | 188     | 93.7  | 6,360      |
+| 10          | unwind | 4,850 | 3,370 | 4,298         | 5,159  | 211     | 94.5  | 6,830      |
+| 36          | unwind | 5,002 | 3,015 | 4,555         | 5,238  | 221     | 95.8  | 8,452      |
+| 36          | redeem | 5,005 | 3,028 | 4,557         | 5,242  | 223     | 95.8  | 9,588      |
+
+Hedging raises the objective by 39% and cuts the P&L sd by 37%, and much of
+the gain is spread. A hedged dealer can hold more ETF inventory, so it skews
+its quotes less, trades more and earns 720 more in spread a day while paying
+221 in impact. The first three names give two thirds of the gain.
+
+Redemption barely matters for QQQ. Unwinding 8,000 shares of anything this
+liquid over 30 minutes costs a few dollars, and the break-even fee (the gain
+over unwinding per share redeemed) is 0.019 cents (se 0.055) with the full
+basket. With components 100 times less liquid, hedging is worth only 230 a day
+and redeeming loses to unwinding by about 4 cents a share: redemption hands the
+dealer the basket, and an illiquid basket is the expensive leg. In this model
+redemption is a netting device. It pays when the dealer is already hedged in
+the full basket and the ETF is the costly leg to unwind, the opposite of QQQ.
+
+![ETF dealer](docs/etf_dealer.png)
+
+### Creation/redemption arbitrage
+
+The ETF premium b (price minus NAV) moves as a Brownian motion with volatility
+s, and an authorized participant checks it at Poisson times with rate lambda.
+If abs(b) exceeds c, the cost of a creation or redemption round trip, it
+creates or redeems until the premium is back at the edge, against an ETF book
+with linear impact kappa. This is the fee-band chain from the pool section with
+other labels. The stationary premium is uniform on [-c, c] with exponential
+tails of rate sqrt(2 lambda)/s, so with zeta = c sqrt(2 lambda)/s:
+
+```
+P(trade at a check) = 1/(1 + zeta),    AP profit rate = s^2 / (2 kappa (1 + zeta))
+units a day = lambda/(1 + zeta) * s / (sqrt(2 lambda) kappa)
+```
+
+and the premium's sd follows from the same density. `etf.Band` has the closed
+forms and `etf.arbitrage` simulates the chain with exact Gaussian moves between
+checks. With s = 0.05 $/root day, a check every minute and 1 cent of impact per
+50,000 shares (1000 simulated days):
+
+| band c (cents) | P(trade) | sim   | units/day | sim       | AP profit $/day | sim   | premium sd (cents) | sim   |
+| -------------- | -------- | ----- | --------- | --------- | --------------- | ----- | ------------------ | ----- |
+| 0              | 1.000    | 1.000 | 3,491,060 | 3,483,905 | 6,250           | 6,225 | 0.253              | 0.253 |
+| 0.5            | 0.264    | 0.264 | 920,432   | 914,481   | 1,648           | 1,634 | 0.437              | 0.437 |
+| 1              | 0.152    | 0.153 | 530,097   | 527,469   | 949             | 936   | 0.706              | 0.707 |
+| 2              | 0.082    | 0.082 | 286,825   | 284,580   | 514             | 508   | 1.271              | 1.272 |
+| 5              | 0.035    | 0.034 | 120,679   | 116,877   | 216             | 208   | 2.996              | 2.989 |
+
+The parameters are illustrative, not fitted: the premium cannot be measured
+here without the full basket and the fund's holdings file. What carries over
+is the shape. Once c is a few times the move between checks, s/sqrt(lambda),
+the premium's sd grows about linearly in the band and the AP's profit falls as
+1/(1 + zeta), the same trade-off as an AMM's fee.
+
 ## Install
 
 ```
@@ -2533,6 +2725,8 @@ longest at 8 minutes here, `flow_lean.py` takes 6 and `tournament.py` 1.
 `prediction_markets.py` theirs in a few seconds, and `multi_asset.py` the
 multi-asset one in about two minutes. `dynamic_fees.py` runs 68 sessions of
 200 paths and takes under two minutes, `signal_markets.py` about one.
+`etf_hedge.py` and `etf_dealer.py` need QQQ and the 36 component ITCH files in
+`data/` and take about two minutes each.
 
 ## Notes
 
