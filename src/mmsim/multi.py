@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -51,6 +52,7 @@ class Logistic:
 
 
 Flow = Exponential | Logistic
+Policy = Callable[[float, np.ndarray], tuple[np.ndarray, np.ndarray]]
 
 
 def covariance(sigma, rho) -> np.ndarray:
@@ -178,6 +180,32 @@ class Exact:
     @cached_property
     def nodes(self) -> np.ndarray:
         return np.indices(self.shape).reshape(self.m.d, -1).T - np.array(self.N)
+
+    def evaluate(self, policy: Policy) -> np.ndarray:
+        m, n = self.m, self.nodes
+        N = np.array(self.N)
+        q = n * m.z
+        run = q @ m.mu - m.gamma / 2 * np.einsum("pi,ij,pj->p", q, m.Sigma, q)
+        flat = np.arange(len(n))
+        step = [math.prod(self.shape[i + 1 :]) for i in range(m.d)]
+        legs = []
+        for i, (f, z) in enumerate(zip(m.flow, m.z, strict=True)):
+            legs.append((i, f, z, n[:, i] < N[i], flat + step[i], 0))
+            legs.append((i, f, z, n[:, i] > -N[i], flat - step[i], 1))
+
+        def rhs(tau, V):
+            quotes = policy(tau, n)
+            out = run.copy()
+            for i, f, z, room, nxt, side in legs:
+                delta = np.where(room, quotes[side][:, i], 0.0)
+                gain = z * delta + V[np.where(room, nxt, flat)] - V
+                out += np.where(room, f.rate(delta) * gain, 0.0)
+            return out
+
+        sol = solve_ivp(
+            rhs, (0, self.T), np.zeros(len(n)), method="DOP853", rtol=self.rtol, atol=self.rtol
+        )
+        return sol.y[:, -1].reshape(self.shape)
 
     def value(self) -> float:
         return float(self.theta(self.T)[tuple(self.N)])

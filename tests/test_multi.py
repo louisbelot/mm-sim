@@ -131,6 +131,24 @@ def test_uncorrelated_grid_separates():
     assert np.allclose(th, parts[0][:, None] + parts[1][None, :], rtol=1e-7, atol=1e-3)
 
 
+def test_evaluating_the_optimal_policy_gives_the_value():
+    ex = Exact(PAIR, SMALL, 2.0)
+    assert np.allclose(ex.evaluate(ex.policy), ex.theta(2.0), rtol=1e-6, atol=1e-2)
+
+
+def test_optimal_beats_closed_form_beats_independent():
+    c = SMALL
+    ex = Exact(PAIR, SMALL, 2.0)
+    best = ex.value()
+    joint = ex.evaluate(PAIR.policy)[c]
+    alone = ex.evaluate(PAIR.independent().policy)[c]
+    assert best > joint > alone
+    assert joint > best - 0.01 * abs(best)
+    flat = Market.of([1.2, 0.6], 0.0, RFQ, 8e-6, z=1e4)
+    ex0 = Exact(flat, SMALL, 2.0)
+    assert ex0.evaluate(flat.policy)[c] == ex0.evaluate(flat.independent().policy)[c]
+
+
 @pytest.mark.parametrize("rho", [-0.9, 0.0, 0.5, 0.95])
 def test_target_inventory_is_the_markowitz_portfolio(rho):
     m = Market.of([1.2, 0.6], rho, RFQ, 8e-6, z=1e4, mu=[0.1, -0.1])
