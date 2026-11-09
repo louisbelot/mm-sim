@@ -18,6 +18,7 @@ def test_rules():
     assert fees.Static(0.003)(s).tolist() == [0.003] * 3
     assert fees.Threshold(0.001, 0.004, 1.0)(s).tolist() == [0.001, 0.001, 0.004]
     assert fees.Power(0.001, 0.002, 2, cap=0.006)(s) == pytest.approx([0.0015, 0.003, 0.006])
+    assert fees.Power(-0.001, 0.002, 1)(s) == pytest.approx([0.0, 0.001, 0.003])
 
 
 def test_regime_moments():

@@ -30,9 +30,10 @@ class Power:
     k: float
     p: float = 1.0
     cap: float = 0.1
+    floor: float = 0.0
 
     def __call__(self, sigma) -> np.ndarray:
-        return np.minimum(self.cap, self.base + self.k * np.asarray(sigma) ** self.p)
+        return np.clip(self.base + self.k * np.asarray(sigma) ** self.p, self.floor, self.cap)
 
 
 @dataclass(frozen=True)
