@@ -20,6 +20,41 @@ def covariance(tx, x, ty, y, lag: float = 0.0) -> float:
     return float(np.diff(x) @ dy)
 
 
+def triangle(k: int) -> np.ndarray:
+    j = np.arange(1, k)
+    return np.minimum(j, k - j) / k
+
+
+def width(n: int, theta: float) -> int:
+    return max(2, round(theta * np.sqrt(n)))
+
+
+def preaverage(x, k: int) -> np.ndarray:
+    return np.convolve(np.diff(np.asarray(x, dtype=float)), triangle(k), "valid")[:-1]
+
+
+def preaveraged(tx, x, ty, y, *, theta: float = 1.0, lag: float = 0.0) -> float:
+    tx, ty = np.asarray(tx, dtype=float), np.asarray(ty, dtype=float) - lag
+    kx, ky = width(len(tx) - 1, theta), width(len(ty) - 1, theta)
+    bx, by = preaverage(x, kx), preaverage(y, ky)
+    lo = np.searchsorted(ty[ky : ky + len(by)], tx[: len(bx)], side="right")
+    hi = np.searchsorted(ty[: len(by)], tx[kx : kx + len(bx)], side="left")
+    cs = np.concatenate([[0.0], np.cumsum(by)])
+    total = bx @ (cs[np.maximum(hi, lo)] - cs[lo])
+    return float(total / (triangle(kx).sum() * triangle(ky).sum()))
+
+
+def preaveraged_variance(x, *, theta: float = 1.0) -> float:
+    dx = np.diff(np.asarray(x, dtype=float))
+    n = len(dx)
+    k = width(n, theta)
+    g = triangle(k)
+    b = preaverage(x, k)
+    psi1 = np.sum(np.diff(np.r_[0.0, g, 0.0]) ** 2)
+    psi2 = g @ g
+    return float(n / (len(b) * psi2) * (b @ b) - psi1 / (2 * psi2) * (dx @ dx))
+
+
 def matrix(series, window: tuple[float, float]) -> np.ndarray:
     cut = [between(t, x, *window) for t, x in series]
     n = len(cut)

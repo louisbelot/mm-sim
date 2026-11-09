@@ -68,3 +68,62 @@ def test_matrix_cuts_the_window_and_is_symmetric():
     assert C[0, 0] == pytest.approx(np.sum(np.diff(np.r_[first, x[keep]]) ** 2), rel=1e-12)
     assert C[0, 1] == C[1, 0]
     assert abs(C[0, 1] - 0.3) < 0.15
+
+
+def noisy(rng, n=100_000, nx=10_000, ny=4_000, rho=0.6, omega=0.002, delay=200):
+    dW = rng.standard_normal((n, 2)) / math.sqrt(n)
+    dW[:, 1] = rho * dW[:, 0] + math.sqrt(1 - rho**2) * dW[:, 1]
+    W = np.vstack([[0, 0], np.cumsum(dW, axis=0)])
+    W[:, 1] = np.concatenate([np.zeros(delay), W[: len(W) - delay, 1]])
+    t = np.linspace(0, 1, n + 1)
+    ix = np.r_[0, np.sort(rng.choice(np.arange(1, n + 1), nx, replace=False))]
+    iy = np.r_[0, np.sort(rng.choice(np.arange(1, n + 1), ny, replace=False))]
+    x = W[ix, 0] + omega * rng.standard_normal(len(ix))
+    y = W[iy, 1] + omega * rng.standard_normal(len(iy))
+    return t[ix], x, t[iy], y
+
+
+def test_preaverage_is_the_weighted_sum_of_returns():
+    rng = np.random.default_rng(3)
+    x = rng.standard_normal(50).cumsum()
+    k = 6
+    g = hy.triangle(k)
+    want = [g @ np.diff(x)[i : i + k - 1] for i in range(len(x) - k)]
+    np.testing.assert_allclose(hy.preaverage(x, k), want, rtol=1e-12)
+    assert hy.triangle(8).sum() == pytest.approx(8 / 4)
+
+
+def test_preaveraged_matches_the_double_sum():
+    rng = np.random.default_rng(4)
+    tx, ty = np.sort(rng.random(300)), np.sort(rng.random(120))
+    x, y = rng.standard_normal(300).cumsum(), rng.standard_normal(120).cumsum()
+    kx, ky = hy.width(299, 1.0), hy.width(119, 1.0)
+    bx, by = hy.preaverage(x, kx), hy.preaverage(y, ky)
+    total = sum(
+        bx[i] * by[j]
+        for i in range(len(bx))
+        for j in range(len(by))
+        if ty[j] < tx[i + kx] and ty[j + ky] > tx[i]
+    )
+    want = total / (hy.triangle(kx).sum() * hy.triangle(ky).sum())
+    assert hy.preaveraged(tx, x, ty, y) == pytest.approx(want, rel=1e-12)
+
+
+def test_preaveraging_survives_noise_and_delay():
+    rng = np.random.default_rng(5)
+    out = np.array(
+        [
+            (
+                hy.covariance(tx, x, ty, y),
+                hy.preaveraged(tx, x, ty, y),
+                np.sum(np.diff(x) ** 2),
+                hy.preaveraged_variance(x),
+            )
+            for tx, x, ty, y in (noisy(rng) for _ in range(30))
+        ]
+    )
+    mean, se = out.mean(axis=0), out.std(axis=0) / math.sqrt(len(out))
+    assert mean[0] < 0.1
+    assert abs(mean[1] - 0.6 * 0.998) < 4 * se[1]
+    assert mean[2] > 1.05
+    assert abs(mean[3] - 1.0) < 4 * se[3]
