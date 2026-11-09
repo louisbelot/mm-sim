@@ -74,8 +74,8 @@ lm = runs[f"LMSR b = {b_star:.3g}"]
 print(f"LMSR at b* against the quoter: max price gap {np.abs(lm.price - ref.price).max():.2e}")
 shut = pm.run(lambda n: pm.Quoter(2 * RHO - 1 + 1e-9, n), ALPHA, TRADES, 2000, rho=RHO, seed=7)
 print(
-    f"quoter assuming 2 rho - 1 = {2 * RHO - 1:.2f}: bettor trades {shut.volume.mean():.1f}"
-    f" of {TRADES}, Brier {shut.brier():.4f}"
+    f"quoter assuming 2 rho - 1 = {2 * RHO - 1:.2f}: {shut.volume.mean():.1f} trades of {TRADES},"
+    f" bettor P&L {shut.informed.sum():.0f}, Brier {shut.brier():.4f}"
 )
 
 plt.rcParams.update(
