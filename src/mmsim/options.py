@@ -178,3 +178,124 @@ class Reduced:
 
     def policy(self, tau: float, n: np.ndarray, vega: np.ndarray):
         return self.quotes(tau, (n * self.m.z * vega).sum(axis=-1))
+
+
+TERMS = ("spread", "delta", "gamma", "vega", "cross", "cost", "other")
+
+
+@dataclass(frozen=True)
+class Session:
+    pnl: np.ndarray
+    penalty: np.ndarray
+    terms: dict[str, np.ndarray]
+    fills: np.ndarray
+    n: np.ndarray
+    vega: np.ndarray
+    peak: np.ndarray
+    peak_gamma: np.ndarray
+
+    @property
+    def objective(self) -> np.ndarray:
+        return self.pnl - self.penalty
+
+
+def simulate(
+    c: Chain,
+    m: Market,
+    policy: Policy,
+    *,
+    T: float,
+    dt: float,
+    paths: int,
+    vol: float,
+    eta: float,
+    eps: float = 0.0,
+    rho: float = 0.0,
+    h: float = 0.0,
+    every: int = 1,
+    vbar: float = math.inf,
+    gbar: float = math.inf,
+    n0=0.0,
+    seed: int = 0,
+) -> Session:
+    if T > c.T.min():
+        raise ValueError("horizon runs past the first expiry")
+    rng = np.random.default_rng(seed)
+    d, z = c.d, m.z
+    n = np.broadcast_to(np.asarray(n0, float), (paths, d)).copy()
+    S = np.full((paths, 1), c.S)
+    x = np.zeros((paths, 1))
+    e = np.zeros((paths, d))
+    sigma = c.iv + x + e
+    g = greeks(S, c.K, c.T, sigma, c.call)
+    hedge = np.zeros(paths)
+    cash = np.zeros(paths)
+    wealth0 = (n * z * g.price).sum(axis=1)
+    terms = {k: np.zeros(paths) for k in TERMS}
+    penalty = np.zeros(paths)
+    fills = np.zeros((paths, d), dtype=int)
+    peak, peak_gamma = np.zeros(paths), np.zeros(paths)
+    steps = round(T / dt)
+    for s in range(steps):
+        tau = T - s * dt
+        bid, ask = policy(tau, n, g.vega)
+        u = rng.random((paths, d, 2))
+        vega = (n * z * g.vega).sum(axis=1)
+        gam = (n * z * g.gamma).sum(axis=1) * S[:, 0] ** 2
+        for i in range(d):
+            dv, dg = z[i] * g.vega[:, i], z[i] * g.gamma[:, i] * S[:, 0] ** 2
+            f = m.flow[i]
+            for side, quote, k in ((1.0, bid[:, i], 0), (-1.0, ask[:, i], 1)):
+                ok = (np.abs(vega + side * dv) <= vbar) & (np.abs(gam + side * dg) <= gbar)
+                ok &= np.isfinite(quote)
+                q = np.where(ok, quote, 0.0)
+                hit = ok & (u[:, i, k] < -np.expm1(-f.rate(q) * dt))
+                n[:, i] += side * hit
+                fills[:, i] += hit
+                terms["spread"] += np.where(hit, z[i] * q, 0.0)
+                cash += np.where(hit, z[i] * (q - side * g.price[:, i]), 0.0)
+                vega += side * hit * dv
+                gam += side * hit * dg
+        np.maximum(peak, np.abs(vega), out=peak)
+        np.maximum(peak_gamma, np.abs(gam), out=peak_gamma)
+        penalty += m.gamma / 2 * (eta * vega) ** 2 * dt
+        held = (n * z * g.delta).sum(axis=1)
+        if s % every == 0:
+            trade = -held - hedge
+            cost = h * np.abs(trade)
+            cash -= trade * S[:, 0] + cost
+            terms["cost"] -= cost
+            hedge = -held
+        zs, zx = rng.standard_normal((2, paths, 1))
+        zx = rho * zs + math.sqrt(1 - rho * rho) * zx
+        dx = eta * math.sqrt(dt) * zx
+        de = eps * math.sqrt(dt) * rng.standard_normal((paths, d))
+        sv = np.maximum(vol + x, 1e-4)
+        S1 = S * np.exp(sv * math.sqrt(dt) * zs - sv * sv * dt / 2)
+        x, e = x + dx, e + de
+        sigma1 = np.maximum(c.iv + x + e, 1e-4)
+        g1 = greeks(S1, c.K, c.T - (s + 1) * dt, sigma1, c.call)
+        dS, ds = S1 - S, sigma1 - sigma
+        nz = n * z
+        exact = (nz * (g1.price - g.price)).sum(axis=1)
+        parts = {
+            "delta": (held + hedge) * dS[:, 0],
+            "gamma": (nz * (g.theta * dt + g.gamma * dS**2 / 2)).sum(axis=1),
+            "vega": (nz * g.vega * ds).sum(axis=1),
+            "cross": (nz * (g.volga * ds**2 / 2 + g.vanna * dS * ds)).sum(axis=1),
+        }
+        for k, p in parts.items():
+            terms[k] += p
+        terms["other"] += exact + hedge * dS[:, 0] - sum(parts.values())
+        S, sigma, g = S1, sigma1, g1
+    wealth = cash + hedge * S[:, 0] + (n * z * g.price).sum(axis=1)
+    return Session(
+        pnl=wealth - wealth0,
+        penalty=penalty,
+        terms=terms,
+        fills=fills,
+        n=n,
+        vega=(n * z * g.vega).sum(axis=1),
+        peak=peak,
+        peak_gamma=peak_gamma,
+    )

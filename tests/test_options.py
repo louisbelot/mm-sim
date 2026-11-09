@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import pytest
 
@@ -22,6 +24,10 @@ def bbg(c, gamma=1e-3, eps=0.0):
         gamma=gamma,
         eps=eps,
     )
+
+
+def never(tau, n, vega):
+    return np.full(n.shape, np.inf), np.full(n.shape, np.inf)
 
 
 def test_greeks_finite_differences():
@@ -100,6 +106,93 @@ def test_reduced_quotes_lean_with_vega():
     assert np.all(np.diff(ask, axis=0) < 0)
     assert np.allclose(bid, ask[::-1], rtol=1e-6)
     assert r.value() > 0
+
+
+def test_reduced_value_matches_simulation():
+    c = chain()
+    m = o.market(
+        c, lam=o.requests(c), alpha=0.7, beta=150.0, z=2.5e6 / c.g.vega, eta=0.1, gamma=1e-5
+    )
+    r = o.Reduced(m, c.g.vega, 0.1, 1e7, 1 / 252, points=81)
+    V0 = c.g.vega
+
+    def booked(tau, n, vega):
+        return r.policy(tau, n, np.broadcast_to(V0, n.shape))
+
+    s = o.simulate(c, m, booked, T=1 / 252, dt=1 / 252 / 390, paths=1000, vol=1e-4, eta=0.1, seed=1)
+    se = s.objective.std() / math.sqrt(1000)
+    assert abs(s.objective.mean() - r.value()) < 3 * se
+    assert np.abs((s.n * m.z * V0).sum(axis=1)).max() <= 1e7 * (1 + 1e-9)
+
+
+def test_derman_kamal_hedging_error():
+    c = o.Chain.of(100.0, 100.0, 1 / 12, 0.2)
+    m = o.market(c, lam=0.0, alpha=0.7, beta=150.0, z=1.0, eta=0.0, gamma=0.0)
+    N = 84
+    s = o.simulate(c, m, never, T=1 / 12, dt=1 / 12 / N, paths=20000, vol=0.2, eta=0.0, n0=-1)
+    theory = math.sqrt(math.pi / 4 / N) * c.g.vega[0] * 0.2
+    assert abs(s.pnl.std() / theory - 1) < 0.05
+    assert abs(s.pnl.mean()) < 3 * s.pnl.std() / math.sqrt(20000)
+
+
+def test_attribution_adds_up():
+    c = chain()
+    m = bbg(c)
+    s = o.simulate(
+        c,
+        m,
+        o.closed(m, c),
+        T=1 / 252,
+        dt=1 / 252 / 78,
+        paths=64,
+        vol=0.2,
+        eta=0.1,
+        eps=0.02,
+        rho=-0.5,
+        h=0.01,
+        every=3,
+        vbar=3e7,
+    )
+    total = sum(s.terms.values())
+    assert np.allclose(total, s.pnl, rtol=0, atol=1e-8 * np.abs(s.pnl).max())
+    assert np.abs(s.terms["delta"]).max() > 0
+    assert s.terms["other"].std() < 0.05 * s.terms["vega"].std()
+    assert s.fills.sum() > 0
+
+
+def test_flat_spread_is_quote_times_size():
+    c = chain()
+    m = bbg(c, gamma=0.0)
+    s = o.simulate(c, m, o.flat(m), T=1 / 252, dt=1 / 252 / 78, paths=32, vol=0.2, eta=0.1)
+    bid, ask = m.quotes(np.zeros(c.d), 1.0)
+    assert np.allclose(bid, ask)
+    assert np.allclose(s.terms["spread"], s.fills @ (m.z * bid), rtol=1e-10)
+
+
+def test_limits_hold():
+    c = chain()
+    m = bbg(c, gamma=0.0)
+    s = o.simulate(
+        c,
+        m,
+        o.flat(m),
+        T=1 / 252,
+        dt=1 / 252 / 78,
+        paths=32,
+        vol=1e-4,
+        eta=0.0,
+        vbar=3e7,
+        gbar=1.5e9,
+    )
+    assert s.fills.sum() > 0
+    assert s.peak.max() <= 3e7 * (1 + 1e-3)
+    assert s.peak_gamma.max() <= 1.5e9 * (1 + 1e-3)
+
+
+def test_horizon_past_expiry():
+    c = chain()
+    with pytest.raises(ValueError):
+        o.simulate(c, bbg(c), never, T=0.2, dt=0.01, paths=1, vol=0.2, eta=0.0)
 
 
 def test_closed_policy_rescales_by_current_vega():
