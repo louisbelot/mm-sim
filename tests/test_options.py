@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+from mmsim import multi
 from mmsim import options as o
 
 
@@ -74,6 +75,31 @@ def test_vega_neutral_book_is_not_skewed():
         assert np.allclose(a, b, rtol=1e-10)
     m = bbg(c, eps=0.05)
     assert not np.allclose(m.quotes(q, 0.004)[0], m.quotes(np.zeros(c.d), 0.004)[0])
+
+
+def test_reduced_one_option_equals_exact():
+    c = o.Chain.of(100.0, 100.0, 0.5, 0.2)
+    m = bbg(c)
+    zV, N = m.z[0] * c.g.vega[0], 6
+    r = o.Reduced(m, c.g.vega, 0.1, N * zV, 0.004, points=2 * N + 1, rtol=1e-10)
+    e = multi.Exact(m, (N,), 0.004, rtol=1e-10)
+    assert np.allclose(r.w(0.004), e.theta(0.004), rtol=1e-7, atol=1e-3)
+    n = np.arange(-N + 1, N)[:, None]
+    vega = np.broadcast_to(c.g.vega, n.shape)
+    for a, b in zip(r.policy(0.002, n, vega), e.policy(0.002, n), strict=True):
+        assert np.allclose(a, b, rtol=1e-7)
+
+
+def test_reduced_quotes_lean_with_vega():
+    c = chain()
+    m = bbg(c)
+    r = o.Reduced(m, c.g.vega, 0.1, 3e7, 0.004, points=301)
+    v = np.linspace(-1e7, 1e7, 11)
+    bid, ask = r.quotes(0.004, v)
+    assert np.all(np.diff(bid, axis=0) > 0)
+    assert np.all(np.diff(ask, axis=0) < 0)
+    assert np.allclose(bid, ask[::-1], rtol=1e-6)
+    assert r.value() > 0
 
 
 def test_closed_policy_rescales_by_current_vega():

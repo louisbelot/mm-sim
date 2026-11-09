@@ -7,6 +7,7 @@ from functools import cached_property
 from typing import NamedTuple
 
 import numpy as np
+from scipy.integrate import solve_ivp
 from scipy.special import ndtr
 
 from mmsim.multi import Logistic, Market
@@ -112,3 +113,68 @@ def closed(m: Market, c: Chain) -> Policy:
         return m.quotes(n * m.z * vega / V0, tau)
 
     return policy
+
+
+@dataclass(frozen=True)
+class Reduced:
+    m: Market
+    vega: np.ndarray
+    eta: float
+    vbar: float
+    T: float
+    points: int = 801
+    rtol: float = 1e-8
+
+    @cached_property
+    def v(self) -> np.ndarray:
+        return np.linspace(-self.vbar, self.vbar, self.points)
+
+    @cached_property
+    def _legs(self):
+        v, tol = self.v, 1e-9 * self.vbar
+        legs = []
+        for f, z, V in zip(self.m.flow, self.m.z, self.vega, strict=True):
+            for side in (1, -1):
+                nxt = v + side * z * V
+                legs.append((f, z, nxt, np.abs(nxt) <= self.vbar + tol))
+        return legs
+
+    def rhs(self, w: np.ndarray) -> np.ndarray:
+        out = -self.m.gamma / 2 * (self.eta * self.v) ** 2
+        for f, z, nxt, ok in self._legs:
+            gap = (w - np.interp(nxt, self.v, w)) / z
+            out += np.where(ok, z * f.H(gap), 0.0)
+        return out
+
+    @cached_property
+    def _sol(self):
+        return solve_ivp(
+            lambda _, w: self.rhs(w),
+            (0, self.T),
+            np.zeros(self.points),
+            method="DOP853",
+            rtol=self.rtol,
+            atol=self.rtol * self.vbar,
+            dense_output=True,
+        )
+
+    def w(self, tau: float) -> np.ndarray:
+        return self._sol.sol(min(tau, self.T))
+
+    def value(self) -> float:
+        return float(np.interp(0.0, self.v, self.w(self.T)))
+
+    def quotes(self, tau: float, v) -> tuple[np.ndarray, np.ndarray]:
+        w = self.w(tau)
+        v = np.asarray(v, float)[..., None]
+        here = np.interp(v, self.v, w)
+        out = []
+        for side in (1, -1):
+            nxt = v + side * self.m.z * self.vega
+            gap = (here - np.interp(nxt, self.v, w)) / self.m.z
+            q = np.stack([f.delta(gap[..., i]) for i, f in enumerate(self.m.flow)], axis=-1)
+            out.append(np.where(np.abs(nxt) <= self.vbar, q, np.inf))
+        return out[0], out[1]
+
+    def policy(self, tau: float, n: np.ndarray, vega: np.ndarray):
+        return self.quotes(tau, (n * self.m.z * vega).sum(axis=-1))
