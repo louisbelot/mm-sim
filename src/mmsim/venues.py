@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
 
 from mmsim.amm import Pool
 from mmsim.avellaneda import reservation_price
+from mmsim.fees import Ewma, Regimes, Static
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,7 @@ class Quoter:
     gamma: float = 0.0
     tau: float = 1.0
     limit: float = 20.0
+    widen: bool = False
 
 
 @dataclass
@@ -53,21 +56,33 @@ class Session:
     mm: Ledger | None
     lvr: np.ndarray
     dropped: np.ndarray
+    fee: np.ndarray
+    spike: np.ndarray
+    lvr_spike: np.ndarray
 
 
 def run(
     market: Market,
     width: float,
     capital: float,
-    gamma: float,
+    gamma: float | Callable[[np.ndarray], np.ndarray],
     quoter: Quoter | None = None,
     *,
+    regimes: Regimes | None = None,
+    source: str = "market",
+    half_life: float = 1.0,
     paths: int = 200,
     seed: int = 0,
 ) -> Session:
+    if source not in ("true", "market", "pool"):
+        raise ValueError(f"unknown source {source!r}")
     rng = np.random.default_rng(seed)
     m = market
-    pool = Pool.around(m.P0, width, capital, gamma, paths)
+    rule = gamma if callable(gamma) else Static(gamma)
+    sig = np.full(paths, m.sigma)
+    est = Ewma(sig, half_life)
+    pool = Pool.around(m.P0, width, capital, 0.0, paths)
+    pool.gamma = rule(sig)
     v0 = pool.value(m.P0)
     lp = Ledger.empty(paths)
     mm = Ledger.empty(paths) if quoter else None
@@ -79,6 +94,11 @@ def run(
     t = np.zeros(paths)
     lvr = np.zeros(paths)
     dropped = np.zeros(paths)
+    fee_time = np.zeros(paths)
+    spike = np.zeros(paths)
+    lvr_spike = np.zeros(paths)
+    hot = np.zeros(paths, dtype=bool)
+    s_seen = pool.sp
     rate = m.lam + m.noise
     alive = np.ones(paths, dtype=bool)
 
@@ -89,9 +109,10 @@ def run(
         vol += np.abs(dx)
 
     def requote(mask):
-        r = reservation_price(P, q, quoter.tau, quoter.gamma, m.sigma * P)
-        bid[:] = np.where(mask, r * (1 - quoter.half), bid)
-        ask[:] = np.where(mask, r * (1 + quoter.half), ask)
+        r = reservation_price(P, q, quoter.tau, quoter.gamma, sig * P)
+        half = quoter.half * sig / m.sigma if quoter.widen else quoter.half
+        bid[:] = np.where(mask, r * (1 - half), bid)
+        ask[:] = np.where(mask, r * (1 + half), ask)
 
     def can_sell():
         return q - m.size >= -quoter.limit
@@ -115,14 +136,30 @@ def run(
         tau = np.minimum(rng.exponential(1 / rate, paths), m.hours - t)
         tau = np.where(alive, tau, 0.0)
         x, _ = pool.reserves()
-        lvr += pool.lvr_rate(P, m.sigma) * tau
-        dP = P * np.expm1(m.sigma * np.sqrt(tau) * rng.standard_normal(paths))
+        accrued = pool.lvr_rate(P, sig) * tau
+        lvr += accrued
+        lvr_spike += np.where(hot, accrued, 0.0)
+        spike += np.where(hot, tau, 0.0)
+        fee_time += pool.gamma * tau
+        dP = P * np.expm1(sig * np.sqrt(tau) * rng.standard_normal(paths))
         lp.inv += x * dP
         if mm:
             mm.inv += q * dP
+        P_old = P
         P = P + dP
         t = t + tau
         alive &= t < m.hours
+        if regimes:
+            flip = np.where(hot, regimes.down, regimes.up)
+            hot ^= rng.random(paths) < -np.expm1(-flip * tau)
+            sig = np.where(hot, regimes.spike * m.sigma, m.sigma)
+        if source == "market":
+            est.update(np.log(P / P_old), tau)
+        elif source == "pool":
+            est.update(2 * np.log(pool.sp / s_seen), tau)
+            s_seen = pool.sp
+        seen = sig if source == "true" else est.sigma
+        pool.gamma = np.where(alive, rule(seen), pool.gamma)
         block = alive & (rng.random(paths) < m.lam / rate)
         flow = alive & ~block
 
@@ -159,4 +196,5 @@ def run(
     lp.total[:] = pool.value(P) + pool.fees - v0
     if mm:
         mm.total[:] = cash + q * P
-    return Session(lp, mm, lvr, dropped)
+    fee = fee_time / m.hours
+    return Session(lp, mm, lvr, dropped, fee, spike / m.hours, lvr_spike)
