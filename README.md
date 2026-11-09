@@ -33,7 +33,8 @@ path, including arbitrageurs who pay a quoter's spread to hedge and the
 fixed-block correction that involves zeta(1/2), and pool fees that follow a
 volatility estimate through calm hours and spikes. The same comparison runs for
 prediction markets: Hanson's LMSR and a constant-product pool against a
-Glosten-Milgrom quoter. Last, a multi-asset market maker quotes correlated
+Glosten-Milgrom quoter and the liquidity-sensitive LMSR, with bettors who hold
+noisy signals. Last, a multi-asset market maker quotes correlated
 assets with the Bergault-Evangelista-Gueant-Vieira closed form, checked against
 the exact HJB on an inventory grid.
 
@@ -2195,6 +2196,92 @@ thinks twice as many makes 1.10, out of the noise traders' pockets (they pay
 3.13 instead of 2.73). The pool's loss is capped by b or F whatever the flow,
 which is Hanson's original reason for subsidizing a scoring rule.
 
+### Bettors with noisy signals
+
+Perfectly informed traders are the easy case. In `run(..., rho=...)` a bettor
+gets a private signal that matches the outcome with probability rho, takes the
+market price as the prior, and so believes in odds
+p/(1 - p) times (rho/(1 - rho))^(+-1). It buys one share of the side its signal
+points to if its belief beats the maker's quote for that share and otherwise
+stays out. Every maker now quotes both sides (`quote`) and takes a mask of who
+trades. With rho = 1 the old results come out unchanged to the last digit.
+
+Two exact results come out of this. To a Glosten-Milgrom quoter a buy from this
+flow has likelihood ratio (alpha rho + (1 - alpha)/2) / (alpha (1 - rho) + (1 - alpha)/2)
+= (1 + a)/(1 - a) with a = alpha (2 rho - 1), so the flow looks like a share a
+of perfectly informed traders, and the quoter that assumes a is the Bayes
+posterior on the public order flow. Bettors always trade with it, since their
+own ratio rho/(1 - rho) is larger. A quoter that assumes 2 rho - 1 or more has
+an ask above every bettor's belief and only noise trades with it (a test pins
+the cutoff). Second, every LMSR share moves the price 1/b in log odds, so if
+every bettor trades, the LMSR with b* = 1 / ln((1 + a)/(1 - a)) has exactly the
+quoter's price after every trade. Over 10,000 markets of 400 trades the
+largest gap is 1.7e-12. The quoter breaks even and the LMSR pays b* times the
+log-score gain for the same price.
+
+`LSLMSR` is the liquidity-sensitive LMSR of Othman, Pennock, Reeves and
+Sandholm (2010): C(q) = b(q) ln(sum_i e^(q_i / b(q))) with b(q) = alpha sum_i q_i
+and alpha = v / (n ln n). Differentiating gives
+
+```
+p_i = alpha ln S + (e^(q_i/b) sum_j q_j - sum_j q_j e^(q_j/b)) / (sum_j q_j S),   S = sum_j e^(q_j/b)
+```
+
+which the tests check against finite differences of C. C is homogeneous of
+degree one, so prices depend only on the proportions of q, depth grows with
+volume, and the prices add up to between 1 and 1 + v (exactly 1 + v at even
+odds): v is the most the maker can charge for a complete set. Since
+C(q) >= max_i q_i, the maker loses at most C(q0) - x = v x from a seed of x
+shares on each side. Seeding with x = b0 / (2 alpha) starts it at LMSR depth b0
+with the same worst case as that LMSR, b0 ln 2.
+
+`examples/signal_markets.py`: half the traders have a signal of accuracy 0.6,
+the rest trade at random, 400 trades, 10,000 markets, so a = 0.1 and
+b* = 4.98. A selection of the rows:
+
+| maker                       | subsidy | Brier  | log score | bettor P&L | noise P&L |
+| --------------------------- | ------- | ------ | --------- | ---------- | --------- |
+| quoter, assumes a           | 0.00    | 0.0180 | -0.062    | 3.17       | -3.17     |
+| quoter, assumes 0.5 a       | 3.49    | 0.0211 | -0.087    | 6.07       | -2.58     |
+| quoter, assumes 1.9 a       | -2.02   | 0.0194 | -0.080    | 1.63       | -3.65     |
+| LMSR b = 1.2                | -18.75  | 0.4426 | -inf      | -18.11     | -0.64     |
+| LMSR b = 2                  | 1.19    | 0.0202 | -0.097    | 3.11       | -1.92     |
+| LMSR b = b* = 4.98          | 3.14    | 0.0180 | -0.062    | 4.73       | -1.59     |
+| LMSR b = 15                 | 8.39    | 0.0291 | -0.134    | 9.49       | -1.10     |
+| FPMM F = 3                  | 2.49    | 0.0186 | -0.067    | 4.21       | -1.72     |
+| LS-LMSR v = 1%, b0 = 1.5    | 0.76    | 0.0182 | -0.063    | 2.99       | -2.23     |
+| LS-LMSR v = 1%, b0 = 2      | 1.08    | 0.0180 | -0.062    | 3.26       | -2.18     |
+| LS-LMSR v = 3%, b0 = 2      | 0.37    | 0.0228 | -0.098    | 3.58       | -3.21     |
+
+(Standard errors on the subsidy are 0.015 to 0.04.) The Bayes posterior on the
+public order flow scores 0.0180, and pooling every private signal would score
+0.0020: the noise traders hide most of what the bettors know, and no maker can
+get it back from the flow.
+
+Each pool traces a U. Below b* it overreacts and above it underreacts, and
+the minimum sits at the depth that matches the flow's likelihood ratio. LMSR
+b = 2 has the lowest mean |p - w| of the curves in the chart but a worse
+Brier score than b*, because the markets it gets wrong it gets wrong with
+confidence. Below about b = 1/(2 ln(rho/(1 - rho))) = 1.23 a bettor whose
+signal disagrees with an extreme price no longer finds one share worth its
+cost, while bettors who agree keep buying. The price runs to 0 or 1 within the
+first few trades (two thirds of markets are past 1% or 99% after 25 trades)
+and ends on the wrong side 44% of the time, an information cascade: the
+bettors lose 18 a market and the maker gains 18.75.
+
+The liquidity-sensitive LMSR with a 1% vig gets the Bayes score for a third of
+the LMSR's subsidy (1.08 against 3.14). Starting thin at b0 = 2 lets the first
+trades move the price fast, and by the end volume has deepened it to
+b0 + 400 alpha = 4.9, right at b*. The vig also takes 0.6 a market more from
+the noise traders than the LMSR at b* does. At 3% the vig is larger than
+a weak signal's edge near the end and the price stops short (Brier 0.023).
+The quoter is the cheapest maker when it knows a, and cheap but fragile when it
+does not: assuming 1.9 a it earns 2.02 and still scores within 8% of Bayes,
+but at 2 a it shuts out every bettor and the price is a random walk of noise
+trades (Brier 0.4376).
+
+![Bettors with noisy signals](docs/signal_markets.png)
+
 ## Multi-asset market making
 
 `multi.py` quotes d correlated assets at once, in the mean-variance version of
@@ -2445,7 +2532,7 @@ longest at 8 minutes here, `flow_lean.py` takes 6 and `tournament.py` 1.
 `amm_lvr.py` redraws the pool chart in a minute, `hedged_arb.py` and
 `prediction_markets.py` theirs in a few seconds, and `multi_asset.py` the
 multi-asset one in about two minutes. `dynamic_fees.py` runs 68 sessions of
-200 paths and takes under two minutes.
+200 paths and takes under two minutes, `signal_markets.py` about one.
 
 ## Notes
 
