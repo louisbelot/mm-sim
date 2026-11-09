@@ -57,7 +57,7 @@ class Pool:
         s_new = np.clip(s_new, self.sa, self.sb)
         dx = self.L * (1 / s_new - 1 / self.sp)
         dy = self.L * (s_new - self.sp)
-        fee = np.where(dy > 0, math.expm1(self.gamma), math.expm1(-self.gamma)) * dy
+        fee = np.where(dy > 0, np.expm1(self.gamma), np.expm1(-self.gamma)) * dy
         return dx, dy, fee
 
     def swap_to(self, s_new) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -71,9 +71,9 @@ class Pool:
         p = self.price
         g = self.gamma
         return np.where(
-            up > p * math.exp(g),
-            np.sqrt(up) * math.exp(-g / 2),
-            np.where(down < p * math.exp(-g), np.sqrt(down) * math.exp(g / 2), self.sp),
+            up > p * np.exp(g),
+            np.sqrt(up) * np.exp(-g / 2),
+            np.where(down < p * np.exp(-g), np.sqrt(down) * np.exp(g / 2), self.sp),
         )
 
     def buy_target(self, qty) -> tuple[np.ndarray, np.ndarray]:

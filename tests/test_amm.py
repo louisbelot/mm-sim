@@ -125,3 +125,16 @@ def test_hedge_cost_widens_the_no_trade_band():
         assert pool.arb_target(P, h) == pool.sp
     for P in (math.exp(0.031), math.exp(-0.031)):
         assert pool.arb_target(P, h) != pool.sp
+
+
+def test_per_path_fee_matches_separate_pools():
+    g = np.array([0.0005, 0.003, 0.02])
+    sp = np.sqrt([100.0, 101.0, 99.0])
+    pool = Pool(50.0, sp, 80.0, 150.0, g)
+    P = np.array([100.4, 98.7, 103.0])
+    dx, dy, fee = pool.swap_to(pool.arb_target(P))
+    for i in range(3):
+        one = Pool(50.0, sp[i : i + 1], 80.0, 150.0, float(g[i]))
+        want = one.swap_to(one.arb_target(P[i : i + 1]))
+        assert (dx[i], dy[i], fee[i]) == pytest.approx([w[0] for w in want], rel=1e-14)
+    assert pool.sp[2] == pytest.approx(math.sqrt(103.0) * math.exp(-0.01))
