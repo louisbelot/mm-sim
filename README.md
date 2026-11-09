@@ -29,8 +29,12 @@ and compared with the tuned inventory models, and every bot is stress-tested on
 volatility spikes, a thinning book and informed flow. Next to the book sits a
 concentrated-liquidity pool, with its loss-versus-rebalancing replicated in
 closed form and in simulation, and compared with a quoter on the same price
-path. The same comparison runs for prediction markets: Hanson's LMSR and a
-constant-product pool against a Glosten-Milgrom quoter.
+path, including arbitrageurs who pay a quoter's spread to hedge and the
+fixed-block correction that involves zeta(1/2). The same comparison runs for
+prediction markets: Hanson's LMSR and a constant-product pool against a
+Glosten-Milgrom quoter. Last, a multi-asset market maker quotes correlated
+assets with the Bergault-Evangelista-Gueant-Vieira closed form, checked against
+the exact HJB on an inventory grid.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -1980,6 +1984,73 @@ either way. The best tier sits below the quoter's half spread (5 bp against 15,
 spread the pool still gets a third of the flow, from the times its stale price
 is better than the market.
 
+### Arbitrageurs who hedge on a quoter
+
+The arbitrageur so far closes its position at a frictionless outside price. If
+it has to hedge on a quoter with half spread h, it sells what it took from the
+pool at P e^-h (or buys at P e^h), which makes it the frictionless arbitrageur
+against a shifted price. Its trigger widens to |z| > gamma + h, the chain is the
+same one with band gamma + h, and the closed forms carry over with the overshoot
+still exponential with rate zeta:
+
+```
+ARB   / V = sigma^2/8 * P_trade(gamma + h) * cosh((gamma - h)/2) / (1 - sigma^2 / (8 lambda))
+FEE   / V = lambda * P_trade(gamma + h) * sinh(gamma/2) * (e^(h/2)/(2 zeta - 1) + e^(-h/2)/(2 zeta + 1)) / 2
+QUOTE / V = lambda * P_trade(gamma + h) * sinh(h/2) * (e^(gamma/2)/(2 zeta - 1) + e^(-gamma/2)/(2 zeta + 1)) / 2
+```
+
+The pool's fee and the quoter's take are the same function with gamma and h
+swapped, since each is a proportional charge on one leg of the same trade. On a
+real swap the arbitrage profit, the fee and the quoter's edge over V match the
+per-block functions to 1e-14 and sum with the LP's edge to zero, the three
+rates match quad integrals over the stationary tails to 1e-8, and the simulated
+chain lands within 4 standard errors. `examples/hedged_arb.py`, an ETH-like
+market (60% a year, 12 s blocks, so sigma_b = 3.70 bp) and a 30 bp pool, rates
+over LVR:
+
+| h (bp) | band (bp) | P_trade | ARB   | FEE   | quoter | sum   | chain ARB, FEE, quoter |
+| ------ | --------- | ------- | ----- | ----- | ------ | ----- | ---------------------- |
+| 0      | 30        | 0.0802  | 0.080 | 0.920 | 0      | 1.000 | 0.080, 0.915, 0        |
+| 1      | 31        | 0.0779  | 0.078 | 0.892 | 0.030  | 1.000 |                        |
+| 2      | 32        | 0.0756  | 0.076 | 0.867 | 0.058  | 1.000 |                        |
+| 5      | 35        | 0.0696  | 0.070 | 0.798 | 0.133  | 1.000 | 0.069, 0.795, 0.132    |
+| 10     | 40        | 0.0614  | 0.061 | 0.704 | 0.235  | 1.000 |                        |
+| 20     | 50        | 0.0497  | 0.050 | 0.570 | 0.380  | 1.000 |                        |
+| 30     | 60        | 0.0418  | 0.042 | 0.479 | 0.479  | 1.000 | 0.042, 0.479, 0.479    |
+
+(The chain's FEE has a standard error of about 0.003.) With fast blocks the
+three shares add up to the LVR, so the hedge is paid almost entirely out of the
+LP's fees: a 5 bp quoter takes 13% of the LVR, the LP's fees drop from 92% to
+80%, and the arbitrageur's own share only goes from 8.0% to 7.0%. When the
+quoter's half spread equals the pool fee, the two split the LVR evenly.
+
+Nezlobin and Tassy (2025) solve the fixed-clock case with random-walk ladder
+height theory. In this repo's convention (their gamma is the width of the
+whole band, 2 gamma here) the trade probability and arbitrage profit are
+
+```
+P_trade ~ 1 / (eta + |zeta(1/2)| / sqrt(pi)),     ARB ~ LVR / (1 + sqrt(pi) eta / |zeta(1/2)|)
+```
+
+up to terms that vanish like e^(-c eta), so for wide bands fixed blocks leave
+the arbitrageurs |zeta(1/2)| / sqrt(pi) = 0.8239 of the Poisson amount, 17.6%
+less. That is the 16% the simulation above found from eta = 10 on. Against the
+exact fixed-block chain, 2000 chains:
+
+| eta | ARB Poisson exact | ARB fixed, formula | ARB fixed, chain | P_trade formula | P_trade chain |
+| --- | ----------------- | ------------------ | ---------------- | --------------- | ------------- |
+| 0.3 | 0.7692            | 0.7331             | 0.7383           | 0.8897          | 0.8350        |
+| 1   | 0.5000            | 0.4517             | 0.4527           | 0.5483          | 0.5494        |
+| 3   | 0.2500            | 0.2155             | 0.2167           | 0.2615          | 0.2621        |
+| 10  | 0.0909            | 0.0761             | 0.0773           | 0.0924          | 0.0937        |
+| 30  | 0.0323            | 0.0267             | 0.0266           | 0.0324          | 0.0323        |
+
+From eta = 1 on the formula is within 3 standard errors of the chain (the
+standard errors run from 0.0006 down to 0.0002). At eta = 0.3 the exponential
+error term is not small yet and the trade probability is 7% too high.
+
+![Hedged arbitrage and fixed blocks](docs/hedged_arb.png)
+
 ## Prediction markets: LMSR, a constant-product pool and a quoter
 
 `prediction.py` runs a binary event, a share that pays 1 if it happens, with
@@ -2037,6 +2108,99 @@ that thinks half as many traders are informed loses 1.94 a market. One that
 thinks twice as many makes 1.10, out of the noise traders' pockets (they pay
 3.13 instead of 2.73). The pool's loss is capped by b or F whatever the flow,
 which is Hanson's original reason for subsidizing a scoring rule.
+
+## Multi-asset market making
+
+`multi.py` quotes d correlated assets at once, in the mean-variance version of
+Gueant's multi-asset model. Reference prices are Brownian with covariance Sigma
+and drift mu, requests of size z_i arrive on each side of asset i at intensity
+Lambda_i(delta) for a quote delta away from the reference price, and the
+objective is expected P&L minus gamma/2 times the integral of q' Sigma q. The
+exact value function lives on a d-dimensional inventory grid, which is why
+Bergault, Evangelista, Gueant and Vieira (2021) replace each Hamiltonian
+H(p) = sup_delta Lambda(delta)(delta - p) by its second-order Taylor expansion
+at 0. The HJB then has a quadratic solution theta = -q'A q - q'B - C with
+
+```
+dA/dtau = gamma/2 Sigma - 2 A D A,    dB/dtau = -mu - 2 A D B,    D = diag(2 z_i H_i''(0))
+A(tau) = 1/2 D^-1/2 Ahat tanh(Ahat tau) D^-1/2,    Ahat = sqrt(gamma) (D^1/2 Sigma D^1/2)^1/2
+B(tau) = -D^-1/2 Ahat^-1 tanh(Ahat tau) D^1/2 mu
+```
+
+which costs one symmetric eigendecomposition. The bid on asset i is
+delta*_i(2(Aq)_i + z_i A_ii + B_i) and the ask delta*_i(-2(Aq)_i + z_i A_ii - B_i),
+where delta*(p) is the exact best quote for the Hamiltonian. Two intensity
+shapes are built in: exponential A e^(-k delta), and the logistic
+lambda / (1 + e^(alpha + beta delta)) the paper uses for RFQ markets. For the
+logistic both pieces are closed form through the Lambert W function:
+H(p) = (lambda/beta) W(e^-(1 + alpha + beta p)) and delta*(p) = p + (1 + W)/beta.
+
+Two checks come out of the algebra. With one asset the quotes are the
+Gueant-Lehalle-Fernandez-Tapia approximation (the test matches `glft.Model`
+at small gamma to 1e-5). And the inventory where bid and ask skews cancel,
+-A^-1 B / 2, is the Markowitz portfolio Sigma^-1 mu / gamma: the stationary
+equations say 2ADA = gamma/2 Sigma and 2ADB = -mu, so A^-1 B = -(gamma Sigma / 2)^-1 mu.
+
+`Exact` integrates the full HJB on the inventory grid with risk limits
+(DOP853). With exponential intensities and a common k the substitution
+v = e^(k theta) makes the HJB linear, and the grid solver matches scipy's
+`expm_multiply` on it to 1e-8. `Exact.evaluate(policy)` solves the linear
+backward equation of any quoting rule, which gives a strategy's expected
+objective with no Monte Carlo noise. Evaluating the optimal policy returns the
+HJB value, and the simulator's mean P&L, risk penalty and objective all land
+within 3 standard errors of the evaluated numbers.
+
+`examples/multi_asset.py` uses the two-asset example from the paper: sigma 1.2
+and 0.6 euros a root day, rho 0.5, drifts +0.1 and -0.1 euros a day,
+gamma 8e-6, logistic intensities with 30 requests a day, alpha 0.7 and
+beta 30 per euro, risk limits of 70,000 and 300,000 shares over 7 days. The
+paper draws request sizes from a gamma distribution; here every request is
+10,000 shares. Quotes at t = 0 (euros below or above the reference price):
+
+| q1      | q2      | bid 1 exact | closed form | ask 1 exact | closed form | bid 2 exact | closed form | ask 2 exact | closed form |
+| ------- | ------- | ----------- | ----------- | ----------- | ----------- | ----------- | ----------- | ----------- | ----------- |
+| 0       | 0       | 0.0198      | 0.0219      | 0.0848      | 0.0796      | 0.1019      | 0.0985      | -0.0034     | -0.0017     |
+| 20,000  | 0       | 0.0681      | 0.0653      | 0.0343      | 0.0344      | 0.1113      | 0.1069      | -0.0094     | -0.0072     |
+| -20,000 | 0       | -0.0169     | -0.0123     | 0.1398      | 0.1280      | 0.0925      | 0.0901      | 0.0030      | 0.0041      |
+| 0       | 80,000  | 0.0546      | 0.0515      | 0.0472      | 0.0475      | 0.2145      | 0.1922      | -0.0524     | -0.0466     |
+| 0       | -80,000 | -0.0068     | -0.0031     | 0.1218      | 0.1132      | 0.0125      | 0.0140      | 0.0796      | 0.0770      |
+
+A long position in asset 2 moves asset 1's bid further from the reference price
+(0.0198 to 0.0546) and its ask closer (0.0848 to 0.0472): with rho > 0, selling
+asset 1 also takes risk off. The drift
+shows up as a target of +23,148 shares of asset 1 and -57,870 of asset 2,
+which is Sigma^-1 mu / gamma to the share.
+
+The value of each strategy over the 7 days (expected P&L minus the risk
+penalty, from `evaluate`), where "independent" quotes each asset with the
+closed form using only its own variance:
+
+| rho  | drift | optimal | closed form | independent | closed form / optimal | independent / optimal | target q1 | target q2 |
+| ---- | ----- | ------- | ----------- | ----------- | --------------------- | --------------------- | --------- | --------- |
+| 0    | 0     | 33,732  | 33,696      | 33,696      | 0.9989                | 0.9989                | 0         | 0         |
+| 0.6  | 0     | 34,192  | 34,159      | 33,696      | 0.9990                | 0.9855                | 0         | 0         |
+| 0.9  | 0     | 35,097  | 35,070      | 33,696      | 0.9992                | 0.9601                | 0         | 0         |
+| -0.9 | 0.1   | 54,378  | 54,343      | 37,946      | 0.9994                | 0.6978                | -36,550   | -100,512  |
+| 0    | 0.1   | 48,017  | 47,978      | 47,978      | 0.9992                | 0.9992                | 8,681     | -34,722   |
+| 0.6  | 0.1   | 66,315  | 66,277      | 54,667      | 0.9994                | 0.8243                | 29,839    | -70,530   |
+| 0.8  | 0.1   | 94,753  | 94,345      | 56,896      | 0.9957                | 0.6005                | 62,693    | -135,031  |
+| 0.9  | 0.1   | 125,051 | 104,247     | 58,011      | 0.8336                | 0.4639                | 127,924   | -264,985  |
+| 0.95 | 0.1   | 143,538 | 28,450      | 58,568      | 0.1982                | 0.4080                | 258,191   | -525,285  |
+
+![Multi-asset market making](docs/multi_asset.png)
+
+The closed form keeps 99.9% of the optimal value at every correlation without
+drift, and with drift up to rho = 0.8. It fails where its Markowitz target
+leaves the risk limits: at rho = 0.9 it wants 128,000 shares of asset 1 against
+a limit of 70,000, keeps skewing towards a position it can never reach, and
+drops to 83% of optimal, then 20% at 0.95. The exact solution knows the limits
+and stops leaning near them. Quoting each asset on its own costs 4% without
+drift at |rho| = 0.9, because it cannot offset risk across the two books, and
+up to 60% with drift, because it never sees that long asset 1 and short asset 2
+hedge each other. A Monte Carlo run (rho 0.5 with drift, 2000 paths,
+dt = 0.001 day) agrees with `evaluate`: 60,519 (se 1,932) simulated against
+60,200 for the optimal policy, 60,550 against 60,161 for the closed form and
+53,179 (se 1,338) against 53,552 for independent quoting.
 
 ## Install
 
@@ -2172,6 +2336,18 @@ s = venues.run(venues.Market(), 0.2, 1e6, 0.003, quoter, paths=200, seed=31)
 s.lp.hedged.mean(), s.lvr.mean(), s.mm.hedged.mean()   # (288, 1294, 3762) dollars a day
 ```
 
+Several correlated assets at once, the closed-form quotes and an exact
+evaluation on the inventory grid:
+
+```python
+from mmsim.multi import Exact, Logistic, Market
+
+m = Market.of([1.2, 0.6], 0.5, Logistic(30, 0.7, 30), 8e-6, z=1e4, mu=[0.1, -0.1])
+m.quotes([20_000, 0])   # bids (0.0653, 0.1069), asks (0.0344, -0.0072)
+m.target()              # (23148, -57870), the Markowitz portfolio Sigma^-1 mu / gamma
+Exact(m, (7, 30), 7.0).evaluate(m.policy)[7, 30]   # 60161, against 60200 optimal
+```
+
 `python examples/as_replication.py`, `cst_sessions.py`, `glft_quotes.py`,
 `informed_flow.py`, `why_spreads.py`, `queue_value.py`, `latency_cost.py`,
 `hawkes_flow.py`, `flow_lean.py`, `tournament.py` and `itch_replay.py` redraw the
@@ -2180,8 +2356,9 @@ experiments run 1600 to 6800 sessions on all cores; `latency_cost.py` is the
 longest at 8 minutes here, `flow_lean.py` takes 6 and `tournament.py` 1.
 `rl_market_maker.py` trains the three PPO seeds and saves them under `data/`
 (14 minutes), and `stress.py` reads seed 0 from there (9 minutes).
-`amm_lvr.py` redraws the pool chart in a minute and `prediction_markets.py` the
-prediction-market one in a few seconds.
+`amm_lvr.py` redraws the pool chart in a minute, `hedged_arb.py` and
+`prediction_markets.py` theirs in a few seconds, and `multi_asset.py` the
+multi-asset one in about two minutes.
 
 ## Notes
 
