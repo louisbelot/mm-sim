@@ -9,7 +9,7 @@ from scipy.optimize import minimize_scalar
 from scipy.sparse.linalg import expm_multiply
 
 from mmsim.glft import Model
-from mmsim.multi import Exact, Exponential, Logistic, Market
+from mmsim.multi import Exact, Exponential, Logistic, Market, simulate
 
 RFQ = Logistic(30, 0.7, 30)
 PAIR = Market.of([1.2, 0.6], 0.5, RFQ, 8e-6, z=1e4, mu=[0.1, -0.1])
@@ -147,6 +147,18 @@ def test_optimal_beats_closed_form_beats_independent():
     flat = Market.of([1.2, 0.6], 0.0, RFQ, 8e-6, z=1e4)
     ex0 = Exact(flat, SMALL, 2.0)
     assert ex0.evaluate(flat.policy)[c] == ex0.evaluate(flat.independent().policy)[c]
+
+
+def test_simulation_agrees_with_policy_evaluation():
+    m = Market.of([1.2, 0.6], 0.5, RFQ, 8e-6, z=1e4, mu=[0.3, -0.3])
+    T = 1.0
+    target = Exact(m, SMALL, T).evaluate(m.policy)[SMALL]
+    neutral = Market(m.Sigma, m.flow, 0.0, m.z, m.mu)
+    pnl = Exact(neutral, SMALL, T).evaluate(m.policy)[SMALL]
+    run = simulate(m, m.policy, T, SMALL, dt=5e-4, paths=600, seed=3)
+    for x, want in ((run.objective, target), (run.pnl, pnl), (run.penalty, pnl - target)):
+        assert abs(x.mean() - want) < 3 * x.std() / math.sqrt(len(x))
+    assert np.all(np.abs(run.n) <= SMALL)
 
 
 @pytest.mark.parametrize("rho", [-0.9, 0.0, 0.5, 0.95])

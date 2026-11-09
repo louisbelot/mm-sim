@@ -223,3 +223,49 @@ class Exact:
             bid[:, i] = np.where(n[:, i] < N[i], f.delta((at - up) / z), np.nan)
             ask[:, i] = np.where(n[:, i] > -N[i], f.delta((at - dn) / z), np.nan)
         return bid, ask
+
+
+@dataclass(frozen=True)
+class Run:
+    pnl: np.ndarray
+    penalty: np.ndarray
+    fills: np.ndarray
+    n: np.ndarray
+
+    @property
+    def objective(self) -> np.ndarray:
+        return self.pnl - self.penalty
+
+
+def simulate(
+    m: Market,
+    policy: Policy,
+    T: float,
+    N,
+    *,
+    dt: float,
+    paths: int,
+    seed: int = 0,
+) -> Run:
+    rng = np.random.default_rng(seed)
+    d = m.d
+    N = np.broadcast_to(np.asarray(N), (d,))
+    L = np.linalg.cholesky(m.Sigma)
+    n = np.zeros((paths, d), dtype=int)
+    pnl, penalty = np.zeros(paths), np.zeros(paths)
+    fills = np.zeros((paths, d), dtype=int)
+    steps = round(T / dt)
+    for s in range(steps):
+        bid, ask = policy(T - s * dt, n)
+        q = n * m.z
+        penalty += m.gamma / 2 * np.einsum("pi,ij,pj->p", q, m.Sigma, q) * dt
+        dS = m.mu * dt + math.sqrt(dt) * rng.standard_normal((paths, d)) @ L.T
+        pnl += (q * dS).sum(axis=1)
+        u = rng.random((2, paths, d))
+        for side, quote, room in ((1, bid, n < N), (-1, ask, n > -N)):
+            rate = np.stack([f.rate(quote[:, i]) for i, f in enumerate(m.flow)], axis=1)
+            hit = room & (u[(1 - side) // 2] < -np.expm1(-rate * dt))
+            pnl += np.where(hit, m.z * quote, 0.0).sum(axis=1)
+            n += side * hit
+            fills += hit
+    return Run(pnl, penalty, fills, n)
