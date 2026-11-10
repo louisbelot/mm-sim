@@ -10,7 +10,7 @@ from scipy.optimize import least_squares
 from .accounting import Fill
 from .book import OrderType, Side
 from .flow import ZeroIntelligence
-from .sim import Agent, Context, Simulator
+from .sim import Agent, Context, Print, Simulator
 from .tournament import Entrants, Result, result
 
 
@@ -100,6 +100,101 @@ class Executor(Agent):
             ctx.submit(self.side, 0, qty, kind=OrderType.MARKET)
         self._k += 1
         self._arm(ctx)
+
+    def _arm(self, ctx: Context) -> None:
+        if self._k < len(self.times):
+            ctx.set_timer(max(self._t0 + self.times[self._k] - ctx.t, 0.0))
+
+
+def scatter(X: int, T: float, N: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    if not 1 <= N <= X:
+        raise ValueError("need between 1 and X slices")
+    times = np.sort(rng.uniform(0.0, T, N))
+    done = np.append(np.sort(rng.choice(np.arange(1, X), N - 1, replace=False)), X)
+    return times, done
+
+
+class Pov(Agent):
+    def __init__(self, side: Side, qty: int, rate: float, start: float = 0.0) -> None:
+        if not 0.0 < rate < 1.0:
+            raise ValueError("participation has to be between 0 and 1")
+        self.side = side
+        self.qty = qty
+        self.rate = rate
+        self.start = start
+        self.arrival = math.nan
+        self._seen = -1
+
+    def on_start(self, ctx: Context) -> None:
+        ctx.set_timer(self.start)
+
+    def on_timer(self, ctx: Context) -> None:
+        self.arrival = ctx.mark()
+        self._seen = 0
+
+    def on_trade(self, ctx: Context, p: Print) -> None:
+        if self._seen < 0:
+            return
+        self._seen += p.qty
+        own = abs(ctx.position)
+        want = min(self.qty, math.floor(self.rate / (1.0 - self.rate) * (self._seen - own)))
+        if want > own:
+            ctx.submit(self.side, 0, want - own, kind=OrderType.MARKET)
+
+
+class Passive(Agent):
+    def __init__(
+        self, side: Side, times: Sequence[float], done: Sequence[int], slack: int = 0
+    ) -> None:
+        self.side = side
+        self.times = list(times)
+        self.done = list(done)
+        self.slack = slack
+        self.arrival = math.nan
+        self._oid: int | None = None
+        self._t0 = 0.0
+        self._k = 0
+
+    def on_start(self, ctx: Context) -> None:
+        self._t0 = ctx.t
+        self._arm(ctx)
+
+    def on_timer(self, ctx: Context) -> None:
+        if math.isnan(self.arrival):
+            self.arrival = ctx.mark()
+        if self._oid is not None:
+            ctx.cancel(self._oid)
+            self._oid = None
+        last = self._k == len(self.times) - 1
+        behind = self.done[self._k] - abs(ctx.position) - (0 if last else self.slack)
+        if behind > 0:
+            ctx.submit(self.side, 0, behind, kind=OrderType.MARKET)
+        if not last:
+            self._post(ctx, self.done[self._k + 1] - abs(ctx.position))
+        elif abs(ctx.position) < self.done[-1]:
+            ctx.set_timer(0.1)
+            return
+        self._k += 1
+        self._arm(ctx)
+
+    def on_book(self, ctx: Context) -> None:
+        o = None if self._oid is None else ctx.orders.get(self._oid)
+        if o is None:
+            return
+        touch = self._touch(ctx)
+        if touch is None:
+            return
+        if touch > o.price if self.side == Side.BUY else touch < o.price:
+            qty = o.qty
+            ctx.cancel(self._oid)
+            self._post(ctx, qty)
+
+    def _touch(self, ctx: Context) -> int | None:
+        return ctx.bid if self.side == Side.BUY else ctx.ask
+
+    def _post(self, ctx: Context, qty: int) -> None:
+        touch = self._touch(ctx)
+        self._oid = None if qty <= 0 or touch is None else ctx.submit(self.side, touch, qty)
 
     def _arm(self, ctx: Context) -> None:
         if self._k < len(self.times):

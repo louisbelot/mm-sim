@@ -12,6 +12,7 @@ from mmsim.flow import (
     CSTParams,
     HawkesFlow,
     RegimeFlow,
+    Resilient,
     ZeroIntelligence,
     prob_fill_first,
     prob_mid_up,
@@ -214,6 +215,57 @@ def test_regime_flow_switches_market_rate_on_time():
         want = 2 * mu * 200
         assert abs(n - want) < 4 * want**0.5
     assert flow.params == fast and flow.t == pytest.approx(sim.t)
+
+
+def anchored(c, sigma, seed, minutes, shift=0.0):
+    flow = Resilient(SKY, c, sigma)
+    rec = Prints()
+    sim = Simulator(flow, [rec], seed=seed, record_every=None)
+    sim.seed(10_000, 10_001)
+    flow.value += shift
+    sim.run(minutes)
+    return flow, sim, rec
+
+
+def test_resilient_without_pull_is_zero_intelligence():
+    a = Simulator(ZeroIntelligence(SKY), seed=3)
+    b = Simulator(Resilient(SKY, 0.0), seed=3)
+    for sim in (a, b):
+        sim.seed(10_000, 10_001)
+        sim.warm_up(50.0)
+    assert a.tape.t == b.tape.t and a.tape.mid == b.tape.mid
+
+
+def test_resilient_market_rates_split_by_the_gap():
+    flow, sim, _ = anchored(0.7, 0.0, 1, 5.0)
+    g = flow.gap()
+    assert g == sim.book.mid() - 10_000.5
+    buy, sell = flow._market_rate(Side.BUY), flow._market_rate(Side.SELL)
+    assert buy + sell == pytest.approx(2 * MU)
+    assert (sell - buy) / (sell + buy) == pytest.approx(math.tanh(0.7 * g))
+
+
+def test_resilient_pulls_the_mid_to_the_value():
+    gaps, rises = [], []
+    for seed in range(8):
+        flow, sim, _ = anchored(0.5, 0.0, seed, 60.0, shift=8.0)
+        gaps.append(sim.book.mid() - flow.value)
+        rises.append(sim.book.mid() - 10_000.5)
+    assert abs(np.mean(gaps)) < 2.0
+    assert np.mean(rises) > 6.0
+
+
+def test_resilient_value_is_brownian_and_keeps_the_print_rate():
+    moves, gaps, prints = [], [], []
+    for seed in range(30):
+        flow, sim, rec = anchored(0.5, 1.0, seed, 100.0)
+        moves.append(flow.value - 10_000.5)
+        gaps.append(sim.book.mid() - flow.value)
+        prints.append(len(rec.t))
+    assert 0.6 < np.var(moves) / 100.0 < 1.5
+    assert np.std(gaps) < 5.0 < np.std(moves)
+    want = 2 * MU * 100.0 * 30
+    assert abs(sum(prints) - want) < 4 * want**0.5
 
 
 def test_scale_and_schedule_checks():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 from bisect import bisect_right
 from collections.abc import Callable, Iterator, Sequence
@@ -190,6 +191,56 @@ class HawkesFlow(ZeroIntelligence):
                 self._s[:, side] += self.hawkes.alpha[:, side]
                 self.markets.append((self.t, side))
             return elapsed, self._fire(actions[k], rng, ids)
+
+
+class Resilient(ZeroIntelligence):
+    def __init__(self, params: CSTParams, c: float, sigma: float = 0.0, owner: int = 0) -> None:
+        super().__init__(params, owner)
+        self.c = c
+        self.sigma = sigma
+        self.value = math.nan
+
+    def seed(self, book: Book, bid: int, ask: int, ids: Iterator[int]) -> None:
+        super().seed(book, bid, ask, ids)
+        self.value = (bid + ask) / 2
+
+    def gap(self) -> float:
+        return (self._bid + self._ask) / 2 - self.value
+
+    def _market_rate(self, side: Side) -> float:
+        s = math.tanh(self.c * self.gap())
+        return self.params.mu * (1.0 - s if side == Side.BUY else 1.0 + s)
+
+    def step(
+        self, book: Book, rng: random.Random, horizon: float, ids: Iterator[int]
+    ) -> tuple[float, Callable[[Book], list[Event]]] | None:
+        if self.sigma == 0.0:
+            return super().step(book, rng, horizon, ids)
+        actions, weights = self._menu(book)
+        markets = [k for k, (kind, _) in enumerate(actions) if kind == _MARKET]
+        for k in markets:
+            weights[k] = 2.0 * self.params.mu
+        bound = sum(weights)
+        elapsed = 0.0
+        while True:
+            dt = rng.expovariate(bound)
+            if elapsed + dt > horizon:
+                self._diffuse(rng, horizon - elapsed)
+                return None
+            self._diffuse(rng, dt)
+            elapsed += dt
+            for k in markets:
+                weights[k] = self._market_rate(actions[k][1])
+            cum = list(accumulate(weights))
+            u = rng.random() * bound
+            if u < cum[-1]:
+                k = bisect_right(cum, u, 0, len(cum) - 1)
+                return elapsed, self._fire(actions[k], rng, ids)
+            for k in markets:
+                weights[k] = 2.0 * self.params.mu
+
+    def _diffuse(self, rng: random.Random, dt: float) -> None:
+        self.value += self.sigma * math.sqrt(dt) * rng.gauss(0.0, 1.0)
 
 
 def prob_mid_up(a: int, b: int, lam: float, mu: float, theta: float, n_max: int = 100) -> float:
