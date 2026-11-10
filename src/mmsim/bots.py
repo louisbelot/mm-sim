@@ -8,6 +8,7 @@ import numpy as np
 from . import alpha, avellaneda, glft
 from .accounting import Fill
 from .book import Side
+from .detect import Filter
 from .hawkes import Hawkes, Tracker
 from .markout import Tape
 from .sim import Agent, Context, Print
@@ -41,6 +42,19 @@ class FlowLean:
 
     def lean(self, ctx: Context) -> float:
         return self.shift(ctx.t)
+
+
+class RegimeLean:
+    def __init__(self, filt: Filter, shift: float) -> None:
+        self.filter = filt
+        self.shift = shift
+
+    def observe(self, p: Print) -> None:
+        self.filter.observe(p.t, p.side, p.qty)
+
+    def lean(self, ctx: Context) -> float:
+        p = self.filter.at(ctx.t)
+        return self.shift * float(p[1] - p[2])
 
 
 class Signal(Protocol):
