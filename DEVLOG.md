@@ -1912,3 +1912,93 @@ is also as easy to see as it can be (one share at fixed intervals).
 Next: executors that hide (random sizes and timing, passive child orders) and a
 book whose impact decays after the order ends, then toxic informed bursts run
 through the same filter.
+
+## 2026-11-10: Executors that hide, a book that forgets, and toxic bursts
+
+Built:
+
+- `flow.Resilient`: zero-intelligence flow with a value V (Brownian, sigma per
+  square-root minute) and market orders split by the gap g = mid - V, buys at
+  mu (1 - tanh(c g)) and sells at mu (1 + tanh(c g)).
+- `execution.scatter` (random child sizes and times), `Pov` (participation of
+  volume with market orders) and `Passive` (rests at the touch, re-pegs,
+  crosses only past a slack, retries at the deadline until done).
+- `Context.mark` falls back to the last mid on the tape when the others' quote
+  is one-sided and nothing was marked yet.
+- `detect.toxic`, a two-state filter on the total print rate, and a fix for
+  long silences in `Filter`.
+- `informed.Bursty`, an informed trader switched on and off by a two-state
+  Markov chain; `InformedTrader._trade` split out for it.
+- `bots.Widen` and a `widen` option on `Quoter` and `GLFT`.
+- `examples/stealth.py` with `docs/stealth.png`, `examples/toxic_bursts.py`
+  with `docs/toxic_bursts.png`.
+
+Design notes:
+
+- The total market order rate in `Resilient` is 2 mu whatever the gap, so the
+  event clock does not depend on V. With sigma = 0 the parent's one-shot menu
+  is exact. With sigma > 0 the step thins against 2 mu per present side and
+  moves V by an exact Brownian increment at each candidate time, so the side
+  probabilities are evaluated at the true V. With c = 0 the tape is identical
+  to the plain flow on the same seed.
+- Decay rate: linearizing gives 2 c mu lambda (0.269 for c = 0.5 with the
+  plain book's lambda 0.286). tanh saturates, and the ensemble response is the
+  slope averaged over the stationary gap: 2 c mu lambda E[sech^2(c g)] = 0.132
+  with gap sd 3.11. The fit from one minute on gives 0.116.
+- `Pov` counts others' volume as everything printed since it started minus its
+  own position. With zero latency its position already includes the fill from
+  the print being processed, so there is no feedback from its own trades.
+- `Passive` re-pegs when someone else improves the touch. Bug found in review:
+  it read the live order's size after cancelling it, which the instant cancel
+  had already zeroed, so every re-peg silently dropped the order. The test that
+  caught it checks position + resting size == done[k] between slices.
+- The deadline retry exists because a 14-share catch-up order emptied the ask
+  in one test and ended two shares short.
+- `Filter.at` computed exp(w dt) for eigenvalues near -2 mu; after about 370
+  silent minutes both weights underflow and the posterior is 0/0. Subtracting
+  the largest eigenvalue first changes nothing after normalization.
+- `Bursty` keeps one timer: the next trade or the next switch, whichever comes
+  first, redrawing the trade time after each event (memoryless). The flag
+  `_switching` records which one was armed, so no float comparison of times.
+- Mark fallback: a POV starting at a moment when one side was empty got a NaN
+  arrival in 1 of 1000 resilient sessions and turned the whole row to NaN.
+
+Checks:
+
+- Resilient: c = 0 replays the plain tape; rates sum to 2 mu and split by
+  tanh(c g); a value 8 ticks above the mid pulls it there within an hour (mean
+  gap under 2 over 8 seeds); with sigma = 1 the value's variance over 100
+  minutes is within 0.6 to 1.5 of sigma^2 t over 30 seeds, the gap stays below
+  5 ticks sd and the print count matches 2 mu t within 4 sd.
+- scatter shapes and bounds; POV's cumulative fills equal min(qty,
+  floor(rate / (1 - rate) * others)) at every fill; Passive rests at the best
+  bid at every check, keeps the invariant above, and only crosses at the
+  deadline when the slack is large; a seller crosses exactly what it is behind.
+- toxic equals the likelihood ratio without switching; survives 1e4 silent
+  minutes. Bursty trades only inside its bursts, spends 25% of the time active
+  for on 0.1 and off 0.3 (within 5 points over 6 seeds of 400 minutes) and
+  trades at rate times active time within 4 sd. Widen moves both quotes out by
+  round(ticks * P) and follows the posterior.
+
+Results (ticks):
+
+- Impulse per share after a 2-share buy at 32 minutes: 0.257 plain, 0.006
+  resilient. Half-life of the slow part 6.0 minutes.
+- 20 shares in 20 minutes, 1000 sessions, cost a share and found: plain even
+  3.64 (98%), random 4.15 (100%), POV 40% 4.08 (99%), passive 5.02 (58%);
+  resilient 2.05 (69%), 2.75 (86%), 2.81 (76%), 2.68 (41%). False alarms
+  before the order: 1.2% plain, 9.3% resilient.
+- Passive moves the price more than crossing: the mid ends 8.92 above arrival
+  against 6.17 for even slices on the plain book.
+- Lean gain for GLFT (filter minus none, same seeds): plain -1.47 with no
+  executor, 5.20 to 9.50 with one; resilient 7.81 with none, 2.74 to 6.08 with
+  an aggressive executor, 10.82 with the passive one. Plain GLFT loses 17.8 a
+  session on the resilient book with no executor at all, because value-driven
+  market orders carry information.
+- Toxic bursts, 2500 bursts: print-rate filter flags 68% (median 2.25 minutes),
+  side filter 69% (2.00). GLFT 9.23, lean 17.73, widen 8.39, both 13.48.
+  Widening halves adverse selection but costs more spread than it saves.
+
+Next: break down the passive case on the resilient book (why GLFT loses most
+there), paired reaction at the touch for the queue-reactive book, and a
+second-order filter that uses inter-print times for the executor's regularity.
