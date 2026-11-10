@@ -57,6 +57,18 @@ class RegimeLean:
         return self.shift * float(p[1] - p[2])
 
 
+class Widen:
+    def __init__(self, filt: Filter, ticks: float) -> None:
+        self.filter = filt
+        self.ticks = ticks
+
+    def observe(self, p: Print) -> None:
+        self.filter.observe(p.t, 0, p.qty)
+
+    def width(self, ctx: Context) -> int:
+        return round(self.ticks * float(self.filter.at(ctx.t)[1]))
+
+
 class Signal(Protocol):
     def lean(self, ctx: Context) -> float: ...
 
@@ -71,12 +83,14 @@ class Quoter(Agent):
         keep: int = 0,
         signal: Signal | None = None,
         inside: bool = True,
+        widen: Widen | None = None,
     ) -> None:
         self.size = size
         self.max_position = max_position
         self.keep = keep
         self.signal = signal
         self.inside = inside
+        self.widen = widen
         self._oids: dict[Side, int | None] = {Side.BUY: None, Side.SELL: None}
 
     def targets(self, ctx: Context) -> tuple[int | None, int | None]:
@@ -91,6 +105,8 @@ class Quoter(Agent):
     def on_trade(self, ctx: Context, p: Print) -> None:
         if self.signal is not None:
             self.signal.observe(p)
+        if self.widen is not None:
+            self.widen.observe(p)
 
     def on_start(self, ctx: Context) -> None:
         self.requote(ctx)
@@ -103,6 +119,10 @@ class Quoter(Agent):
 
     def requote(self, ctx: Context) -> None:
         bid, ask = self.targets(ctx)
+        if self.widen is not None:
+            w = self.widen.width(ctx)
+            bid = None if bid is None else bid - w
+            ask = None if ask is None else ask + w
         if not self.inside:
             if bid is not None and ctx.bid is not None:
                 bid = min(bid, ctx.bid)
@@ -189,8 +209,9 @@ class GLFT(Quoter):
         keep: int = 0,
         signal: Signal | None = None,
         inside: bool = True,
+        widen: Widen | None = None,
     ) -> None:
-        super().__init__(size, model.Q * size, keep, signal, inside)
+        super().__init__(size, model.Q * size, keep, signal, inside, widen)
         self.model = model
         self.bids, self.asks = model.quotes(math.inf)
 

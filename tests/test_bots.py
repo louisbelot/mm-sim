@@ -7,10 +7,11 @@ from scripted import limit, make, market
 
 from mmsim.alpha import Solution
 from mmsim.book import Side
-from mmsim.bots import GLFT, AlphaTouch, AvellanedaStoikov, Quoter, SymmetricQuoter
+from mmsim.bots import GLFT, AlphaTouch, AvellanedaStoikov, Quoter, SymmetricQuoter, Widen
+from mmsim.detect import Filter
 from mmsim.flow import CSTParams, ZeroIntelligence
 from mmsim.glft import Model
-from mmsim.sim import Simulator
+from mmsim.sim import Print, Simulator
 
 
 def quotes(ctx):
@@ -230,3 +231,27 @@ def test_alpha_touch_counts_inventory_in_lots():
     ctx = sim.contexts[0]
     assert ctx.position == 2
     assert quotes(ctx) == [(Side.SELL, 102)]
+
+
+def widened(widen=None):
+    bot = GLFT(Model(1.0, 2.1, 3.6, 0.08, 5), widen=widen)
+    sim = Simulator(ZeroIntelligence(CSTParams.sky_perfect()), [bot], seed=1)
+    sim.seed(10_000, 10_001)
+    sim.run(0.0)
+    return sorted(o.price for o in sim.contexts[0].orders.values())
+
+
+def test_widen_moves_both_quotes_out():
+    sure = Filter(np.zeros((2, 2)), [[1.0], [2.0]], p0=[0.0, 1.0], t=0.0)
+    calm = Filter(np.zeros((2, 2)), [[1.0], [2.0]], p0=[1.0, 0.0], t=0.0)
+    bid, ask = widened()
+    assert widened(Widen(sure, 2.0)) == [bid - 2, ask + 2]
+    assert widened(Widen(calm, 2.0)) == [bid, ask]
+
+
+def test_widen_scales_with_the_posterior():
+    w = Widen(Filter(np.zeros((2, 2)), [[1.0], [3.0]], p0=[0.6, 0.4], t=0.0), 3.0)
+    ctx = SimpleNamespace(t=0.0)
+    assert w.width(ctx) == 1
+    w.observe(Print(0.0, Side.SELL, 10_000, 3))
+    assert w.width(ctx) == 3
