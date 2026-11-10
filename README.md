@@ -2888,6 +2888,184 @@ some of this back.
 
 ![Execution algorithms against market makers](docs/execution.png)
 
+### Executors that hide, and a book that forgets
+
+The executor above is as easy to see as an executor can be: one share at fixed
+intervals, every one a market order. `execution.py` has three ways to look less
+obvious, and `flow.Resilient` is a book where impact decays, so following the
+flow can go wrong after the order ends.
+
+**Hiding.** `scatter` splits X shares into N child orders of random size at
+uniform random times (sorted, every child at least one share). `Pov` follows a
+participation rate: after every print it buys up to rate / (1 - rate) times the
+volume the others traded since it started, so its share of all volume is the
+rate. It counts the others' volume as everything printed minus its own
+position, which keeps its own prints from feeding back into the target.
+`Passive` works a schedule with limit orders: at each slice it rests at the
+others' best bid (for a buyer) for whatever the next slice needs, re-pegs when
+someone improves the price, crosses only when it is more than `slack` shares
+behind, and at the deadline takes the rest, retrying every 0.1 minutes if the
+opposite side runs dry. A test caught that last case: a 14-share market order
+emptied a thin ask and the first version ended two shares short.
+
+**Resilience.** In the zero-intelligence book, impact is permanent because every
+order is placed relative to the opposite best quote. `Resilient` adds a value V
+(a Brownian motion with volatility sigma, started at the seed mid) and tilts
+the side of market orders by the gap g = mid - V:
+
+    buy rate  = mu (1 - tanh(c g))
+    sell rate = mu (1 + tanh(c g))
+
+The total stays 2 mu, so the clock of market orders does not depend on V. With
+sigma = 0 the menu is exact between events. With sigma > 0 the sampler thins
+against a bound of 2 mu per side and moves V by an exact Brownian increment at
+every candidate time, so the rates are always evaluated at the true V. With
+c = 0 it replays the plain flow event for event (a test checks the tape).
+
+Linearizing, the net buy rate is about -2 mu c g, and with permanent impact
+lambda per share the gap decays at rate 2 c mu lambda. That overstates it,
+because tanh saturates when the gap is already wide. Averaging the slope over
+the stationary gap gives 2 c mu lambda E[sech^2(c g)]: with c = 0.5 and sigma
+= 1 the gap has sd 3.1 ticks, E[sech^2] is 0.49 and the predicted rate is 0.132
+a minute (the linearized rate is 0.269). The fit to the measured response from
+one minute on gives 0.116 (half-life 6.0 minutes):
+
+| minutes after a 2-share buy | 0 | 0.5 | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|---|---|
+| ask, plain book | 0.556 | 0.324 | 0.288 | 0.286 | 0.262 | 0.262 | 0.241 | 0.257 |
+| ask, resilient book | 0.537 | 0.306 | 0.284 | 0.224 | 0.197 | 0.147 | 0.082 | 0.006 |
+
+(per share, 2000 paired runs each). The first minute is the same in both
+books: the queue refill that gives back half of the jump does not care about V.
+
+**20 shares in 20 minutes, no market maker.** 1000 sessions per row, buyers and
+sellers alternating, the same three-state filter as above watching the tape.
+"Taken" is shares bought with market orders, "end" is where the mid sits at the
+end of the hour against the arrival mid, "found" is the share of sessions where
+the posterior on the executor's side passes one half during the window:
+
+| book | style | cost a share | taken | end | found | median delay |
+|---|---|---|---|---|---|---|
+| plain | even | 3.64 (0.09) | 20.0 | 6.17 | 98% | 6.8 |
+| plain | random | 4.15 (0.09) | 20.0 | 6.70 | 100% | 5.5 |
+| plain | POV 40% | 4.08 (0.09) | 20.0 | 6.25 | 99% | 4.8 |
+| plain | passive | 5.02 (0.09) | 10.7 | 8.92 | 58% | 11.8 |
+| resilient | even | 2.05 (0.08) | 20.0 | 0.31 | 69% | 3.5 |
+| resilient | random | 2.75 (0.08) | 20.0 | 0.14 | 86% | 4.2 |
+| resilient | POV 40% | 2.81 (0.08) | 20.0 | 0.49 | 76% | 3.5 |
+| resilient | passive | 2.68 (0.09) | 6.3 | 0.84 | 41% | 4.0 |
+
+Random timing does not hide anything from this filter. It counts prints, and a
+Poisson count does not care when they arrive; the random sizes only make the
+children bigger, so they walk the book further and cost half a tick more.
+POV is found fastest for a plainer reason: at 40% it buys about 1.25 shares a
+minute and is done in 16.1 minutes, a faster rate than the even schedule.
+
+Resting on the bid is the only style that hides (58% found, and late), and in
+this book it costs the most. It fills 9.3 of the 20 shares passively on the
+plain book; the rest goes through catch-up market orders near the deadline.
+The resting order also moves the price: sells that hit it do not eat into the
+others' bid, so the mid drifts up while the buyer waits, and it ends the hour
+8.92 ticks above arrival against 6.17 for even slices. Every share bought, at
+the bid or at the ask, is one less share sold into the book. A first version
+of the re-peg read the order's size after cancelling it (zero by then) and
+quietly dropped the order; an invariant test now checks that position plus
+resting size always equals the current slice target.
+
+On the resilient book everything costs less (impact from the first slices has
+partly decayed by the time the last ones go), the price ends where it started,
+and the executor is harder to see: the value traders sell into its buying, so
+the net imbalance the filter looks for is smaller. The flip side is a filter
+that cries wolf more: its posterior is over one half 9.3% of the time before
+any executor shows up, against 1.2% on the plain book, because flow that
+corrects a gap is itself one-sided for a while.
+
+**What it does to a GLFT maker.** Score as before (P&L minus the exposure and
+terminal penalties), 1000 sessions per cell, difference between GLFT with and
+without the filter's lean (1 tick at certainty) on the same seeds:
+
+| executor | plain: GLFT | plain: lean gain | resilient: GLFT | resilient: lean gain |
+|---|---|---|---|---|
+| none | 9.56 (0.35) | -1.47 (0.48) | -17.82 (0.64) | 7.81 (0.79) |
+| even | 4.77 (0.49) | 6.18 (0.83) | -13.88 (0.63) | 6.08 (0.86) |
+| random | -0.21 (0.55) | 8.66 (0.86) | -17.79 (0.68) | 2.74 (0.88) |
+| POV 40% | 0.34 (0.57) | 9.50 (0.87) | -14.87 (0.69) | 5.81 (0.92) |
+| passive | 2.14 (0.49) | 5.20 (0.75) | -19.72 (0.71) | 10.82 (0.85) |
+
+The resilient book is a harder market for a maker even with nobody executing:
+market orders now lean toward V, so they carry information, and plain GLFT
+loses 17.8 a session to them. The flow filter picks that up too (+7.81 with no
+executor). What changes is the value of leaning with an executor. On the plain
+book an executor turns the lean from a small loss into a 6 to 9.5 tick gain,
+because the price it pushes stays pushed. On the resilient book the aggressive executors add nothing to the lean and the
+random-size one takes 5 ticks off it (2.74 against 7.81): the maker gets long
+behind the buyer and the impact it leaned on is given back. The passive buyer
+is the exception: plain GLFT does worst against it (-19.72) and the lean is
+worth the most (+10.82). The attribution of that case is not broken down yet.
+
+![Hidden executors on a plain and a resilient book](docs/stealth.png)
+
+## Toxic bursts
+
+The informed traders so far trade at a steady rate. Real toxic flow arrives in
+bursts: someone learns something, trades on it for a while, and stops.
+`informed.Bursty` is an informed trader that a two-state Markov chain switches
+on (rate `on`, from quiet) and off (rate `off`, from active). While on, it
+trades like `InformedTrader`: market orders at rate `rate` whenever the value
+is outside the quotes. Its timer is either the next trade or the next switch,
+whichever comes first, and a fresh trade time is drawn after each one, which
+is exact because the exponential has no memory. `switches` keeps the switch
+times for scoring.
+
+Two filters look for the bursts. `detect.toxic` watches only the total print
+rate (2 mu quiet, 2 mu + r in a burst); the three-state `one_sided` filter
+from the executor section also uses the side. A quoter can use either one. A
+lean shifts its fair value by P(buyer) - P(seller); `bots.Widen` instead
+pushes both quotes out by round(ticks * P(burst)), and `GLFT(..., widen=...)`
+applies it after its own quotes.
+
+Writing the tests turned up a problem in `Filter`: it works on unnormalized
+weights, and after a few hundred minutes with no prints both weights
+underflowed to zero and the posterior came back NaN. The propagator is now
+scaled by its largest eigenvalue, which cancels in the normalization.
+
+**Setup.** Zero-intelligence book, one bursty trader with a Brownian value
+(sigma 1 tick per square-root minute), rate 2 a minute while on, bursts that
+start at rate 1/40 and last 10 minutes on average. 1000 sessions of 120
+minutes, 2500 bursts in all.
+
+| filter | flagged | within 2 minutes | median delay | false alarms |
+|---|---|---|---|---|
+| print rate (2 states) | 68% | 32% | 2.25 | 3.4% of quiet time |
+| side (3 states) | 69% | 35% | 2.00 | 2.7% of quiet time |
+
+A burst shows up in the tape only while the value is outside the quotes, so
+some bursts never produce a trade. The side adds little at this rate: a burst
+is one-sided almost by definition, and the count alone already carries most of
+the evidence.
+
+**GLFT makers.** Shift and width tuned on 300 separate sessions (lean 0.25,
+0.5, 1 and 2 gave 16.02, 17.53, 15.95 and 12.97; widening by 1, 2 and 3 ticks
+gave 10.58, 8.97 and 9.28), then 1000 held-out sessions:
+
+| maker | score | P&L | spread | adverse | inventory |
+|---|---|---|---|---|---|
+| GLFT | 9.23 (0.68) | 15.73 | 46.62 | -9.59 | -21.30 |
+| lean 0.5 | 17.73 (0.58) | 22.84 | 45.22 | -9.01 | -13.36 |
+| widen 1 | 8.39 (0.64) | 14.54 | 36.71 | -5.53 | -16.65 |
+| lean + widen | 13.48 (0.57) | 18.42 | 36.25 | -6.23 | -11.60 |
+
+Widening does what it is meant to do, adverse selection goes from -9.59 to
+-5.53, and loses on balance: it gives up 9.9 ticks of spread capture to save
+4.1, because the filter is also wrong some of the time and a quote one tick
+further out misses fills in quiet markets too. The lean keeps the spread and
+cuts the inventory loss from -21.30 to -13.36, since a burst is one-sided and
+the move it causes is what hurts an inventory. Adding the widening to the lean
+costs 4.25 ticks. With one-tick granularity and a thin book, the answer to
+toxic bursts here is to move the quotes, not to open them up.
+
+![Toxic bursts against GLFT makers](docs/toxic_bursts.png)
+
 ## Install
 
 ```
@@ -3066,7 +3244,8 @@ multi-asset one in about two minutes. `dynamic_fees.py` runs 68 sessions of
 `options_mm.py` reads vol-lab's SPY snapshot (from `../vol-lab/data/cboe`, or
 the folder in `VOLLAB_CBOE`) and runs 33 simulated batches in about three and a
 half minutes.
-`execution.py` runs about 66,000 sessions in seven minutes.
+`execution.py` runs about 66,000 sessions in seven minutes, `stealth.py` about
+36,000 in six and `toxic_bursts.py` about 7,000 in two and a half.
 
 ## Notes
 
