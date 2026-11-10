@@ -10,7 +10,7 @@ from .accounting import exposure
 from .attribution import attribute
 from .book import Book
 from .flow import ZeroIntelligence
-from .sim import Agent, Simulator
+from .sim import Agent, Context, Simulator
 
 Entrants = Mapping[str, Callable[[], Agent]]
 
@@ -73,20 +73,23 @@ def session(
     sim.warm_up(warm)
     start = sim.t
     sim.run(minutes)
-    close = float(sim.tape.at(sim.end))
-    out = {}
-    for name, ctx in zip(agents, sim.contexts[: len(agents)], strict=True):
-        a = attribute(ctx.account.fills, sim.tape, horizon, sim.end)
-        out[name] = Result(
-            ctx.account.value(close),
-            ctx.account.position,
-            len(ctx.account.fills),
-            a.spread,
-            a.adverse,
-            a.inventory,
-            exposure(ctx.account.fills, start, sim.end),
-        )
-    return out
+    return {
+        name: result(ctx, sim, start, horizon)
+        for name, ctx in zip(agents, sim.contexts[: len(agents)], strict=True)
+    }
+
+
+def result(ctx: Context, sim: Simulator, start: float, horizon: float) -> Result:
+    a = attribute(ctx.account.fills, sim.tape, horizon, sim.end)
+    return Result(
+        ctx.account.value(float(sim.tape.at(sim.end))),
+        ctx.account.position,
+        len(ctx.account.fills),
+        a.spread,
+        a.adverse,
+        a.inventory,
+        exposure(ctx.account.fills, start, sim.end),
+    )
 
 
 def standings(together: Sequence[dict[str, Result]], alone: Sequence[dict[str, Result]]):
