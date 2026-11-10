@@ -44,7 +44,11 @@ covariance the tick-level estimator loses, and shows that the hedge's
 one-second shortfall is quote noise and a reverting basis rather than delay. An
 options market maker quotes a real SPY smile, delta hedges on a schedule and
 manages its portfolio vega with the Baldacci-Bergault-Gueant model, solved in
-closed form and as an exact one-dimensional HJB.
+closed form and as an exact one-dimensional HJB. The
+counterparty can also be an execution algorithm: Almgren-Chriss and
+Obizhaeva-Wang schedules checked against their papers, the book's own impact
+measured and fed back into both models, and a hidden-Markov filter on the trade
+tape that lets a quoter find a working order and lean with it.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -2714,6 +2718,176 @@ snapshot, the surface and the SVI fit. mm-sim carries its own Black-Scholes
 Greeks, and a test compares them with vol-lab's to 1e-12 when vol-lab is
 importable.
 
+## An executor on the other side
+
+So far the market maker's counterparties were noise or traders who know the
+fundamental value. `execution.py` adds the third kind: someone with a large
+order to work who knows nothing about the price. It has the two standard
+schedules, an agent that follows one with market orders, and the measurements
+needed to see what that agent does to a quoter.
+
+**Almgren-Chriss (2000).** Selling X shares in N slices with permanent impact
+gamma, temporary impact eta and volatility sigma, minimizing E + lambda V gives
+holdings x_k = X sinh(kappa (T - t_k)) / sinh(kappa T) with
+cosh(kappa tau) = 1 + lambda sigma^2 tau^2 / (2 eta~). On the paper's example
+(one million shares over five days) kappa comes out at 0.609 a day, the paper's
+"about 0.6". `cost` sums expected cost and variance for any trajectory, and for
+the optimal one the sums agree with the paper's closed forms (its equations 20
+and 21) to 1e-10. A numerical minimizer started from the straight line lands on
+the sinh trajectory.
+
+**Obizhaeva-Wang (2013).** A trade of x moves the ask by (lambda + kappa) x, of
+which kappa x decays at rate rho. The strategy-dependent cost of trades x at
+times t is the quadratic form kappa/2 x' K x with K_ij = exp(-rho |t_i - t_j|),
+so the optimum is proportional to K^-1 1: two equal blocks at the ends,
+X / (2 + (N - 1)(1 - e^(-rho tau))) each, and equal smaller trades between.
+`trades` reproduces the first and last trade in the paper's Table 1 for seven
+values of rho, and `optimum` against `steady` (a constant trading rate)
+reproduces 25 entries of its Table 2 of cost savings to the two printed
+decimals.
+
+### The impact of a market order in the zero-intelligence book
+
+`impulse` runs the same seed twice, once with a market buy at time zero and
+once without, and returns the difference in the quotes afterwards. Pooled over
+order sizes 1 to 4 with 2000 seeds each, per share bought (ticks):
+
+| minutes after | 0 | 0.125 | 0.25 | 0.5 | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ask | 0.554 | 0.415 | 0.356 | 0.316 | 0.289 | 0.286 | 0.257 | 0.252 | 0.234 | 0.240 |
+| bid | 0.000 | 0.144 | 0.202 | 0.263 | 0.266 | 0.271 | 0.248 | 0.251 | 0.225 | 0.258 |
+
+The ask jumps 0.55 ticks a share and gives half of it back with a half-life of
+0.13 minutes. The bid follows it up within a minute, and the two then stay
+about a quarter of a tick above where they would have been. So this book has
+permanent impact with nobody in it who knows anything. The reason is in the
+Cont-Stoikov-Talreja rates: limit orders arrive at a distance from the opposite
+best quote, so once the ask has moved up, buy orders land closer to it and the
+bid is rebuilt higher. The response is close to linear in size (0.52 a share
+for one share at lag zero, 0.57 for four). The fitted Obizhaeva-Wang response
+is lambda 0.283, kappa 0.269, rho 5.36 a minute.
+
+### The Almgren-Chriss frontier, simulated
+
+The fit gives Almgren-Chriss parameters with nothing left to choose: gamma is
+the permanent part, the temporary cost of a slice of n shares is the walk up
+the book, (lambda + kappa) n^2 / 2, and sigma is 0.965 ticks per root minute on
+the undisturbed book. One correction comes from unit lots: the continuous model
+charges every share half its own impact, and a single share in a real book pays
+the quoted ask. The fixed cost per share is therefore the half spread (0.676)
+minus (lambda + kappa) / 2.
+
+Buying 24 shares in 24 minutes in 12 slices, 4000 sessions per schedule:
+
+| risk aversion | first slice | model cost/share | model sd | simulated cost/share (se) | simulated sd |
+|---|---|---|---|---|---|
+| 0 (even) | 2 | 4.070 | 61.4 | 4.303 (0.051) | 76.8 |
+| 0.0005 | 3 | 4.081 | 57.5 | 4.251 (0.049) | 74.9 |
+| 0.005 | 6 | 4.249 | 38.5 | 4.662 (0.043) | 65.3 |
+| 0.05 | 13 | 5.010 | 16.8 | 5.128 (0.033) | 50.8 |
+| 5 (one block) | 24 | 7.025 | 0.0 | 5.136 (0.026) | 40.0 |
+
+The model gets the mean within 6% for the two patient schedules and within 10%
+for the next two. The block is off because 24 shares is more than the 15 or so
+the book holds on a side: the order fills what is there and the executor buys
+the rest in the following slices, which a linear book does not know about. The
+risk is where the model is wrong. Its variance only counts the price moving
+while shares are still to be bought. In the book the impact of each child order
+is itself random, and the block that the model calls riskless has an sd of 40
+ticks. Front-loading still buys a lower sd, 77 down to 51, for 0.8 ticks a
+share.
+
+Obizhaeva-Wang has nothing to add at this horizon. With rho at 5.36 a minute
+and slices two minutes apart the book has forgotten the last slice
+(e^(-rho tau) is 2e-5), so its 13 trades are 24/13 shares each, and the model
+puts them at 4.049 a share against 4.070 for 12 even slices. Simulated, the 13
+trades cost 4.298 (se 0.053), the same as the even slices. The continuous optimum, 3.850, would need fractions of a
+share traded all the time.
+
+### What the executor does to a market maker
+
+One-hour sessions. In minutes 20 to 40 an executor buys or sells its order one
+share at a time, evenly spaced. Three makers, each alone with it: a quoter that
+joins the touch, a GLFT bot with the gamma tuned in the PPO comparison, and the same GLFT
+quoting around a fair value that leans with a flow filter (next section). Score
+is P&L minus 0.02 times the time integral of q^2 minus 0.25 q_T^2, over 1000
+held-out sessions. "Position" is the final inventory counted in the executor's
+direction, and "exec" is what the executor pays per share over its arrival mid.
+
+| maker | shares | score (se) | spread | adverse | inventory | position | exec |
+|---|---|---|---|---|---|---|---|
+| join the touch | 0 | 5.57 (0.62) | 23.31 | -2.53 | -4.84 | 0.07 | |
+| | 10 | 0.47 (0.77) | 24.98 | -2.73 | -10.07 | -1.32 | 1.475 |
+| | 30 | -29.41 (1.12) | 26.95 | -5.09 | -35.86 | -2.50 | 4.404 |
+| GLFT | 0 | 9.56 (0.35) | 18.92 | -1.77 | -4.70 | 0.00 | |
+| | 10 | 8.54 (0.40) | 20.74 | -2.05 | -7.07 | -0.15 | 1.827 |
+| | 30 | -4.61 (0.62) | 24.05 | -3.56 | -21.23 | -0.38 | 5.051 |
+| GLFT + filter | 0 | 8.10 (0.34) | 18.02 | -2.55 | -4.86 | 0.04 | |
+| | 10 | 7.88 (0.42) | 19.74 | -2.69 | -5.66 | 0.41 | 2.293 |
+| | 30 | 20.65 (0.84) | 21.34 | -0.01 | 9.47 | 1.46 | 7.169 |
+
+The executor pays the maker more spread and takes it back several times over
+through inventory: the maker is short while the price is pushed up. Nearly all
+of the loss is in the inventory term, the part of a fill's P&L after its first
+minute. Each child order is harmless on its own, and the damage is the sum of
+the ones that follow. A 30-share order turns the touch quoter's hour from +5.6
+to -29.4 and GLFT's from +9.6 to -4.6. GLFT's inventory skew saves it 25 ticks
+because it refuses to stay short.
+
+With no maker in the book the executor pays 1.202 (se 0.071) a share for 5
+shares, 2.023 (0.081) for 10, 3.492 (0.087) for 20 and 5.506 (0.104) for 30.
+Linear impact, the half spread plus 0.283 for every share already bought,
+gives 1.243, 1.951, 3.368 and 4.785: right up to 10 shares, 13% short at 30.
+At 1.5 shares a minute against the 0.94 a minute of natural buying, the ask
+side is being eaten faster than it refills and impact compounds.
+
+A maker changes that price. For 30 shares the executor pays 4.404 against the
+touch quoter and 5.051 against GLFT, less than the 5.506 in the empty book,
+because both hand it liquidity at a loss. Against the filtered GLFT it pays
+7.169, and the maker makes 20.65. That maker ends 1.5 lots long when the
+executor is a buyer: it buys ahead of the remaining child orders and sells to
+them higher.
+
+### Finding the executor in the tape
+
+`detect.py` has the filter. The market is in one of three hidden states, quiet,
+a buyer working or a seller working, switching with a generator Q. Buys and
+sells print at rates that depend on the state: mu and mu when quiet, mu + r on
+the side being worked. Between prints the unnormalized posterior weights follow
+p' = p (Q - Lambda), with Lambda the total print rate of each state, and a
+print on one side multiplies each weight by that state's rate for that side.
+`Filter` does the first step with one eigendecomposition and the second with a
+multiply. With Q = 0 and two states the log odds reduce to the sequential
+likelihood ratio, n_buy log(1 + r / mu) - r t.
+
+Three checks. A forward pass on a 1e-4 time grid gives the same posterior to
+2e-3. Without switching the log odds equal the likelihood-ratio formula. On 150
+simulated paths of 400 minutes from a three-state chain the filter is
+calibrated: among the moments it gives a state a probability in some bucket,
+the state is there that often, bucket by bucket, within sampling error.
+
+`RegimeLean` shifts the quoter's fair value by a number of ticks times
+P(buyer) - P(seller). The filter here assumes one extra share a minute on the
+worked side, and an order that starts once an hour and lasts 20 minutes. A
+shift of 1 tick scored best on 400 tuning sessions at 20 shares (12.35, se
+1.03, against 11.03 for half a tick and 11.21 for two), so anything from half a
+tick to two is within noise.
+
+A 30-share buyer is over 50% posterior in every session, after a median of 4.1
+minutes. A 20-share one gets there in 98% of sessions after 7.5 minutes, a
+10-share one in 56% and a 5-share one in 29%. Before the order starts the
+posterior is over 50% for 1.7% of the time. The cost of listening shows in the
+rows with no executor or a small one: 8.10 against 9.56 with nobody there, and
+still behind plain GLFT at 10 shares. It pays from 20 shares up (10.95 against
+4.77).
+
+One thing this book flatters: its impact never decays, so leaning with the
+executor has no way to go wrong after the order ends. Measured metaorder impact
+does decay once the order is done, and a maker that is still long then gives
+some of this back.
+
+![Execution algorithms against market makers](docs/execution.png)
+
 ## Install
 
 ```
@@ -2892,6 +3066,7 @@ multi-asset one in about two minutes. `dynamic_fees.py` runs 68 sessions of
 `options_mm.py` reads vol-lab's SPY snapshot (from `../vol-lab/data/cboe`, or
 the folder in `VOLLAB_CBOE`) and runs 33 simulated batches in about three and a
 half minutes.
+`execution.py` runs about 66,000 sessions in seven minutes.
 
 ## Notes
 
