@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import pytest
 from scipy.optimize import minimize
@@ -9,15 +11,18 @@ from mmsim.execution import (
     AlmgrenChriss,
     Executor,
     ObizhaevaWang,
+    Passive,
+    Pov,
     fit_response,
     impulse,
+    scatter,
     shortfall,
     targets,
     trial,
 )
 from mmsim.flow import CSTParams, ZeroIntelligence
 from mmsim.glft import Model
-from mmsim.sim import Print, Simulator
+from mmsim.sim import Agent, Print, Simulator
 from mmsim.tournament import session
 
 PAPER = AlmgrenChriss(sigma=0.95, eta=2.5e-6, gamma=2.5e-7, eps=0.0625)
@@ -279,3 +284,76 @@ def test_filtered_maker_ends_on_the_executor_side():
             res, _ = trial(seed, {name: make}, buyer, flow=flow, minutes=35.0)
             pos[name].append(res[name].position)
     assert np.mean(pos["lean"]) > np.mean(pos["plain"]) + 1.0
+
+
+def test_scatter_splits_the_order():
+    rng = np.random.default_rng(0)
+    for n in (1, 4, 20):
+        times, done = scatter(20, 10.0, n, rng)
+        assert len(times) == len(done) == n
+        assert np.all(np.diff(times) >= 0) and 0 <= times[0] and times[-1] < 10.0
+        assert np.all(np.diff(done) > 0) and done[0] >= 1 and done[-1] == 20
+    assert scatter(5, 1.0, 5, rng)[1].tolist() == [1, 2, 3, 4, 5]
+    with pytest.raises(ValueError):
+        scatter(5, 1.0, 6, rng)
+
+
+class Tape(Agent):
+    def __init__(self):
+        self.prints = []
+
+    def on_trade(self, ctx, p):
+        self.prints.append(p)
+
+
+def test_pov_keeps_its_share_of_the_volume():
+    pov, tape = Pov(Side.BUY, 12, 0.3, start=5.0), Tape()
+    sim = Simulator(flow(), [tape, pov], seed=2, record_every=None)
+    sim.seed(10_000, 10_001)
+    sim.run(60.0)
+    fills = sim.contexts[1].account.fills
+    assert sim.contexts[1].position == 12 and not any(f.maker for f in fills)
+    assert min(f.t for f in fills) > 5.0
+    assert pov.arrival == sim.tape.at(5.0)
+    own = 0
+    for f in fills:
+        own += f.qty
+        seen = sum(p.qty for p in tape.prints if 5.0 <= p.t <= f.t)
+        assert own == min(12, math.floor(0.3 / 0.7 * (seen - own)))
+    with pytest.raises(ValueError):
+        Pov(Side.BUY, 1, 1.0)
+
+
+def test_passive_rests_at_the_touch_and_finishes_at_the_deadline():
+    times = np.arange(0.0, 21.0, 2.0)
+    bot = Passive(Side.BUY, times, np.arange(0, 11) * 2, slack=20)
+    sim = Simulator(flow(), [bot], seed=4, record_every=None)
+    sim.seed(10_000, 10_001)
+    sim.warm_up(30.0)
+    ctx = sim.contexts[0]
+    resting = 0
+    for _ in range(46):
+        sim.run(0.5)
+        for o in ctx.orders.values():
+            assert o.price == sim.book.best_bid() and o.price >= ctx.bid
+            resting += 1
+        if 1 <= bot._k <= 10:
+            assert ctx.position + sum(o.qty for o in ctx.orders.values()) == 2 * bot._k
+    assert resting > 10
+    fills = ctx.account.fills
+    assert ctx.position == 20 and not ctx.orders
+    assert all(f.maker for f in fills if f.t < 50.0)
+    assert any(f.maker for f in fills)
+    assert min(f.t for f in fills if not f.maker) == 50.0
+
+
+def test_passive_seller_crosses_what_it_is_behind():
+    bot = Passive(Side.SELL, [0.0, 1e-6, 5.0], [0, 6, 6], slack=2)
+    ctx = run(bot, 10.0)
+    taken = sum(f.qty for f in ctx.account.fills if not f.maker and f.t < 1.0)
+    assert taken == 4 and ctx.position == -6
+
+
+def test_trial_takes_any_executor():
+    _, cost = trial(1, {}, Pov(Side.SELL, 5, 0.5), flow=flow, warm=10.0, minutes=30.0)
+    assert cost > 0.0
