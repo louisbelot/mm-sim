@@ -1802,3 +1802,113 @@ Results:
 Next: depth as a control for the options book (quote the smile on the
 exchange with queue position instead of answering requests), and the stale-NAV
 ETF with a fair value forecast from futures.
+
+## 2026-11-09: Execution algorithms on the other side, and a filter that finds them
+
+Built:
+
+- `execution.py`: `AlmgrenChriss` (kappa, the sinh holdings, expected cost and
+  variance of any trajectory), `ObizhaevaWang` (the response function, the
+  optimal discrete trades, the cost of any schedule, the continuous optimum and
+  the constant-rate cost), `fit_response`, an `Executor` agent that follows a
+  cumulative schedule with market orders and catches up after a partial fill,
+  `shortfall`, `trial` (makers and one executor in a session) and `impulse`
+  (the same seed with and without a market buy).
+- `detect.py`: `Filter`, the exact posterior over the hidden state of a
+  Markov-modulated Poisson process, and `one_sided` (quiet, buyer, seller).
+- `RegimeLean` in `bots.py`: a quoting signal that shifts the fair value by
+  P(buyer) - P(seller).
+- `tournament.result` split out of `session` so `trial` builds the same rows.
+- `examples/execution.py` and `docs/execution.png`.
+
+Design notes:
+
+- The Obizhaeva-Wang cost is one quadratic form, lambda X^2 / 2 plus
+  kappa/2 x' K x with K_ij = exp(-rho |t_i - t_j|). The permanent part does not
+  depend on the schedule, which is why the optimal trades are K^-1 1 whatever
+  lambda is. The closed form for equal spacing (Alfonsi, Fruth and Schied) is
+  what `trades` returns, and a test solves the linear system instead.
+- Almgren-Chriss holdings are computed as exp(-kappa t) expm1(-2 kappa (T - t))
+  / expm1(-2 kappa T). The sinh ratio overflows once kappa T passes 700.
+- The executor's schedule is cumulative shares, and each slice sends the
+  target minus what is filled. A market order larger than the book fills what
+  is there and the rest is cancelled, so a per-slice quantity would silently
+  buy less than the parent order.
+- Arrival price is the mid at the first slice, not at the start of the session.
+- Mapping the fitted response to Almgren-Chriss: gamma = lambda, and a slice of
+  n shares walks the book for (lambda + kappa) n^2 / 2, so eta = tau (lambda +
+  kappa) / 2. With unit lots the first share of a slice pays the quoted ask and
+  the walk is n (n - 1) / 2 steps, so the fixed cost per share is the half
+  spread minus (lambda + kappa) / 2, a correction of 0.28 a share. It is exact for
+  an order of one or two shares, where the cost is read straight off the
+  impulse response.
+- The filter works on unnormalized weights: between prints they follow the
+  linear ODE p' = p (Q - Lambda), a print multiplies by the rate vector, and
+  the posterior is the normalized result. One eigendecomposition of Q - Lambda
+  at construction makes each update a few 3-by-3 products, which matters
+  because a quoter asks for the lean at every book event.
+- A print of n shares counts as n events at the same instant.
+- The filter's clock starts at the first print unless a start time is given. A
+  bot created before the warm-up would otherwise read 30 silent minutes as
+  strong evidence of a quiet market.
+
+Checks:
+
+- Almgren-Chriss: kappa of the paper's example is 0.609 a day (the paper says
+  about 0.6, kappa T about 3); cost sums against the paper's closed forms for E
+  and V at four risk aversions to 1e-10; the two naive strategies against
+  their formulas; BFGS from the straight line lands on the sinh trajectory to
+  1e-4.
+- Obizhaeva-Wang: the first and last trade for seven values of rho in the
+  paper's Table 1; 25 entries of Table 2 to 0.005 points; the closed-form
+  trades equal K^-1 1 to 1e-12 and 20 random zero-sum perturbations all cost
+  more; the discrete cost converges to the continuous optimum and to the
+  constant-rate cost; the quadratic form equals a walk through the model book
+  trade by trade.
+- Executor: a block of 5 on the seeded book fills 3 at the ask and 2 one tick
+  up for a shortfall of 4.5 ticks; a seller pays the same; fills land at the
+  scheduled times; a 60-share order on a 21-share book is finished by the next
+  slice. `trial` with no executor equals `tournament.session`.
+- Filter: a forward pass on a 1e-4 grid to 2e-3; the likelihood-ratio limit
+  exactly; calibration in five probability buckets on 150 simulated paths of
+  400 minutes; three unit prints equal one print of three.
+- A GLFT with the lean ends more than a lot longer than plain GLFT against a
+  30-share buyer over 12 seeds.
+
+Results (ticks, time in minutes):
+
+- Impulse response per share, pooled over sizes 1 to 4: the ask moves 0.55 at
+  once and settles near 0.28 with a half-life of 0.13 minutes; the bid follows
+  to 0.26 within a minute. Fit: lambda 0.283, kappa 0.269, rho 5.36. Impact is
+  permanent in a book with no information because the flow is defined relative
+  to the opposite best quote.
+- 24 shares in 24 minutes, 12 slices, 4000 sessions: even slices 4.303 a share
+  (model 4.070), risk aversion 0.005 4.662 (4.249), 0.05 5.128 (5.010), one
+  block 5.136 (7.025, the book holds about 15 shares a side). Simulated sd
+  76.8, 65.3, 50.8 and 40.0 against the model's 61.4, 38.5, 16.8 and 0.
+- Obizhaeva-Wang's 13 trades: model 4.049, simulated 4.298 (se 0.053), the
+  same as even slices. Resilience is too fast for the schedule to matter at
+  this horizon.
+- Impact compounds at high participation. With no maker the executor pays
+  1.202, 2.023, 3.492 and 5.506 a share for 5, 10, 20 and 30 shares in 20
+  minutes; the half spread plus 0.283 per share already bought gives 1.243,
+  1.951, 3.368 and 4.785.
+- One hour with an executor active in minutes 20 to 40, 1000 sessions per
+  cell. Touch quoter: 5.57 with no executor, 0.47 at 10 shares, -29.41 at 30.
+  GLFT (gamma 0.08, keep 1): 9.56, 8.54, -4.61. GLFT with the lean (1 tick):
+  8.10, 7.88, 20.65. The loss is in the inventory term: -4.70 to -21.23 for
+  GLFT while its spread capture rises from 18.92 to 24.05.
+- What the executor pays per share for 30 shares: 5.506 with no maker, 4.404
+  against the touch quoter, 5.051 against GLFT, 7.169 against the filtered
+  GLFT.
+- Detection: posterior over one half in 100% of sessions at 30 shares (median
+  4.1 minutes in), 98% at 20 (7.5), 56% at 10, 29% at 5; 1.7% of the time
+  before the order starts.
+
+Not done, and worth knowing: the zero-intelligence book never gives impact
+back, so the filtered maker's position has no reversal to fear. The executor
+is also as easy to see as it can be (one share at fixed intervals).
+
+Next: executors that hide (random sizes and timing, passive child orders) and a
+book whose impact decays after the order ends, then toxic informed bursts run
+through the same filter.
