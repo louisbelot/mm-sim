@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from mmsim.detect import Filter, one_sided, stationary
+from mmsim.detect import Filter, one_sided, stationary, toxic
 
 Q = np.array([[-0.05, 0.03, 0.02], [0.2, -0.2, 0.0], [0.1, 0.0, -0.1]])
 RATES = np.array([[1.0, 1.0], [2.5, 1.0], [0.8, 1.9]])
@@ -98,3 +98,23 @@ def test_one_sided_finds_the_buyer_and_lets_go():
     for t in np.arange(10.25, 40.0, 1.0):
         f.observe(t, int(t) % 2)
     assert f.p[0] > 0.9
+
+
+def test_toxic_without_switching_is_a_likelihood_ratio():
+    f = toxic(1.0, 0.5, 0.0, 0.0, t=0.0)
+    for t in (0.3, 0.9, 1.0, 2.5):
+        f.observe(t, 0)
+    f.observe(3.0, 0, 2)
+    odds = 2.5**6 / 2**6 * np.exp(-0.5 * 4.0)
+    p = f.at(4.0)
+    assert p[1] / p[0] == pytest.approx(odds)
+
+
+def test_toxic_survives_a_long_silence():
+    f = toxic(1.0, 3.0, 0.02, 0.06, t=0.0)
+    for k in range(30):
+        f.observe(0.1 * k, 0)
+    assert f.p[1] > 0.9
+    late = f.at(1e4)
+    assert np.isfinite(late).all() and late[1] < 0.25
+    assert late == pytest.approx(f.at(1e3))
