@@ -246,6 +246,19 @@ def test_arrival_is_the_mid_at_the_first_slice():
     assert late.arrival != 10_000.5
 
 
+def test_arrival_falls_back_to_the_tape_on_a_one_sided_book():
+    bot = Pov(Side.BUY, 1, 0.5)
+    sim = Simulator(flow(), [bot], seed=0)
+    sim.seed(10_000, 10_001)
+    sim.warm_up(1e-9)
+    mid = sim.book.mid()
+    for lvl in list(sim.book.levels(Side.SELL)):
+        for oid in list(lvl.orders):
+            sim.book.cancel(oid)
+    sim.run(0.0)
+    assert sim.book.best_ask() is None and bot.arrival == mid
+
+
 def test_trial_without_an_executor_is_a_session():
     makers = {"a": lambda: SymmetricQuoter(0.5)}
     res, cost = trial(4, makers, flow=flow)

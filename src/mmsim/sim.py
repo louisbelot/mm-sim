@@ -159,6 +159,8 @@ class Context:
         ask = _best_of_others(book, Side.SELL, self.owner)
         if bid is not None and ask is not None:
             self._mark = (bid + ask) / 2
+        elif math.isnan(self._mark) and self._sim.tape.mid:
+            self._mark = self._sim.tape.mid[-1]
         return self._mark
 
     def pnl(self) -> float:
