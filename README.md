@@ -48,9 +48,43 @@ closed form and as an exact one-dimensional HJB. The
 counterparty can also be an execution algorithm: Almgren-Chriss and
 Obizhaeva-Wang schedules checked against their papers, the book's own impact
 measured and fed back into both models, and a hidden-Markov filter on the trade
-tape that lets a quoter find a working order and lean with it.
+tape that lets a quoter find a working order and lean with it. Last of all, a
+flash-crash scenario puts a volume-paced seller, stop-loss orders and market
+makers with inventory limits in one book, and tests a price collar, LULD bands
+with trading pauses and a trip-and-halt rule against it.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
+
+## Four market makers, one chart
+
+Each bot below trades alone in 1000 sessions of 60 minutes on the
+zero-intelligence book, first on plain flow and then with an informed trader in
+the room (market orders at 0.5 a minute whenever a private value is outside the
+quotes). The sessions use the same seeds for every bot. P&L is in ticks, marked
+at the close, with no inventory penalty. The PPO policy is the one trained in
+[A learned market maker](#a-learned-market-maker) on calm flow only; AS and GLFT
+use the gammas tuned there. `examples/strategies.py` draws it in about a minute.
+
+![P&L per session by strategy](docs/strategies.png)
+
+| market | strategy | mean (se) | sd | 5% | median | 95% | P(loss) |
+|---|---|---|---|---|---|---|---|
+| calm | join the touch | 15.94 (0.55) | 17.44 | -14.0 | 18.0 | 40.5 | 0.16 |
+| calm | AS, gamma 0.003 | 15.52 (0.38) | 12.09 | -6.0 | 16.0 | 34.5 | 0.09 |
+| calm | GLFT, gamma 0.08 | 12.45 (0.34) | 10.62 | -6.0 | 13.0 | 29.0 | 0.10 |
+| calm | PPO | 11.87 (0.28) | 9.01 | -3.5 | 12.5 | 25.0 | 0.08 |
+| informed | join the touch | 10.45 (0.65) | 20.57 | -27.0 | 13.0 | 38.5 | 0.26 |
+| informed | AS, gamma 0.003 | 11.05 (0.47) | 14.93 | -16.5 | 12.0 | 34.0 | 0.19 |
+| informed | GLFT, gamma 0.08 | 13.13 (0.36) | 11.24 | -6.5 | 14.0 | 30.0 | 0.11 |
+| informed | PPO | 10.08 (0.33) | 10.42 | -8.0 | 11.0 | 25.5 | 0.15 |
+
+On calm flow the ranking by mean is the ranking by risk: the touch quoter makes
+the most and has the widest spread of outcomes, PPO makes the least and loses
+money in 8% of sessions. The informed trader takes 5.5 ticks a session from the
+touch quoter and 4.5 from AS. GLFT's mean does not fall (12.45 to 13.13), and
+the attribution split that would say why has not been run on this setup yet. PPO, which never saw an
+informed trader in training, loses 1.8 and has the narrowest distribution in
+both markets.
 
 ## Avellaneda-Stoikov, rerun
 
@@ -3066,6 +3100,143 @@ toxic bursts here is to move the quotes, not to open them up.
 
 ![Toxic bursts against GLFT makers](docs/toxic_bursts.png)
 
+## A flash crash, and circuit breakers
+
+On 6 May 2010 a sell program that paced itself at 9% of volume met market makers
+with inventory limits. Kirilenko, Kyle, Samadi and Tuzun (2017) describe the
+intermediaries buying, hitting their limits and selling to each other (the "hot
+potato"), which inflated volume and made the volume-paced seller sell faster.
+Gao, Vytelingum, Weston, Luk and Guo (2022, arXiv 2208.13654) rebuild the day
+in an agent-based model and find the crash gets deeper as the makers' inventory
+limits get larger. `crash.py` sets up the same ingredients on this book and
+asks which circuit breakers stop it.
+
+The cast, all on the zero-intelligence book:
+
+- `Maker`: quotes size 2 one tick either side of the others' mid, skewed 0.1
+  tick per share of inventory. At its limit (10 shares) it stops quoting that
+  side and dumps down to 4 shares with a market order, then stays off that side
+  for a minute. An optional loss limit cancels everything, flattens, and sits
+  out for `rest` minutes.
+- `Value`: four slow fundamental traders. Each wakes on average every 3 minutes
+  and buys (or sells) floor(0.5 x gap) shares, at most 10, by market order,
+  where the gap is the value (the mid when the session starts) minus the mid.
+- `Stops`: stop-loss sell orders, 2 shares every second tick from 3 to 59 ticks
+  below the start (58 shares in all). A print at or below a trigger turns it
+  into a market order (Osler 2005 on stop-loss cascades).
+- The seller: `execution.Pov`, 300 shares at participation rate r, starting at
+  minute 5.
+
+The breakers live in the book. `Guard` is a `Book` with a `Rule`:
+
+- collar: no trade more than `band` ticks from a reference, the mean trade price
+  of the last 5 minutes (as in the LULD plan). A market order becomes an IOC
+  limit at the band, a limit through the band is repriced to it.
+- LULD: the collar, plus a limit state when no bid (or offer) is left inside the
+  band. If it lasts 15 seconds, trading pauses for 5 minutes; afterwards the
+  reference restarts from the new mid.
+- trip and halt (the 2010 single-stock pilot): no band, but a print 10 ticks
+  from the reference halts trading for 5 minutes.
+
+During a pause the book takes cancels and non-marketable orders and rejects
+anything that would trade, with a new `Reason.HALTED`. There is no reopening
+auction yet. The book has no clock events of its own, so it applies the rules
+lazily: when an order arrives it first works out whether a limit state should
+have turned into a pause, or a pause should have ended, at the exact time that
+would have happened. A test with nothing arriving for 7 minutes checks that the
+pause is still recorded as 0.25 to 5.25.
+
+### Checks
+
+With no rule the guarded book returns the same events as `Book` on 3000 random
+submits, cancels and modifies. The collar stops a 10-share sweep at the band
+and cancels the rest; the reference forgets trades older than its window; a
+limit state turns into a pause on time, rejects marketable orders during it and
+clears if bids come back within 15 seconds. A crash run through a subclass that
+checks every print against the band at that moment finds none outside.
+
+The stop cascade has a closed form on a static book. With d shares on every
+tick below the bid, s shares of stops every tick and a sell of X shares, the
+sweep reaches level m with m = ceil((X + s m) / d), and the smallest fixed point
+satisfies X / (d - s) <= m < X / (d - s) + d / (d - s). When s >= d there is no
+fixed point and the cascade empties the book. The simulator lands on the fixed
+point for six (X, d, s) cases, including two runaways.
+
+### Results
+
+300 sessions of 90 minutes per cell, the same seeds in every column. A crash is
+a print at least 30 ticks below the value. `examples/flash_crash.py` runs about
+17,000 sessions in seven minutes.
+
+![Flash crash](docs/flash_crash.png)
+
+| rate r | 0.15 | 0.25 | 0.30 | 0.35 | 0.40 | 0.45 | 0.50 | 0.60 |
+|---|---|---|---|---|---|---|---|---|
+| P(crash), no breaker | 0.00 | 0.01 | 0.03 | 0.07 | 0.31 | 0.88 | 1.00 | 1.00 |
+| collar | 0.00 | 0.00 | 0.00 | 0.05 | 0.26 | 0.87 | 1.00 | 1.00 |
+| LULD | 0.00 | 0.00 | 0.02 | 0.04 | 0.26 | 0.86 | 1.00 | 1.00 |
+| trip and halt | 0.00 | 0.00 | 0.01 | 0.05 | 0.27 | 0.87 | 1.00 | 1.00 |
+
+The market has a tipping point. Between r = 0.35 and 0.45 the chance of a crash
+goes from 7% to 88%. None of the breakers moves that curve by more than about
+two standard errors. They do
+change how deep the crash goes once it starts:
+
+| at r = 0.45 | median drop | 90% | makers' P&L | seller's cost/share | pauses | minutes halted | median recovery | pauses, no seller |
+|---|---|---|---|---|---|---|---|---|
+| none | 83.5 | 120.6 | -4567 | 40.85 | 0 | 0 | 21.4 | 0 |
+| collar | 67.5 | 80.5 | -2620 | 34.11 | 0 | 0 | 25.4 | 0 |
+| LULD | 77.0 | 101.0 | -2735 | 39.97 | 6.10 | 29.7 | 24.3 | 0.003 |
+| trip and halt | 79.5 | 101.6 | -2926 | 41.28 | 6.19 | 30.1 | 26.7 | 0.003 |
+
+The plain collar does best, and the pauses add almost nothing on top of it.
+After each pause the reference restarts from the crashed mid, so the next band
+starts 10 ticks lower and the price walks down a band at a time. The pauses also
+fire on the way back up: a recovering stock has no offers inside its upper band
+either, and a pause then blocks the value buyers, which is why recovery is a few
+minutes slower with any breaker (the traced session in the top left chart shows
+both). LULD keeps the stock halted for 30 of the 90 minutes.
+
+A narrower band does cut the crash, at a price paid on calm days:
+
+| LULD band | median drop | P(crash) | pauses, crash | pauses, no seller | minutes halted, no seller |
+|---|---|---|---|---|---|
+| 5 | 36.5 | 0.65 | 7.05 | 0.267 | 1.34 |
+| 10 | 77.0 | 0.86 | 6.10 | 0.003 | 0.02 |
+| 20 | 87.5 | 0.88 | 4.19 | 0 | 0 |
+| 40 | 82.5 | 0.88 | 3.14 | 0 | 0 |
+
+Taking ingredients out at r = 0.45, with no breaker:
+
+| | median drop | P(crash) |
+|---|---|---|
+| everything | 83.5 | 0.88 |
+| no stops | 19.5 | 0.03 |
+| makers stop at the limit but never dump | 89.2 | 0.88 |
+| no stops, no dumping | 19.5 | 0.03 |
+| no makers | 59.5 | 0.81 |
+
+The stops are what turn a heavy seller into a crash, though they add up to only
+58 shares against the seller's 300. Dumping at the limit makes no difference
+here. The makers as a whole make the crash deeper (59.5 ticks without them),
+and the deeper the more inventory they are allowed to take:
+
+| maker limit | 4 | 6 | 8 | 10 | 14 | 20 | 30 | 50 | none |
+|---|---|---|---|---|---|---|---|---|---|
+| median drop | 53.0 | 69.5 | 73.8 | 83.5 | 105.5 | 123.0 | 127.0 | 127.0 | 127.0 |
+| makers' P&L | -897 | -2072 | -3123 | -4567 | -8352 | -12949 | -16729 | -17793 | -17763 |
+
+That is the same direction as Gao et al. One mechanism that fits is the volume
+feedback in Kirilenko et al.: the POV seller sells r / (1 - r) = 0.82 shares for
+every share anyone else trades, and every share a maker buys on the way down is
+volume. That reading has not been tested yet (a seller on a fixed clock would
+separate the two).
+
+Bug found on the way: with zero latency, two makers at their limits could dump
+into each other's freshly reposted bids forever, a hot potato with no clock
+running, and the limit-6 runs hung. The one-minute cool-off after a dump fixes
+it; a test runs the seed that hung.
+
 ## Install
 
 ```
@@ -3246,6 +3417,8 @@ the folder in `VOLLAB_CBOE`) and runs 33 simulated batches in about three and a
 half minutes.
 `execution.py` runs about 66,000 sessions in seven minutes, `stealth.py` about
 36,000 in six and `toxic_bursts.py` about 7,000 in two and a half.
+`flash_crash.py` runs about 17,000 sessions in seven minutes, and
+`strategies.py` (which reads the PPO seed from `data/`) 8,000 in about one.
 
 ## Notes
 
