@@ -5,9 +5,9 @@ import pytest
 from scripted import make
 
 from mmsim.book import Book, EventType, OrderType, Reason, Side, Tif
-from mmsim.crash import Guard, Rule
+from mmsim.crash import Guard, Rule, Stops
 from mmsim.flow import CSTParams
-from mmsim.sim import Agent
+from mmsim.sim import Agent, Simulator
 
 SKY = CSTParams.sky_perfect()
 
@@ -145,3 +145,54 @@ def test_clamped_order_keeps_its_new_price():
     sim.book.submit(next(sim._ids), Side.BUY, 98, 1)
     sim.run(1.0)
     assert sim.contexts[0].orders[agent.oid].price == 100
+
+
+class Static:
+    owner = 0
+
+    def __init__(self, d, levels, sell=0):
+        self.d, self.levels, self.sell = d, levels, sell
+
+    def seed(self, book, bid, ask, ids):
+        book.submit(next(ids), Side.SELL, 101, 1000)
+        for i in range(1, self.levels + 1):
+            book.submit(next(ids), Side.BUY, 100 - i, self.d)
+
+    def step(self, book, rng, horizon, ids):
+        if self.sell and horizon >= 1.0:
+            qty, self.sell = self.sell, 0
+            oid = next(ids)
+            return 1.0, lambda b: b.submit(oid, Side.SELL, 0, qty, kind=OrderType.MARKET)
+        return None
+
+
+def cascade(X, d, s, levels):
+    m = math.ceil(X / d)
+    while m <= levels:
+        nxt = math.ceil((X + s * m) / d)
+        if nxt == m:
+            return m
+        m = nxt
+    return levels
+
+
+@pytest.mark.parametrize(
+    "X,d,s", [(30, 5, 2), (7, 4, 1), (12, 3, 0), (40, 6, 5), (9, 2, 2), (20, 3, 4)]
+)
+def test_stop_cascade_reaches_the_fixed_point(X, d, s):
+    levels = 60
+    stops = Stops([(k, s) for k in range(1, levels + 1)] if s else [])
+    sim = Simulator(Static(d, levels, X), [stops])
+    sim.seed(100, 101)
+    sim.run(5.0)
+    m = cascade(X, d, s, levels)
+    lowest = min(f.price for f in sim.contexts[0].account.fills) if s else None
+    bid = sim.book.best_bid()
+    if m < levels:
+        assert bid == (100 - m if (X + s * m) % d else 100 - m - 1)
+        if s:
+            assert lowest >= 100 - m
+    else:
+        assert bid is None
+    if s < d:
+        assert 0 <= m - X / (d - s) < d / (d - s)

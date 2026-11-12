@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from .book import Book, Event, EventType, OrderType, Reason, Side, Tif
+from .sim import Agent, Context, Print
 
 
 @dataclass(frozen=True)
@@ -151,3 +152,34 @@ class Guard(Book):
             return ask is not None and price >= ask
         bid = self.best_bid()
         return bid is not None and price <= bid
+
+
+class Stops(Agent):
+    def __init__(self, levels: Sequence[tuple[int, int]], retry: float = 0.05) -> None:
+        self.levels = levels
+        self.retry = retry
+        self.triggered = 0
+        self._pending: list[tuple[int, int]] = []
+        self._armed = False
+
+    def on_start(self, ctx: Context) -> None:
+        ref = round(ctx.mark())
+        self._pending = sorted((ref - d, q) for d, q in self.levels)
+
+    def on_trade(self, ctx: Context, p: Print) -> None:
+        while self._pending and self._pending[-1][0] >= p.price:
+            self.triggered += self._pending.pop()[1]
+        self._sell(ctx)
+
+    def on_timer(self, ctx: Context) -> None:
+        self._armed = False
+        self._sell(ctx)
+
+    def _sell(self, ctx: Context) -> None:
+        owed = self.triggered + ctx.position
+        if owed <= 0:
+            return
+        ctx.submit(Side.SELL, 0, owed, kind=OrderType.MARKET)
+        if self.triggered + ctx.position > 0 and not self._armed:
+            self._armed = True
+            ctx.set_timer(self.retry)
