@@ -3237,6 +3237,177 @@ into each other's freshly reposted bids forever, a hot potato with no clock
 running, and the limit-6 runs hung. The one-minute cool-off after a dump fixes
 it; a test runs the seed that hung.
 
+## A market maker against an adversary
+
+Spooner and Savani (IJCAI 2020, arXiv 2003.01820) turn the Avellaneda-Stoikov
+model into a zero-sum game. Each step the market maker picks its quote depths
+delta+ and delta- around the mid Z, and an adversary picks the drift b in
+[-5, 5], the order arrival rate A in [105, 175] and the depth decay k in
+[1.125, 1.875]. Fills are Bernoulli with probability A dt exp(-k delta), the mid
+moves by b dt + sigma sqrt(dt) N(0, 1), and the market maker is paid the change in
+its mark-to-market value (with sigma 2, dt 0.005, 200 steps and inventory
+limits of 50, as in the paper). They train both sides with natural actor-critic
+and report that the market maker trained against the adversary has a higher
+Sharpe ratio than the one trained against the fixed market (b 0, A 140, k 1.5),
+even when it is tested against the fixed market.
+
+`robust.py` solves that game exactly instead. The state is only (step,
+inventory), so backward induction over 101 inventories is cheap, and each stage
+is a small game with a closed structure:
+
+- For fixed adversary parameters the market maker's best quote on each side
+  solves delta = 1/k - c, where c is the drift on the share it would buy plus
+  the change in continuation value; the two sides are coupled through the
+  chance that both fill, so `respond` alternates between them (coordinate
+  ascent) until neither moves by 1e-12, then clips at zero.
+- The expected stage payoff is linear in b. With the market maker playing its
+  best response, the value as a function of b is a maximum of linear functions,
+  so it is convex, and its slope is dt times the expected inventory after the
+  fills. The adversary's drift is therefore at a bound whenever that inventory
+  has a sign, and inside the interval only where it is zero, which `drift`
+  finds by bisection.
+- The market maker's best-response value goes up with A and down with k for
+  any b (a larger A or smaller k lets it buy the same fill probability with a
+  wider quote), so the adversary always sits at A = 105 and k = 1.875.
+
+`equilibrium` returns the value table, the quotes and the adversary's choices.
+`worst_case` is the adversary's exact best response to any quote table (b at
+its bounds, A and k on a 9 x 9 grid), `best_response` is the market maker's
+answer to any adversary table, `evaluate` is policy evaluation and `simulate`
+draws paths.
+
+What the solution says:
+
+- At one step the paper's Theorem 1 says delta = 1/k plus or minus b and the drift
+  is at the bound opposite to the inventory. Their payoff (eq. 8) drops a factor
+  dt on the drift term of a fresh fill; with it put back, the quotes are 1/k
+  minus or plus b dt, and at zero inventory the drift is exactly 0 instead of
+  anything in the interval. The test of the one-step case checks the quotes and
+  the value against this closed form.
+- In the full game the drift is -5 sign(q) at every step and every nonzero
+  inventory, the bang-bang policy the paper's adversary learned (their Figure 2).
+- Away from q = 0 the drift costs the market maker b-bar dt |q'| a step, where q'
+  is the inventory after the fills. So the robust market maker is a fixed-market
+  market maker with a penalty that is linear in |q|, not quadratic, and the left
+  panel shows it: its skew flattens out with inventory where the quadratic
+  penalty's keeps steepening.
+- The equilibrium is a saddle point: the adversary's best response to the
+  equilibrium quotes and the market maker's best response to the equilibrium
+  adversary both give back the equilibrium value table to 1e-10, and a brute
+  force maximin over a 201 x 201 quote grid matches it within 2e-5 (tested on
+  shorter games).
+
+![Robust market making](docs/robust_mm.png)
+
+`examples/robust_mm.py` tests each quote table on 100,000 paths of the fixed
+market with q0 = 0 (the paper's test), and computes four exact values: against
+the fixed market, against the paper's random market (b, A and k drawn once per
+path; this one is simulated), against the worst drift, and against the worst
+of all three.
+
+| market maker | wealth | Sharpe | final q | spread | fixed | random | worst b | worst |
+|---|---|---|---|---|---|---|---|---|
+| risk neutral, 1/k | 68.7 +- 13.7 | 5.01 | 0.03 +- 8.75 | 1.333 | 68.67 | 69.44 | 45.57 | 21.27 |
+| AS gamma 0.1 | 64.9 +- 6.5 | 9.93 | 0.00 +- 2.91 | 1.492 | 64.91 | 65.80 | 60.57 | 33.07 |
+| fixed, eta 1 | 67.5 +- 9.3 | 7.28 | 0.00 +- 0.56 | 1.359 | 67.51 | 68.28 | 54.04 | 27.09 |
+| fixed, zeta 0.01 | 65.7 +- 6.3 | 10.42 | 0.00 +- 1.72 | 1.414 | 65.76 | 66.57 | 61.53 | 33.97 |
+| fixed, zeta 0.001 | 67.8 +- 7.3 | 9.24 | 0.00 +- 3.08 | 1.356 | 67.87 | 68.66 | 59.57 | 31.74 |
+| equilibrium, b | 66.0 +- 6.4 | 10.34 | 0.00 +- 1.95 | 1.400 | 66.01 | 66.80 | 61.61 | 34.06 |
+| equilibrium, k | 67.1 +- 14.1 | 4.77 | 0.02 +- 9.28 | 1.067 | 67.10 | 67.57 | 42.55 | 20.37 |
+| equilibrium, b A k | 64.2 +- 5.6 | 11.42 | 0.00 +- 1.93 | 1.159 | 64.22 | 64.78 | 60.32 | 34.99 |
+| equilibrium, b A k, eta 1 | 63.5 +- 5.6 | 11.35 | 0.00 +- 0.48 | 1.182 | 63.56 | 64.14 | 59.85 | 34.62 |
+
+The "fixed" rows are the exact optimum against the fixed market for the paper's
+penalties (zeta on q squared each step, eta on the final q squared). The
+pattern is the paper's: the market maker trained against the b, A, k adversary
+has the highest Sharpe ratio when tested on the fixed market (11.4, theirs
+9.8), quotes the tightest spread (1.16, theirs 1.44) and has the best guarantee
+(34.99, by construction). The drift-only equilibrium gets 66.0 +- 6.4 and a
+spread of 1.40; the paper's learned agent got 65.5 +- 6.9 and 1.43. Exact
+optima beat the paper's learned agents on the fixed market (with eta 1: 67.5 +-
+9.3 against their 61.3 +- 8.5). An adversary that controls only A changes
+nothing, because with no drift the best depth 1/k does not depend on A; one
+that controls only k makes the market maker quote 1/1.875 and lose Sharpe,
+which matches the paper's finding that those two adversaries do not help.
+
+### Learning it: PPO on both sides
+
+`arl.py` trains the game with the repo's numpy PPO, in the spirit of RARL
+(Pinto et al. 2017): `Duel` is one environment seen from either side (the
+market maker picks delta+ and delta- from a 9 x 9 grid of 0 to 2, the adversary
+picks one of 12 corners of b in {-5, 0, 5}, A and k at their bounds), with zero
+sum rewards, and `rarl` alternates 20 PPO iterations of the market maker
+against the frozen adversary with 20 of the adversary against the frozen
+market maker. Episodes start at a random step and inventory in [-10, 10], as
+the paper's start at a random time. Since the state is small, `quotes` turns
+the trained policy into a table, so the exact solver can grade it.
+`examples/arl_mm.py` trains three seeds each against the fixed market, the
+drift adversary and the full adversary (600 market-maker iterations of 32
+episodes, 3.5 minutes for fixed and 9 for the duels, nine runs in parallel).
+
+| trained against | seed | wealth | Sharpe | sd q | spread | fixed | worst b | worst | gap |
+|---|---|---|---|---|---|---|---|---|---|
+| fixed | 0 | 62.9 +- 36.1 | 1.74 | 13.28 | 1.592 | 63.02 | -11.22 | -47.05 | |
+| fixed | 1 | 67.5 +- 22.8 | 2.96 | 8.78 | 1.360 | 67.53 | 23.04 | 0.80 | |
+| fixed | 2 | 65.9 +- 17.4 | 3.80 | 9.93 | 1.540 | 65.88 | 34.89 | 12.10 | |
+| b | 0 | 65.5 +- 6.6 | 9.88 | 1.52 | 1.427 | 65.57 | 60.04 | 32.49 | 0.01 |
+| b | 1 | 65.5 +- 6.8 | 9.59 | 1.57 | 1.500 | 65.54 | 60.04 | 32.16 | 0.15 |
+| b | 2 | 64.8 +- 6.6 | 9.82 | 1.51 | 1.435 | 64.86 | 59.83 | 32.63 | 0.00 |
+| b A k | 0 | 63.6 +- 5.8 | 10.93 | 1.45 | 1.172 | 63.66 | 58.57 | 33.44 | 0.72 |
+| b A k | 1 | 64.0 +- 6.0 | 10.67 | 1.31 | 1.247 | 64.02 | 59.59 | 33.80 | 0.00 |
+| b A k | 2 | 61.3 +- 5.9 | 10.38 | 1.28 | 1.261 | 61.34 | 57.41 | 32.59 | 0.27 |
+
+The fixed-market agents earn 63.0 to 67.5 against the optimum's 68.7 but are
+badly exposed: the sd of their final inventory is 9 to 13 shares, and their
+worst case ranges from 12 down to -47. Every adversarially trained seed ends
+with an inventory sd of 1.3 to 1.6 and has a Sharpe ratio of 9.6 to 10.9 on the
+fixed market. The b A k seeds guarantee 32.6 to 33.8, within 1.2 to 2.4 of the
+game value 34.99, and the drift seeds are within 1.6 to 1.8 of the drift
+game's 61.61. The last column is how much more than the game value the best
+market maker could take off the learned adversary: at most 0.72. Seed 0's b A k
+adversary, printed at t = 0 for q from -10 to 10, plays A = 105 and k = 1.875
+throughout and the bang-bang drift except for a wrong sign at q = 1.
+
+### Inverse RL: what penalty does a bot behave as if it had
+
+`irl.py` asks the reverse question: given a bot's quotes at the states it
+visits, which running penalty zeta q'^2 + nu |q'|, terminal penalty eta q^2 and
+market (A, k) make those quotes optimal against b = 0? `match` fits them by
+least squares on the quotes, weighted by visit counts from `simulate`, solving
+the dynamic program at every Nelder-Mead step. `boltzmann` is the stochastic
+version for a discrete action grid: actions drawn with probability
+proportional to exp(beta Q(s, a)), with Q from the same dynamic program
+(Boltzmann-rational inverse RL, Ramachandran and Amir 2007), fitting the
+penalties and beta by maximum likelihood.
+
+From `examples/inverse_rl.py` (rms is the quote error at visited states):
+
+| bot | fit | zeta | nu | A | k | rms |
+|---|---|---|---|---|---|---|
+| planted zeta .004, nu .01, eta .3 | zeta, nu, eta | 0.00400 | 0.0100 | | | 0.0000 |
+| equilibrium, b | zeta | 0.00795 | | | | 0.0450 |
+| equilibrium, b | zeta, nu | 0.00000 | 0.0270 | | | 0.0096 |
+| equilibrium, b A k | zeta, nu | 0.00000 | 0.0231 | | | 0.1773 |
+| equilibrium, b A k | zeta, nu, A, k | 0.00000 | 0.0274 | 106.2 | 1.894 | 0.0080 |
+| AS gamma 0.1 | zeta, nu | 0.00000 | 0.0319 | | | 0.1880 |
+| PPO, fixed (3 seeds) | zeta, nu | 0 | 0 | | | 0.17 to 0.43 |
+| PPO, b (3 seeds) | zeta, nu | 0 | 0.017 to 0.021 | | | 0.19 to 0.23 |
+| PPO, b A k (3 seeds) | zeta, nu | 0 | 0.016 to 0.030 | | | 0.22 to 0.30 |
+
+The drift-robust market maker behaves like a linear penalty of nu = 0.027 a
+step with no quadratic part (the argument above says b-bar dt = 0.025; the
+difference comes from q = 0, where the robust market maker pays nothing and the
+penalty still charges for the chance of a fill), and fitting a quadratic
+penalty instead leaves about five times the error. For the full equilibrium the fit
+also finds the market the bot is optimizing against: A = 106 and k = 1.89,
+the adversary's corners 105 and 1.875. The PPO agents trained against an
+adversary come out with the same kind of linear penalty, the fixed-market ones
+with none. Their quotes are on a 0.25 grid, so an rms near 0.07 is the floor
+for them.
+
+A quadratic running penalty is the usual stand-in for inventory risk. A hard
+bound on the drift gives an absolute value instead, and it shows in the quotes.
+
 ## Install
 
 ```
@@ -3419,6 +3590,9 @@ half minutes.
 36,000 in six and `toxic_bursts.py` about 7,000 in two and a half.
 `flash_crash.py` runs about 17,000 sessions in seven minutes, and
 `strategies.py` (which reads the PPO seed from `data/`) 8,000 in about one.
+`arl_mm.py` trains nine PPO runs in parallel and saves their quote tables in
+`data/` (about 10 minutes), `robust_mm.py` redraws the robust chart from them in
+under a minute, and `inverse_rl.py` fits the penalties in about five.
 
 ## Notes
 
