@@ -2002,3 +2002,93 @@ Results (ticks):
 Next: break down the passive case on the resilient book (why GLFT loses most
 there), paired reaction at the touch for the queue-reactive book, and a
 second-order filter that uses inter-print times for the executor's regularity.
+
+## 2026-11-11: A flash crash with circuit breakers, and the strategy chart
+
+Built:
+
+- `crash.Guard`, a `Book` that enforces a `Rule`: a price collar around the
+  mean trade price of the last 5 minutes, a LULD limit state that turns into a
+  5-minute pause after 15 seconds, and a trip-and-halt rule. `Reason.HALTED`
+  for orders that would trade during a pause.
+- `crash.Stops` (stop-loss sells relative to the start), `crash.Value` (slow
+  fundamental traders that trade a capped multiple of the gap) and
+  `crash.Maker` (inventory limit with a dump to a target, a cool-off after the
+  dump, an optional loss limit with a rest period).
+- `crash.run` / `Run.summary` / `crash.session`: one scenario and its
+  measurements (worst print and worst mid below value, volume printed 20 ticks
+  down, seller's cost a share, makers' P&L, shares dumped, pauses and minutes
+  halted, time from the low back to within 2 ticks).
+- `Context` now takes an order's price from the ACCEPTED event, so an order the
+  venue repriced shows its real price.
+- `examples/flash_crash.py` with `docs/flash_crash.png`;
+  `examples/strategies.py` with `docs/strategies.png`, the P&L distribution of
+  four bots on calm and informed flow, now near the top of the README.
+
+Design notes:
+
+- The guard has no timer events. Every submit, cancel and modify first catches
+  up the state at the current time: a limit state that has lasted past 15
+  seconds becomes a pause starting exactly at 15 seconds, and a pause past its
+  end reopens. Since the state only matters when an order arrives, this is
+  exact without touching the simulator's event queue.
+- The reference is frozen during a limit state and a pause and restarts from
+  the mid after a reopening. The plan's rule for reopenings after 10 minutes
+  (keep the old reference) is not modelled.
+- The limit state is "no bid inside the lower band, or no offer inside the
+  upper band". With market orders clamped to IOC at the band, nothing rests at
+  the band, so the plan's wording (offer at the lower band) never fires on its
+  own; this condition is the same thing seen from the other side.
+- A pause rejects marketable orders. Real halts queue them and reopen with an
+  auction, so this version is harsher on the value buyers than the real one.
+- Stop cascade on a static book: m = ceil((X + s m) / d) for the deepest level
+  reached. Its smallest fixed point lies in [X / (d - s), X / (d - s) + d / (d -
+  s)), and for s >= d there is none, which is the runaway case.
+- Hot potato bug: with zero latency, maker A dumps into B's bid, B reaches its
+  limit and dumps into A's freshly reposted bid, and so on with no simulated
+  time passing. Seeds 0 and 2 hung at limit 6. The cool-off keeps a maker off
+  the side it just dumped for a minute (a timer requotes when it ends), and the
+  hung seed is now a test. The loss-limit timer and the cool-off timer share
+  `on_timer`, so the rest period ends only when its own time is reached.
+- Tried a resilient background book (value pull through the market order
+  split) first: its buyers saturate at 2 mu, so a heavy seller just moves the
+  price linearly (0.28 ticks a share) and nothing recovers. Separate slow value
+  traders whose size grows with the gap give the V shape.
+
+Checks:
+
+- Guard with no rule equals `Book` event for event on 3000 random operations.
+- Collar sweep stops at the band, limits through the band are repriced, the
+  reference drops trades older than its window, the limit state pauses on time
+  (also with nothing arriving for 7 minutes), clears if bids return, trip halts
+  after the trade that tripped it, a clamped order keeps its new price.
+- A crash through a subclass that asserts every print is inside the band at
+  that moment: no violations, pauses recorded, book audit clean.
+- Stop cascade lands on the fixed point for six (X, d, s), two of them runaway.
+- Maker dumps 3 at 99 at its limit, stays off the bid until the cool-off ends;
+  the loss limit flattens at minute 3 and quotes again after the rest; value
+  traders buy clips of exactly min(cap, floor(kappa gap)).
+
+Results (ticks; 300 sessions of 90 minutes a cell):
+
+- Crash probability (print 30 below value) with no breaker by participation
+  rate: 0.00, 0.01, 0.03, 0.07, 0.31, 0.88, 1.00, 1.00 at r = 0.15 to 0.6. The
+  breakers stay within about two standard errors of it at every rate.
+- At r = 0.45, median worst print: none 83.5, collar 67.5, LULD 77.0, trip
+  79.5. Makers lose 4567, 2620, 2735, 2926. LULD pauses 6.1
+  times and is halted 29.7 of 90 minutes; 0.003 pauses a session with no seller.
+  Median recovery 21.4 minutes with no breaker, 24 to 27 with one: the upper
+  band also pauses the rebound.
+- LULD band 5: median 36.5, crash 0.65, but 0.27 pauses and 1.34 halted minutes
+  per calm session.
+- No stops: median 19.5, crash 0.03. No dumping: 89.2. No makers: 59.5.
+- Maker limit 4 to none: median 53.0, 69.5, 73.8, 83.5, 105.5, 123.0, 127.0,
+  127.0, 127.0, the same direction as Gao et al.
+- Strategies, 1000 sessions of 60 minutes, mean (sd): calm touch 15.94 (17.44),
+  AS 15.52 (12.09), GLFT 12.45 (10.62), PPO 11.87 (9.01); with an informed
+  trader 10.45 (20.57), 11.05 (14.93), 13.13 (11.24), 10.08 (10.42).
+
+Next: a reopening auction for the pauses (single price that maximises volume,
+with the value traders' orders queued), a fixed-clock seller to test whether
+the makers deepen the crash through the POV volume feedback, makers with entry
+latency instead of the cool-off, and the kill switch swept in the same table.
