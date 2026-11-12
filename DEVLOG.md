@@ -2092,3 +2092,96 @@ Next: a reopening auction for the pauses (single price that maximises volume,
 with the value traders' orders queued), a fixed-clock seller to test whether
 the makers deepen the crash through the POV volume feedback, makers with entry
 latency instead of the cool-off, and the kill switch swept in the same table.
+
+## 2026-11-12: A market maker against an adversary, solved exactly, and inverse RL
+
+Built:
+
+- `robust.py`: the Spooner-Savani (2020) market-making game in discrete time,
+  solved by backward induction over (step, inventory). `respond` is the market
+  maker's best quote pair for given b, A, k and continuation values;
+  `equilibrium` solves the zero-sum game for an adversary that controls any of
+  b, A, k; `worst_case` is the adversary's exact best response to a quote table;
+  `best_response`, `evaluate` and `simulate` (Monte Carlo, with visit counts)
+  for everything else. Running penalties zeta q'^2 and nu |q'| and a terminal
+  eta q^2.
+- `arl.py`: `Duel`, one environment from either side, and `rarl`, alternating
+  PPO between the market maker (81 quote pairs) and the adversary (12
+  corners). `quotes` and `market` turn trained policies into tables for the
+  exact solver.
+- `irl.py`: `match` fits penalties and the believed market (A, k) by least
+  squares on quotes at visited states; `boltzmann` fits penalties and the
+  inverse temperature by maximum likelihood for a stochastic discrete policy.
+- `examples/robust_mm.py` with `docs/robust_mm.png`, `examples/arl_mm.py`,
+  `examples/inverse_rl.py`, and a README section.
+
+Design notes:
+
+- Best quote on one side: maximize p(delta) (delta + c) with p = a exp(-k delta),
+  so delta = 1/k - c, clipped at 0. c holds the drift on the new share and the
+  change in continuation value, and depends on the other side's fill
+  probability through the both-fill term. Alternating exact maximizations is
+  coordinate ascent, so the payoff never goes down; the tests compare against
+  a 601 x 601 grid at random states with large penalties.
+- The payoff is linear in b, so the market maker's best-response value is
+  convex in b with slope dt E[q']. That gives the drift as a bound unless the
+  expected inventory after fills can be zero, which only happens at q = 0
+  (|p+ - p-| < 1). Bisection on the sign of E[q'] handles that state without
+  assuming symmetry.
+- A and k need no search: for any b, a larger A or a smaller k lets the market
+  maker buy any fill probability with a wider quote, so its value is monotone
+  and the adversary sits at A = 105, k = 1.875. This is an argument about the
+  min over the adversary of the max over quotes; the saddle tests (worst case
+  of the equilibrium quotes and best response to the equilibrium adversary
+  both return the same value table) are what show it is an equilibrium.
+- The paper's single-stage payoff (eq. 8) puts b next to the fill premium
+  without the factor dt. Putting it back gives quotes 1/k -+ b dt and a drift of
+  exactly 0 at q = 0, where the paper has a continuum.
+- With b-only control, the drift costs b-bar dt |q'| per step when q != 0, an
+  absolute-value penalty. The inverse fit confirms it: nu = 0.027 against the
+  0.025 from the argument, zeta = 0, and a quadratic-only fit has 4.7 times the
+  rms error.
+- PPO details: the paper starts episodes at a random time and inventory in
+  [-50, 50]. Starting inventories that large left PPO at 64 against the fixed
+  market after 1200 iterations; [-10, 10] with lr 3e-3 and 32 episodes an
+  iteration got 67.4. Rewards are in currency, no scaling.
+- Windows: the example's process pool needed the `__main__` guard, the first
+  launch died with a broken pool.
+
+Checks:
+
+- Symmetric 1/k against the fixed market with limits that cannot bind equals
+  N 2 A dt e^-1 / k = 68.6708 to 1e-12; risk-neutral best response quotes 1/k.
+- One-step equilibrium against its closed form (quotes, drift, value).
+- `respond` beats a dense grid at random states.
+- Saddle: `worst_case` of the equilibrium and `best_response` to the
+  equilibrium adversary reproduce the value table to 1e-10, for b and for b,
+  A, k; a brute-force maximin on a grid matches the value within 2e-5.
+- Monte Carlo reward and wealth means within 4 se of the exact values on
+  40,000 paths; inventory limits hold in simulation.
+- Every non-equilibrium quote table (symmetric, AS 0.1 and 1.0, fixed-market
+  optimum) has a lower guarantee than the equilibrium.
+- `Duel`: the two sides' rewards are exact negatives on the same seed, the
+  one-step mean matches `payoff` within 4 se over 40,000 resets.
+- IRL: planted (zeta, nu, eta) recovered to 1e-4 relative, planted (A, k) to
+  1e-3, Boltzmann zeta and beta within 10% from 6000 sampled actions.
+
+Results (100,000 paths of the fixed market, q0 = 0):
+
+- Equilibrium b, A, k: 64.2 +- 5.6, Sharpe 11.42, spread 1.159, guarantee
+  34.99. Paper's learned agent: 65.1 +- 6.7, 9.78, 1.44.
+- Equilibrium b: 66.0 +- 6.4, 10.34, 1.400. Paper: 65.5 +- 6.9, 9.51, 1.43.
+- Fixed-market optimum with eta 1: 67.5 +- 9.3 (paper's learned 61.3 +- 8.5);
+  with zeta 0.01: 65.7 +- 6.3, Sharpe 10.42, guarantee 33.97.
+- Risk neutral 68.7 +- 13.7, guarantee 21.27.
+- PPO, 3 seeds each: fixed market 63.0 / 67.5 / 65.9, guarantees -47.1 / 0.8 /
+  12.1; RARL b A k 63.7 / 64.0 / 61.3, guarantees 33.4 / 33.8 / 32.6, learned
+  adversary at most 0.72 exploitable.
+- Inverse fits: equilibrium b A k gives A 106.2, k 1.894, nu 0.0274; AS gamma
+  0.1 is best fit by nu 0.032 with rms 0.19 (its quotes are not optimal for any
+  of these penalties); RARL PPO agents nu 0.016 to 0.030, fixed-market PPO 0.
+
+Next: regime switches inside the game (a Markov adversary the market maker
+cannot see, so the robust and the Bayes-optimal quoter can be compared), the
+oligopoly version with two market makers, and the depth control on the
+replayed book.
