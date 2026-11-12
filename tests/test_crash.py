@@ -5,8 +5,9 @@ import pytest
 from scripted import limit, make, market
 
 from mmsim.book import Book, EventType, OrderType, Reason, Side, Tif
-from mmsim.crash import Guard, Maker, Rule, Stops, Value
-from mmsim.flow import CSTParams
+from mmsim.crash import Guard, Maker, Rule, Stops, Value, session
+from mmsim.execution import Executor
+from mmsim.flow import CSTParams, ZeroIntelligence
 from mmsim.sim import Agent, Simulator
 
 SKY = CSTParams.sky_perfect()
@@ -214,6 +215,21 @@ def test_maker_dumps_at_its_hard_limit():
     assert sorted(o.side for o in ctx.orders.values()) == [Side.BUY, Side.SELL]
 
 
+def test_cool_off_ends_the_hot_potato():
+    r = session(
+        0,
+        Rule(),
+        flow=lambda: ZeroIntelligence(SKY),
+        makers=lambda: [Maker(1, 2, 0.1, 6, 6, 4, cool=1.0) for _ in range(5)],
+        value=lambda seed: [Value(3.0, 0.5, 10, i) for i in range(4)],
+        qty=300,
+        rate=0.45,
+        stops=[(d, 2) for d in range(3, 60, 2)],
+        minutes=90.0,
+    )
+    assert r.dumped > 0 and r.sold > 0
+
+
 def test_kill_switch_flattens_and_waits():
     mm = Maker(half=0.5, size=2, soft=2, loss=2.0, rest=4.0)
     sim = make(
@@ -251,3 +267,45 @@ def test_value_trader_buys_the_gap_in_capped_clips(kappa, cap, qty):
     assert list(clips.values()) == [qty] * len(clips)
     assert all(f.side == Side.BUY and f.price == 102 for f in fills)
     assert bool(fills) == (qty > 0)
+
+
+class Strict(Guard):
+    def _leave(self, now, out):
+        b = self.bands()
+        for e in out:
+            if e.type == EventType.TRADE and b is not None:
+                assert b[0] <= e.price <= b[1]
+        super()._leave(now, out)
+
+
+def test_no_print_outside_the_band_in_a_crash():
+    sim = Simulator(
+        ZeroIntelligence(SKY),
+        [
+            *(Maker(1, 2, 0.1, 10, 10, 4) for _ in range(3)),
+            Stops([(d, 2) for d in range(2, 40)]),
+            Executor(Side.SELL, [5.0], [40]),
+        ],
+        seed=4,
+        book=lambda: Strict(Rule(band=4, limit=0.25)),
+    )
+    sim.book.clock = lambda: sim.t
+    sim.seed(10_000, 10_001)
+    sim.warm_up(5.0)
+    sim.run(30.0)
+    assert sim.book.pauses
+    assert sim.book.audit() == ""
+
+
+def test_session_is_reproducible_and_calm_without_a_seller():
+    kw = dict(
+        flow=lambda: ZeroIntelligence(SKY),
+        makers=lambda: [Maker(1, 2, 0.1, 10, 10, 4) for _ in range(3)],
+        minutes=20.0,
+    )
+    a = session(3, Rule(band=10, limit=0.25), **kw)
+    assert a == session(3, Rule(band=10, limit=0.25), **kw)
+    assert a.sold == 0 and math.isnan(a.cost)
+    assert a.far == 0 and a.dumped == 0
+    b = session(3, Rule(band=10, limit=0.25), qty=200, rate=0.5, **kw)
+    assert 0 < b.sold <= 200 and b.cost > 0

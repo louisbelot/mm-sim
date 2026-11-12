@@ -6,10 +6,14 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+import numpy as np
+
 from .accounting import Fill
 from .book import Book, Event, EventType, OrderType, Reason, Side, Tif
 from .bots import Quoter
-from .sim import Agent, Context, Print
+from .execution import Pov, shortfall
+from .flow import ZeroIntelligence
+from .sim import Agent, Context, Print, Simulator
 
 
 @dataclass(frozen=True)
@@ -292,3 +296,109 @@ class Maker(Quoter):
             return
         side = Side.SELL if q > 0 else Side.BUY
         ctx.submit(side, 0, abs(q) - target, kind=OrderType.MARKET)
+
+
+@dataclass(frozen=True, slots=True)
+class Crash:
+    drop: float
+    dip: float
+    far: int
+    sold: int
+    cost: float
+    makers: float
+    dumped: int
+    kills: int
+    pauses: int
+    halted: float
+    recover: float
+    volume: int
+
+
+@dataclass
+class Run:
+    sim: Simulator
+    makers: list[Maker]
+    seller: Pov | None
+    t0: float
+    arrival: float
+    start: float
+
+    @property
+    def guard(self) -> Guard:
+        return self.sim.book
+
+    def summary(self, far: float = 20.0, near: float = 2.0) -> Crash:
+        sim, arrival = self.sim, self.arrival
+        t1 = self.t0 + self.start
+        trades = [(t, p, q) for t, p, q in self.guard.trades if t >= t1]
+        low = min((p for _, p, _ in trades), default=arrival)
+        tt, mids = np.asarray(sim.tape.t), np.asarray(sim.tape.mid)
+        late = tt >= t1
+        tt, mids = tt[late], mids[late]
+        dip, recover = 0.0, math.nan
+        if len(mids):
+            k = int(np.argmin(mids))
+            dip = arrival - float(mids[k])
+            back = np.nonzero(mids[k:] >= arrival - near)[0]
+            if len(back):
+                recover = float(tt[k + back[0]] - tt[k])
+        n = len(self.makers)
+        ctxs = sim.contexts
+        mark = float(sim.tape.at(sim.end))
+        sold, cost = 0, math.nan
+        if self.seller is not None:
+            fills = ctxs[n].account.fills
+            sold = sum(f.qty for f in fills)
+            if sold:
+                cost = shortfall(fills, self.seller.arrival) / sold
+        pauses = [(a, b) for a, b in self.guard.pauses if b > self.t0]
+        return Crash(
+            drop=arrival - low,
+            dip=dip,
+            far=sum(q for _, p, q in trades if p <= arrival - far),
+            sold=sold,
+            cost=cost,
+            makers=sum(c.account.value(mark) for c in ctxs[:n]),
+            dumped=sum(f.qty for c in ctxs[:n] for f in c.account.fills if not f.maker),
+            kills=sum(len(m.kills) for m in self.makers),
+            pauses=sum(1 for a, _ in pauses if a >= self.t0),
+            halted=sum(min(b, sim.end) - max(a, self.t0) for a, b in pauses),
+            recover=recover,
+            volume=sum(q for _, _, q in trades),
+        )
+
+
+def run(
+    seed: int,
+    rule: Rule,
+    *,
+    flow: Callable[[], ZeroIntelligence],
+    makers: Callable[[], Sequence[Maker]],
+    value: Callable[[int], Sequence[Value]] = lambda seed: (),
+    qty: int = 0,
+    rate: float = 0.2,
+    stops: Sequence[tuple[int, int]] = (),
+    warm: float = 30.0,
+    minutes: float = 60.0,
+    start: float = 5.0,
+    record: float | None = None,
+) -> Run:
+    mm = list(makers())
+    seller = Pov(Side.SELL, qty, rate, start) if qty else None
+    agents: list[Agent] = [*mm]
+    if seller is not None:
+        agents.append(seller)
+    if stops:
+        agents.append(Stops(stops))
+    agents.extend(value(seed))
+    sim = Simulator(flow(), agents, seed=seed, book=lambda: Guard(rule), record_every=record)
+    sim.book.clock = lambda: sim.t
+    sim.seed(10_000, 10_001)
+    sim.warm_up(warm)
+    t0, arrival = sim.t, sim.tape.mid[-1]
+    sim.run(minutes)
+    return Run(sim, mm, seller, t0, arrival, start)
+
+
+def session(seed: int, rule: Rule, *, far: float = 20.0, near: float = 2.0, **kw) -> Crash:
+    return run(seed, rule, **kw).summary(far, near)
