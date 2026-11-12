@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import math
+import random
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from .accounting import Fill
 from .book import Book, Event, EventType, OrderType, Reason, Side, Tif
+from .bots import Quoter
 from .sim import Agent, Context, Print
 
 
@@ -183,3 +186,109 @@ class Stops(Agent):
         if self.triggered + ctx.position > 0 and not self._armed:
             self._armed = True
             ctx.set_timer(self.retry)
+
+
+class Value(Agent):
+    def __init__(self, every: float, kappa: float, cap: int, seed: int = 0) -> None:
+        self.every = every
+        self.kappa = kappa
+        self.cap = cap
+        self.rng = random.Random(seed)
+        self.value = math.nan
+
+    def on_start(self, ctx: Context) -> None:
+        self.value = ctx.mark()
+        ctx.set_timer(self.rng.expovariate(1 / self.every))
+
+    def on_timer(self, ctx: Context) -> None:
+        ctx.set_timer(self.rng.expovariate(1 / self.every))
+        gap = self.value - ctx.mark()
+        q = min(self.cap, math.floor(self.kappa * abs(gap)))
+        if q > 0:
+            ctx.submit(Side.BUY if gap > 0 else Side.SELL, 0, q, kind=OrderType.MARKET)
+
+
+class Maker(Quoter):
+    def __init__(
+        self,
+        half: float = 1.0,
+        size: int = 1,
+        skew: float = 0.0,
+        soft: int | None = None,
+        hard: int | None = None,
+        flat: int = 0,
+        loss: float | None = None,
+        rest: float = 5.0,
+        cool: float = 0.0,
+    ) -> None:
+        super().__init__(size, soft)
+        self.half = half
+        self.skew = skew
+        self.hard = hard
+        self.flat = flat
+        self.loss = loss
+        self.rest = rest
+        self.cool = cool
+        self.kills: list[float] = []
+        self._cool_until = -math.inf
+        self._cool_side = Side.BUY
+        self._peak = -math.inf
+        self._out = False
+        self._back = math.inf
+
+    def targets(self, ctx: Context) -> tuple[int | None, int | None]:
+        mid = ctx.mid
+        if mid is None:
+            return None, None
+        c = mid - self.skew * ctx.position
+        bid = min(math.floor(c - self.half), ctx.ask - 1)
+        ask = max(math.ceil(c + self.half), ctx.bid + 1)
+        if ctx.t < self._cool_until:
+            if self._cool_side == Side.BUY:
+                bid = None
+            else:
+                ask = None
+        return bid, ask
+
+    def on_book(self, ctx: Context) -> None:
+        self._step(ctx)
+
+    def on_fill(self, ctx: Context, fill: Fill) -> None:
+        self._step(ctx)
+
+    def on_timer(self, ctx: Context) -> None:
+        if self._out and ctx.t >= self._back:
+            self._out = False
+            self._peak = -math.inf
+        self._step(ctx)
+
+    def _step(self, ctx: Context) -> None:
+        if self._out:
+            self._unwind(ctx, 0)
+            return
+        if self.loss is not None:
+            v = ctx.pnl()
+            self._peak = max(self._peak, v)
+            if v < self._peak - self.loss:
+                self._out = True
+                self.kills.append(ctx.t)
+                ctx.cancel_all()
+                self._unwind(ctx, 0)
+                self._back = ctx.t + self.rest
+                ctx.set_timer(self.rest)
+                return
+        q = ctx.position
+        if self.hard is not None and abs(q) >= self.hard:
+            self._unwind(ctx, self.flat)
+            self._cool_until = ctx.t + self.cool
+            self._cool_side = Side.BUY if q > 0 else Side.SELL
+            if self.cool > 0:
+                ctx.set_timer(self.cool)
+        self.requote(ctx)
+
+    def _unwind(self, ctx: Context, target: int) -> None:
+        q = ctx.position
+        if abs(q) <= target:
+            return
+        side = Side.SELL if q > 0 else Side.BUY
+        ctx.submit(side, 0, abs(q) - target, kind=OrderType.MARKET)

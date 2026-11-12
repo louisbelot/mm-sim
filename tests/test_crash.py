@@ -2,10 +2,10 @@ import math
 import random
 
 import pytest
-from scripted import make
+from scripted import limit, make, market
 
 from mmsim.book import Book, EventType, OrderType, Reason, Side, Tif
-from mmsim.crash import Guard, Rule, Stops
+from mmsim.crash import Guard, Maker, Rule, Stops, Value
 from mmsim.flow import CSTParams
 from mmsim.sim import Agent, Simulator
 
@@ -196,3 +196,58 @@ def test_stop_cascade_reaches_the_fixed_point(X, d, s):
         assert bid is None
     if s < d:
         assert 0 <= m - X / (d - s) < d / (d - s)
+
+
+def test_maker_dumps_at_its_hard_limit():
+    mm = Maker(half=0.5, size=2, soft=4, hard=4, flat=1, cool=1.5)
+    sim = make(
+        [(1.0, market(Side.SELL, 2)), (2.0, market(Side.SELL, 2))],
+        mm,
+    )
+    sim.run(3.0)
+    ctx = sim.contexts[0]
+    assert ctx.position == 1
+    dumps = [f for f in ctx.account.fills if not f.maker]
+    assert [(f.side, f.price, f.qty) for f in dumps] == [(Side.SELL, 99, 3)]
+    assert [o.side for o in ctx.orders.values()] == [Side.SELL]
+    sim.run(1.0)
+    assert sorted(o.side for o in ctx.orders.values()) == [Side.BUY, Side.SELL]
+
+
+def test_kill_switch_flattens_and_waits():
+    mm = Maker(half=0.5, size=2, soft=2, loss=2.0, rest=4.0)
+    sim = make(
+        [
+            (1.0, market(Side.SELL, 2)),
+            (2.0, limit(Side.BUY, 95, 3)),
+            (3.0, market(Side.SELL, 5)),
+        ],
+        mm,
+    )
+    sim.run(5.0)
+    ctx = sim.contexts[0]
+    assert mm.kills == [3.0]
+    assert ctx.position == 0
+    assert not ctx.orders
+    sim.run(3.0)
+    assert ctx.orders
+
+
+@pytest.mark.parametrize("kappa,cap,qty", [(2.0, 2, 2), (1.0, 5, 1), (0.5, 5, 0)])
+def test_value_trader_buys_the_gap_in_capped_clips(kappa, cap, qty):
+    v = Value(every=1.0, kappa=kappa, cap=cap, seed=3)
+    script = [
+        (0.001, market(Side.SELL, 5)),
+        (0.002, limit(Side.BUY, 96)),
+        (0.003, limit(Side.SELL, 102, 30)),
+    ]
+    sim = make(script, v)
+    sim.run(5.0)
+    fills = sim.contexts[0].account.fills
+    assert v.value == 100.5
+    clips = {}
+    for f in fills:
+        clips[f.oid] = clips.get(f.oid, 0) + f.qty
+    assert list(clips.values()) == [qty] * len(clips)
+    assert all(f.side == Side.BUY and f.price == 102 for f in fills)
+    assert bool(fills) == (qty > 0)
