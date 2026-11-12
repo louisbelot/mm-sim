@@ -226,7 +226,7 @@ class Context:
                 self._sim._queue(self.agent.on_fill, self, info)
             case EventType.ACCEPTED:
                 o = self.orders[e.id]
-                o.acked, o.ahead = True, info
+                o.acked, o.ahead, o.price = True, info, e.price
             case EventType.MODIFIED:
                 o = self.orders[e.id]
                 if info is not None:

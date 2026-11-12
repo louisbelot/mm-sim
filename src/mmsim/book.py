@@ -47,6 +47,7 @@ class Reason(IntEnum):
     UNFILLED = 7
     FOK = 8
     POST_ONLY = 9
+    HALTED = 10
 
 
 @dataclass(frozen=True, slots=True)
