@@ -2185,3 +2185,78 @@ Next: regime switches inside the game (a Markov adversary the market maker
 cannot see, so the robust and the Bayes-optimal quoter can be compared), the
 oligopoly version with two market makers, and the depth control on the
 replayed book.
+
+## 2026-11-13: Hidden regimes, a filter, and the quoter that plans on it
+
+Built:
+
+- `regime.py`: the robust game's market with nature in place of the
+  adversary. A hidden two-state Markov chain sets drift and volatility; fills
+  are the same in both states. `update` is the discrete Wonham (Hamilton)
+  filter, `informed` solves over (n, q, s), `bayes` over (n, q, belief) on a
+  201-point grid with Gauss-Hermite quadrature, `blind` is the best quoter that
+  ignores prices, `minimax` the drift equilibrium under the worst volatility,
+  `qmdp` the belief-weighted informed continuation. `evaluate` gives exact
+  values of any (n, q) table in the hidden world, `simulate` runs any quoter
+  with the filter alongside.
+- `regime.Env` and `learned` for PPO with or without the belief.
+- `examples/regime_mm.py` with `docs/regime_mm.png`, `examples/regime_rl.py`,
+  and a README section.
+
+Design notes:
+
+- Quotes do not change what is learned (fills do not depend on the regime),
+  so the belief is a sufficient statistic and the stage problem is the robust
+  game's with b replaced by E_pi[b]. The same `respond` solves it; the new
+  part is only the continuation, which is a belief-weighted expectation over
+  the next increment of V at the updated belief.
+- `blind` is not "best response to the stationary drift". Without observations
+  the regime law at step n is the prior pushed n steps, and since q carries no
+  information about the regime, the exact best price-blind policy is a best
+  response to that time-varying mean drift and mean variance. Tested by
+  checking that its value is the prior-weighted exact value in the hidden
+  world.
+- `backward` takes the step index in the continuation so the same loop runs
+  the informed, Bayes, blind and policy-evaluation recursions.
+- Linear interpolation of a convex function overestimates, so the Bayes value
+  converges from above: 78.838, 78.733, 78.711, 78.705 for 51 to 401 grid
+  points. The ordering tests have room for that.
+- `lerp` for interpolated quotes keeps the infinite quote at the inventory
+  limits instead of computing inf - inf.
+
+Checks:
+
+- Filter step against Bayes' rule with scipy's normal pdf to 1e-14; filter
+  calibration in simulation (E[1{s} - pi] and E[(1{s} - pi) pi] within 4 se,
+  E[pi_n] equals the propagated prior).
+- No switching: informed equals two robust best responses, Bayes at pi = 0, 1
+  equals informed, blind equals the best response to the mean drift; with
+  sigma 1e4 Bayes at every grid belief equals the mean-drift best response.
+- Bayes value convex in the belief; minimax equals `robust.equilibrium(..,
+  "b")`; QMDP quotes at a certain belief are the informed quotes; evaluating
+  the informed table returns its value.
+- minimax, blind, AS < bayes < informed, and Monte Carlo within 4 se of the
+  exact value for the Bayes, informed and blind quoters.
+- `Env` episode reward against the exact value of a constant quote, `learned`
+  against `Policy.greedy`.
+
+Results (100,000 paths):
+
+- Drift regimes -5 / +5, rate 2, phi 0.01: informed 100.31, Bayes 78.71,
+  blind 67.97, AS 67.76, minimax 65.89. The filter keeps 33% of the value of
+  information. QMDP is within 0.010 +- 0.005 of Bayes.
+- Volatility regimes 1 / 4, phi 0.05: informed 66.22, Bayes 66.18, blind
+  65.96; the filter keeps 86%.
+- Switching-rate sweep: Bayes 124.9 against 157.4 informed at rate 0.25, the
+  filter is worth 0.11 at rate 16 and nothing by 40.
+- Bayes carries inventory with its belief (mean abs q 13.4 against 3.7) and
+  its Sharpe ratio falls from 5.7 to 2.2; minimax gives up 2.1 for a Sharpe
+  of 9.9.
+- PPO with the belief: 74.26 / 73.56 / 71.79 over three seeds, 36 to 59% of
+  the blind-to-Bayes gap; Bayes rounded to the PPO grid is 78.23, so the grid
+  is not the gap. PPO without the belief: 66.93 / 66.53 / 63.98, below the
+  blind table.
+
+Next: regimes in the intensities (Campi and Zabaljauregui 2020), where fills
+carry information and the quotes become a dual-control problem, so QMDP should
+finally fall behind; then two market makers against one adversary.
