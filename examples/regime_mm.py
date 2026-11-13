@@ -123,8 +123,7 @@ inv.plot(
 inv.set_ylabel("inventory")
 lim = max(np.abs(path.inventory).max(), np.abs(flat.inventory).max()) + 2
 inv.set_ylim(-lim, lim)
-for side in ("top",):
-    inv.spines[side].set_visible(False)
+inv.spines["top"].set_visible(False)
 lines = right.get_legend_handles_labels()
 more = inv.get_legend_handles_labels()
 right.legend(lines[0] + more[0], lines[1] + more[1], loc="lower left", frameon=False)
