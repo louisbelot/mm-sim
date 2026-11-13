@@ -45,6 +45,23 @@ def test_informed_without_switching_is_two_best_responses():
         assert np.allclose(full.bid[:, j], s.bid, atol=1e-9)
 
 
+def test_blind_without_switching_is_a_best_response_to_the_mean_drift():
+    w = g.World(T=0.3, Q=15, phi=0.01, rate=(0.0, 0.0), sigma=(1.0, 3.0), pi0=0.3)
+    b, s2 = 0.7 * w.b[0] + 0.3 * w.b[1], 0.7 * 1.0 + 0.3 * 9.0
+    s = r.best_response(w.game((b, b), s2), r.Market(b, w.A, w.k))
+    blind = g.blind(w)
+    assert np.allclose(blind.V, s.V, atol=1e-9)
+    assert np.allclose(blind.bid, s.bid, atol=1e-9)
+
+
+def test_blind_value_is_its_value_in_the_hidden_world():
+    w = g.World(T=0.3, Q=15, phi=0.01, sigma=(1.0, 3.0), rate=(6.0, 2.0), pi0=0.9)
+    blind = g.blind(w)
+    V = g.evaluate(w, blind.bid, blind.ask)
+    pi = g.priors(w)
+    assert np.allclose((1 - pi[:, None]) * V[:, 0] + pi[:, None] * V[:, 1], blind.V, atol=1e-9)
+
+
 def test_evaluating_the_informed_quotes_returns_their_value():
     full = g.informed(SMALL)
     assert np.allclose(g.evaluate(SMALL, full.bid, full.ask), full.V, atol=1e-9)
@@ -71,3 +88,20 @@ def test_bayes_value_is_convex_in_the_belief():
     plan, _ = g.bayes(SMALL, 51)
     for n in (0, SMALL.N // 2, SMALL.N - 1):
         assert np.diff(plan.V[n], 2, axis=0).min() > -1e-9
+
+
+def test_information_ordering():
+    w = SMALL
+    plan, _ = g.bayes(w)
+    bayes = g.believed(w, plan)
+    full = g.start(w, g.informed(w).V)
+    others = [g.minimax(w), g.blind(w)]
+    tables = [(s.bid, s.ask) for s in others] + [g.avellaneda(w, 2 * w.phi)]
+    values = [g.start(w, g.evaluate(w, *t)) for t in tables]
+    assert max(values) < bayes < full
+
+
+def test_minimax_is_the_drift_game_under_the_worst_volatility():
+    w = g.World(T=0.3, Q=15, phi=0.02, sigma=(1.0, 3.0))
+    game = r.Game(T=w.T, Q=w.Q, zeta=w.phi * 9.0 * w.dt, eta=w.eta)
+    assert np.allclose(g.minimax(w).V, r.equilibrium(game, "b").V, atol=1e-9)

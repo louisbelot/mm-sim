@@ -183,3 +183,27 @@ def believed(w: World, plan: Plan, pi0: float | None = None, q0: int = 0) -> flo
     f = pos - j
     i = q0 + w.Q
     return float((1 - f) * plan.V[0, j, i] + f * plan.V[0, j + 1, i])
+
+
+def minimax(w: World) -> r.Solution:
+    g = w.game((min(w.b), max(w.b)), max(w.sigma) ** 2)
+
+    def step(n, st, warm):
+        b, bid, ask = r.drift(st, w.A, w.k, *g.b, warm)
+        return bid, ask, r.Market(b, w.A, w.k)
+
+    return r.backward(g, step)
+
+
+def blind(w: World) -> Plan:
+    pi = priors(w)[:-1, None]
+    pen = (1 - pi) * w.penalty()[0] + pi * w.penalty()[1]
+    drift = (1 - pi) * w.b[0] + pi * w.b[1]
+    plan = backward(w, 1, drift, lambda n, V: V - pen[n])
+    return Plan(plan.V[:, 0], plan.bid[:, 0], plan.ask[:, 0])
+
+
+def avellaneda(w: World, gamma: float) -> tuple[np.ndarray, np.ndarray]:
+    pi = w.stationary
+    s2 = (1 - pi) * w.sigma[0] ** 2 + pi * w.sigma[1] ** 2
+    return r.avellaneda(w.game((0.0, 0.0), s2), gamma, w.k)
