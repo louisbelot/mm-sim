@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import NamedTuple
 
 import numpy as np
+from numpy.polynomial.hermite_e import hermegauss
 from scipy.special import expit, logit
 
 from . import robust as r
@@ -140,3 +141,45 @@ def evaluate(w: World, bid: np.ndarray, ask: np.ndarray) -> np.ndarray:
 def start(w: World, V: np.ndarray, q0: int = 0) -> float:
     i = q0 + w.Q
     return float((1 - w.pi0) * V[0, 0, i] + w.pi0 * V[0, 1, i])
+
+
+class Beliefs(NamedTuple):
+    pi: np.ndarray
+    j: np.ndarray
+    f: np.ndarray
+    weight: np.ndarray
+
+
+def beliefs(w: World, grid: int, nodes: int) -> Beliefs:
+    pi = np.linspace(0.0, 1.0, grid)
+    x, h = hermegauss(nodes)
+    h = h / h.sum()
+    dz = np.array(w.b)[:, None] * w.dt + np.array(w.sigma)[:, None] * np.sqrt(w.dt) * x
+    nxt = update(w, pi[None, None, :], dz[:, :, None])
+    pos = nxt * (grid - 1)
+    j = np.clip(np.floor(pos), 0, grid - 2).astype(int)
+    weight = np.stack([1 - pi, pi])[:, None, :] * h[None, :, None]
+    return Beliefs(pi, j, pos - j, weight)
+
+
+def bayes(w: World, grid: int = 201, nodes: int = 32) -> tuple[Plan, np.ndarray]:
+    bel = beliefs(w, grid, nodes)
+    lo, hi = bel.weight * (1 - bel.f), bel.weight * bel.f
+    pen = (1 - bel.pi)[:, None] * w.penalty()[0] + bel.pi[:, None] * w.penalty()[1]
+
+    def cont(n, V):
+        C = np.einsum("jhg,jhgm->gm", lo, V[bel.j]) + np.einsum("jhg,jhgm->gm", hi, V[bel.j + 1])
+        return C - pen
+
+    drift = (1 - bel.pi) * w.b[0] + bel.pi * w.b[1]
+    return backward(w, grid, drift, cont), bel.pi
+
+
+def believed(w: World, plan: Plan, pi0: float | None = None, q0: int = 0) -> float:
+    pi = w.pi0 if pi0 is None else pi0
+    G = plan.V.shape[1]
+    pos = pi * (G - 1)
+    j = min(int(pos), G - 2)
+    f = pos - j
+    i = q0 + w.Q
+    return float((1 - f) * plan.V[0, j, i] + f * plan.V[0, j + 1, i])

@@ -48,3 +48,26 @@ def test_informed_without_switching_is_two_best_responses():
 def test_evaluating_the_informed_quotes_returns_their_value():
     full = g.informed(SMALL)
     assert np.allclose(g.evaluate(SMALL, full.bid, full.ask), full.V, atol=1e-9)
+
+
+def test_uninformative_prices_reduce_bayes_to_a_fixed_drift():
+    w = g.World(T=0.3, Q=15, phi=0.01, rate=(0.0, 0.0), sigma=(1e4, 1e4))
+    plan, pi = g.bayes(w, 11)
+    for i in (0, 3, 7, 10):
+        b = (1 - pi[i]) * w.b[0] + pi[i] * w.b[1]
+        s = r.best_response(w.game((b, b), 1e8), r.Market(b, w.A, w.k))
+        assert np.allclose(plan.V[0, i], s.V[0], atol=1e-6)
+
+
+def test_certain_bayes_matches_informed():
+    w = g.World(T=0.3, Q=15, phi=0.01, rate=(0.0, 0.0))
+    plan, _ = g.bayes(w, 21)
+    full = g.informed(w)
+    assert np.allclose(plan.V[:, 0], full.V[:, 0], atol=1e-9)
+    assert np.allclose(plan.V[:, -1], full.V[:, 1], atol=1e-9)
+
+
+def test_bayes_value_is_convex_in_the_belief():
+    plan, _ = g.bayes(SMALL, 51)
+    for n in (0, SMALL.N // 2, SMALL.N - 1):
+        assert np.diff(plan.V[n], 2, axis=0).min() > -1e-9
