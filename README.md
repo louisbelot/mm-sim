@@ -3408,6 +3408,134 @@ for them.
 A quadratic running penalty is the usual stand-in for inventory risk. A hard
 bound on the drift gives an absolute value instead, and it shows in the quotes.
 
+## A drift that switches, and a market maker that cannot see it
+
+`regime.py` takes the game from the previous section and replaces the
+adversary with nature. A hidden two-state Markov chain s sets the drift b_s
+and the volatility sigma_s, and leaves state j at rate lambda_j (per-step
+probability 1 - exp(-lambda_j dt)). Fills follow the same A exp(-k delta) dt
+law in both states, so the only thing that carries information about the
+regime is the mid-price increment. The running penalty is phi sigma_s^2 dt
+q'^2 on the inventory carried through the step (the mean-variance cost of
+holding q' over dt), plus eta q^2 at the end.
+
+The market maker's belief pi_n = P(s_n = 1 | dz_0 ... dz_{n-1}) follows the
+discrete Wonham (Hamilton) filter: add the log-likelihood ratio of the last
+increment to the log-odds, then take one Markov step. Because quotes do not
+change what is learned, the belief is a sufficient statistic, and the
+Bayes-optimal quoter solves a backward induction over (n, q, pi). The stage
+payoff is the robust game's payoff with b replaced by E_pi[b] and the penalty
+by its belief average; the continuation C(q', pi) = sum_j pi_j E[V(n+1, q',
+pi'(pi, b_j dt + sigma_j sqrt(dt) eps))] uses 32-node Gauss-Hermite quadrature
+and linear interpolation on a 201-point belief grid, and the same
+coordinate-ascent `respond` finds the quotes. A full-horizon solve takes about
+1.4 s. The value moves from 78.838 to 78.733, 78.711 and 78.705 as the grid
+goes from 51 to 101, 201 and 401 points, and by 2e-4 when the
+quadrature goes from 16 to 64 nodes.
+
+The quoters compared:
+
+- informed: sees s. Backward induction over (n, q, s); an upper bound.
+- bayes: the belief-state optimum above.
+- qmdp: the QMDP approximation (Littman, Cassandra and Kaelbling 1995). It
+  mixes the informed continuation values by the current belief, which is the
+  same as assuming the regime will be revealed after one step.
+- blind: the best quoter that ignores prices. With no observations the regime
+  distribution at step n is the prior propagated n steps, so this is a best
+  response to a known, time-varying mean drift and mean variance.
+- minimax: the drift equilibrium of the robust game with b in [b_0, b_1] and
+  the larger sigma.
+- AS with gamma = 2 phi and the stationary average variance.
+
+`examples/regime_mm.py`, 100,000 paths each (exact values from backward
+induction where the quoter is a table, Monte Carlo for qmdp):
+
+| drift regimes -5 / +5, rate 2, phi 0.01 | exact | reward | Sharpe | spread | mean abs q |
+|---|---|---|---|---|---|
+| informed | 100.31 | 100.40 +- 51.00 | 1.97 | 1.373 | 22.35 |
+| bayes | 78.71 | 78.69 +- 35.18 | 2.24 | 1.342 | 13.44 |
+| qmdp | | 78.68 +- 34.46 | 2.28 | 1.342 | 13.33 |
+| blind | 67.97 | 67.97 +- 11.91 | 5.71 | 1.342 | 3.69 |
+| minimax | 65.89 | 65.87 +- 6.65 | 9.91 | 1.401 | 1.48 |
+| AS gamma 0.02 | 67.76 | 67.75 +- 9.72 | 6.97 | 1.365 | 3.47 |
+
+| volatility regimes 1 / 4, rate 2, phi 0.05 | exact | reward | Sharpe | spread | mean abs q |
+|---|---|---|---|---|---|
+| informed | 66.22 | 66.22 +- 7.76 | 8.54 | 1.365 | 2.28 |
+| bayes | 66.18 | 66.18 +- 7.79 | 8.49 | 1.365 | 2.24 |
+| qmdp | | 66.18 +- 7.82 | 8.47 | 1.365 | 2.25 |
+| blind | 65.96 | 65.96 +- 7.99 | 8.25 | 1.368 | 2.02 |
+| minimax | 65.82 | 65.82 +- 7.45 | 8.84 | 1.382 | 1.71 |
+| AS gamma 0.1 | 60.09 | 60.09 +- 6.78 | 8.87 | 1.721 | 1.90 |
+
+![Hidden regimes](docs/regime_mm.png)
+
+What the numbers say:
+
+- Volatility is easy to learn and drift is not. The filter recovers 86% of
+  what knowing the volatility regime is worth (bayes - blind over informed -
+  blind), but only 33% of what knowing the drift regime is worth. A volatility
+  ratio of 4 shows up in the size of every increment; a drift of 5 against a
+  per-step noise of 2 sqrt(0.005) = 0.14 has a signal-to-noise ratio of 0.18 a
+  step, so the filter needs tens of steps and the regime lasts 100 on average.
+- The left panel sweeps the switching rate. Slow switching makes the drift
+  learnable (bayes 124.9 against informed 157.4 at rate 0.25); by rate 16 the
+  filter is worth 0.11 and by rate 40 nothing, while knowing the regime is
+  still worth 0.3.
+- The Bayes quoter earns more by carrying inventory in the direction it
+  believes (mean abs q 13.4 against 3.7), and its Sharpe ratio drops from 5.7
+  to 2.2. The criterion here is the mean with a small variance penalty; a
+  quoter scored on Sharpe would want a larger phi.
+- QMDP is within 0.010 +- 0.005 of the Bayes quoter on the same paths. QMDP
+  is usually poor when acting gathers information; here quoting gathers none,
+  and what is left of its error is in the curvature of the continuation, which
+  hardly moves the quotes.
+- The minimax quoter pays 2.1 for its guarantee against the blind quoter and
+  has the highest Sharpe ratio in the drift world. Robustness here is
+  insurance against a drift that is never adversarial.
+
+The checks: the filter step matches Bayes' rule with scipy's normal density to
+1e-14, and in simulation E[1{s_n = 1} - pi_n] and E[(1{s_n = 1} - pi_n) pi_n]
+are zero within 4 se and E[pi_n] is the propagated prior. With no switching
+the informed solution is two best responses of the robust game, the Bayes
+solution at pi = 0 and 1 is the informed one, and with uninformative prices
+(sigma = 1e4) the Bayes solution at every grid belief is the best response to
+the mean drift. The Bayes value is convex in the belief at every step tested.
+The minimax table is `robust.equilibrium(game, "b")` with zeta = phi
+sigma_max^2 dt. The ordering minimax, blind, AS < bayes < informed holds
+exactly, and Monte Carlo means for the Bayes, informed and blind quoters
+agree with their exact values within 4 se.
+
+Hidden regimes are studied in continuous time by Campi and Zabaljauregui
+(2020), who let the hidden chain drive the order arrival intensities. That is
+the harder case: fills then carry information, quotes change what the market
+maker learns, and QMDP is no longer close.
+
+### PPO in the switching world
+
+`regime.Env` is the drift world as a PPO environment: the 9 x 9 quote grid of
+`arl.py` (0 to 2 in steps of 0.25), reward in currency with the same penalty,
+and an observation of time left and q / Q, with or without the filter's
+belief 2 pi - 1. `examples/regime_rl.py` trains three seeds of each for 600
+iterations of 32 episodes (7 to 8 minutes per agent) and tests the greedy
+policy on 100,000 paths:
+
+| quoter | reward | Sharpe | spread | mean abs q |
+|---|---|---|---|---|
+| bayes | 78.69 +- 35.18 | 2.24 | 1.342 | 13.44 |
+| bayes, quotes rounded to the PPO grid | 78.23 +- 35.22 | | | |
+| PPO with the belief, seeds 0 / 1 / 2 | 74.26 / 73.56 / 71.79 | 2.84 / 2.36 / 1.96 | 1.454 / 1.400 / 1.771 | 9.06 / 9.10 / 14.37 |
+| blind | 67.97 +- 11.91 | 5.71 | 1.342 | 3.69 |
+| AS gamma 0.02 | 67.75 +- 9.72 | 6.97 | 1.365 | 3.47 |
+| PPO without it, seeds 0 / 1 / 2 | 66.93 / 66.53 / 63.98 | 3.80 / 4.80 / 3.44 | 1.479 / 1.310 / 1.410 | 5.18 / 2.54 / 3.85 |
+
+Given the belief, PPO gets 36% to 59% of the way from the blind quoter to the
+Bayes optimum, and the coarse grid explains only 0.45 of the gap. Without it,
+PPO cannot beat a fixed AS quoter: it has nothing that tells it which way the
+drift goes, and the best it can do is the blind table, which it falls short
+of by 1 to 4. The feature that makes the learner work is the filter, not the
+network.
+
 ## Install
 
 ```
@@ -3593,6 +3721,9 @@ half minutes.
 `arl_mm.py` trains nine PPO runs in parallel and saves their quote tables in
 `data/` (about 10 minutes), `robust_mm.py` redraws the robust chart from them in
 under a minute, and `inverse_rl.py` fits the penalties in about five.
+`regime_mm.py` solves and simulates both regime worlds and the switching-rate
+sweep in about a minute and a half; `regime_rl.py` trains six PPO agents in
+parallel in about eight minutes.
 
 ## Notes
 
