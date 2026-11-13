@@ -3,6 +3,7 @@ import pytest
 from scipy.stats import norm
 
 from mmsim import regime as g
+from mmsim import robust as r
 
 SMALL = g.World(T=0.3, Q=15, phi=0.01, eta=0.05)
 
@@ -33,3 +34,17 @@ def test_certain_beliefs_stay_certain_without_switching():
     dz = np.linspace(-1, 1, 7)
     assert np.all(g.update(w, 0.0, dz) == 0.0)
     assert np.all(g.update(w, 1.0, dz) == 1.0)
+
+
+def test_informed_without_switching_is_two_best_responses():
+    w = g.World(T=0.3, Q=15, phi=0.01, rate=(0.0, 0.0), sigma=(1.0, 3.0))
+    full = g.informed(w)
+    for j in (0, 1):
+        s = r.best_response(w.game((w.b[j], w.b[j]), w.sigma[j] ** 2), r.Market(w.b[j], w.A, w.k))
+        assert np.allclose(full.V[:, j], s.V, atol=1e-9)
+        assert np.allclose(full.bid[:, j], s.bid, atol=1e-9)
+
+
+def test_evaluating_the_informed_quotes_returns_their_value():
+    full = g.informed(SMALL)
+    assert np.allclose(g.evaluate(SMALL, full.bid, full.ask), full.V, atol=1e-9)

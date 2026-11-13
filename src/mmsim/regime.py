@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import numpy as np
 from scipy.special import expit, logit
@@ -85,3 +87,56 @@ def priors(w: World) -> np.ndarray:
     for n in range(w.N):
         pi[n + 1] = pi[n] * w.P[1, 1] + (1 - pi[n]) * w.P[0, 1]
     return pi
+
+
+def stage(w: World, W: np.ndarray) -> r.Stage:
+    q = np.broadcast_to(w.q, W.shape).ravel()
+    pad = np.pad(W, ((0, 0), (1, 1)), mode="edge")
+    up, dn = pad[:, 2:].ravel(), pad[:, :-2].ravel()
+    return r.Stage(q, W.ravel(), up, dn, q == w.Q, q == -w.Q, w.dt)
+
+
+class Plan(NamedTuple):
+    V: np.ndarray
+    bid: np.ndarray
+    ask: np.ndarray
+
+
+def backward(
+    w: World,
+    rows: int,
+    drift: np.ndarray,
+    cont: Callable[[int, np.ndarray], np.ndarray],
+    policy: Callable[[int], tuple[np.ndarray, np.ndarray]] | None = None,
+) -> Plan:
+    N, M = w.N, len(w.q)
+    V = np.empty((N + 1, rows, M))
+    V[N] = w.terminal()
+    bid, ask = np.empty((N, rows, M)), np.empty((N, rows, M))
+    warm = None
+    for n in range(N - 1, -1, -1):
+        b = np.repeat(drift[n] if drift.ndim == 2 else drift, M)
+        st = stage(w, cont(n, V[n + 1]))
+        if policy is None:
+            qb, qa = r.respond(st, b, w.A, w.k, warm)
+            warm = qb, qa
+        else:
+            qb, qa = (np.broadcast_to(x, (rows, M)).ravel() for x in policy(n))
+        bid[n], ask[n] = qb.reshape(rows, M), qa.reshape(rows, M)
+        V[n] = r.payoff(st, qb, qa, b, w.A, w.k).reshape(rows, M)
+    return Plan(V, bid, ask)
+
+
+def informed(w: World) -> Plan:
+    pen = w.penalty()
+    return backward(w, 2, np.array(w.b), lambda n, V: w.P @ V - pen)
+
+
+def evaluate(w: World, bid: np.ndarray, ask: np.ndarray) -> np.ndarray:
+    pen = w.penalty()
+    return backward(w, 2, np.array(w.b), lambda n, V: w.P @ V - pen, lambda n: (bid[n], ask[n])).V
+
+
+def start(w: World, V: np.ndarray, q0: int = 0) -> float:
+    i = q0 + w.Q
+    return float((1 - w.pi0) * V[0, 0, i] + w.pi0 * V[0, 1, i])
