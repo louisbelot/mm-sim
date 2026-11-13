@@ -207,3 +207,98 @@ def avellaneda(w: World, gamma: float) -> tuple[np.ndarray, np.ndarray]:
     pi = w.stationary
     s2 = (1 - pi) * w.sigma[0] ** 2 + pi * w.sigma[1] ** 2
     return r.avellaneda(w.game((0.0, 0.0), s2), gamma, w.k)
+
+
+Quoter = Callable[[int, np.ndarray, np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]
+
+
+def table(bid: np.ndarray, ask: np.ndarray) -> Quoter:
+    return lambda n, i, pi, s: (bid[n, i], ask[n, i])
+
+
+def oracle(plan: Plan) -> Quoter:
+    return lambda n, i, pi, s: (plan.bid[n, s, i], plan.ask[n, s, i])
+
+
+def lerp(a: np.ndarray, b: np.ndarray, f: np.ndarray) -> np.ndarray:
+    out = a.copy()
+    fin = np.isfinite(a)
+    out[fin] += f[fin] * (b[fin] - a[fin])
+    return out
+
+
+def believer(plan: Plan) -> Quoter:
+    G = plan.bid.shape[1]
+
+    def quote(n, i, pi, s):
+        pos = pi * (G - 1)
+        j = np.clip(pos.astype(int), 0, G - 2)
+        f = pos - j
+        return (lerp(x[n, j, i], x[n, j + 1, i], f) for x in (plan.bid, plan.ask))
+
+    return quote
+
+
+def qmdp(w: World, plan: Plan) -> Quoter:
+    pen = w.penalty()
+
+    def quote(n, i, pi, s):
+        W = w.P @ plan.V[n + 1] - pen
+        mix = (1 - pi)[:, None] * W[0] + pi[:, None] * W[1]
+        rows = np.arange(len(i))
+        up, dn = np.minimum(i + 1, 2 * w.Q), np.maximum(i - 1, 0)
+        q = i - w.Q
+        st = r.Stage(q, mix[rows, i], mix[rows, up], mix[rows, dn], q == w.Q, q == -w.Q, w.dt)
+        return r.respond(st, (1 - pi) * w.b[0] + pi * w.b[1], w.A, w.k)
+
+    return quote
+
+
+class Run(NamedTuple):
+    wealth: np.ndarray
+    q: np.ndarray
+    spread: np.ndarray
+    reward: np.ndarray
+    pi: np.ndarray | None = None
+    s: np.ndarray | None = None
+    inventory: np.ndarray | None = None
+
+
+def simulate(
+    w: World, quoter: Quoter, paths: int = 10_000, seed: int = 0, q0: int = 0, keep: bool = False
+) -> Run:
+    rng = np.random.default_rng(seed)
+    b, sigma = np.array(w.b), np.array(w.sigma)
+    leave = np.array([w.P[0, 1], w.P[1, 0]])
+    s = (rng.random(paths) < w.pi0).astype(int)
+    pi = np.full(paths, w.pi0)
+    q = np.full(paths, q0)
+    x, z = np.zeros(paths), np.full(paths, 100.0)
+    reward, quoted, sides = np.zeros(paths), np.zeros(paths), np.zeros(paths)
+    hist = [np.empty((w.N, paths)) for _ in range(3)] if keep else None
+    a = w.A * w.dt
+    for n in range(w.N):
+        if hist is not None:
+            hist[0][n], hist[1][n], hist[2][n] = pi, s, q
+        i = q + w.Q
+        db, da = quoter(n, i, pi, s)
+        top, bot = q == w.Q, q == -w.Q
+        pb = np.where(top, 0.0, a * np.exp(-w.k * np.where(top, 0.0, db)))
+        pa = np.where(bot, 0.0, a * np.exp(-w.k * np.where(bot, 0.0, da)))
+        bought = rng.random(paths) < pb
+        sold = rng.random(paths) < pa
+        both = ~(top | bot)
+        quoted += np.where(both, db + da, 0.0)
+        sides += both
+        before = x + q * z
+        x = x + np.where(sold, z + da, 0.0) - np.where(bought, z - db, 0.0)
+        q = q + bought - sold
+        dz = b[s] * w.dt + sigma[s] * np.sqrt(w.dt) * rng.standard_normal(paths)
+        z = z + dz
+        reward += x + q * z - before - w.phi * sigma[s] ** 2 * w.dt * q**2
+        pi = update(w, pi, dz)
+        s = np.where(rng.random(paths) < leave[s], 1 - s, s)
+    reward -= w.eta * q.astype(float) ** 2
+    spread = np.divide(quoted, sides, out=np.full(paths, np.nan), where=sides > 0)
+    extra = tuple(hist) if hist is not None else ()
+    return Run(x + q * z, q, spread, reward, *extra)

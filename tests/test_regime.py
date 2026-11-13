@@ -36,6 +36,17 @@ def test_certain_beliefs_stay_certain_without_switching():
     assert np.all(g.update(w, 1.0, dz) == 1.0)
 
 
+def test_filter_is_calibrated():
+    w = g.World(T=0.5, Q=10, rate=(3.0, 1.0), pi0=0.2)
+    run = g.simulate(w, g.table(*r.symmetric(w.game((0.0, 0.0), 4.0))), 40_000, 3, keep=True)
+    for n in (1, w.N // 2, w.N - 1):
+        s, pi = run.s[n], run.pi[n]
+        se = 4 / np.sqrt(len(s))
+        assert abs(np.mean(s - pi)) < se
+        assert abs(np.mean((s - pi) * pi)) < se
+        assert abs(pi.mean() - g.priors(w)[n]) < se
+
+
 def test_informed_without_switching_is_two_best_responses():
     w = g.World(T=0.3, Q=15, phi=0.01, rate=(0.0, 0.0), sigma=(1.0, 3.0))
     full = g.informed(w)
@@ -105,3 +116,32 @@ def test_minimax_is_the_drift_game_under_the_worst_volatility():
     w = g.World(T=0.3, Q=15, phi=0.02, sigma=(1.0, 3.0))
     game = r.Game(T=w.T, Q=w.Q, zeta=w.phi * 9.0 * w.dt, eta=w.eta)
     assert np.allclose(g.minimax(w).V, r.equilibrium(game, "b").V, atol=1e-9)
+
+
+def test_qmdp_is_the_informed_quote_at_a_certain_belief():
+    w = g.World(T=0.3, Q=15, phi=0.01, rate=(0.0, 0.0))
+    full = g.informed(w)
+    quote = g.qmdp(w, full)
+    i = np.arange(len(w.q))
+    for n in (0, w.N // 2, w.N - 1):
+        for j in (0, 1):
+            bid, ask = quote(n, i, np.full(len(i), float(j)), None)
+            assert np.allclose(bid, full.bid[n, j], atol=1e-9)
+            assert np.allclose(ask, full.ask[n, j], atol=1e-9)
+
+
+@pytest.mark.parametrize("who", ["bayes", "oracle", "blind"])
+def test_monte_carlo_agrees_with_the_exact_value(who):
+    w = SMALL
+    if who == "bayes":
+        plan, _ = g.bayes(w)
+        quoter, value = g.believer(plan), g.believed(w, plan)
+    elif who == "oracle":
+        full = g.informed(w)
+        quoter, value = g.oracle(full), g.start(w, full.V)
+    else:
+        s = g.blind(w)
+        quoter, value = g.table(s.bid, s.ask), g.start(w, g.evaluate(w, s.bid, s.ask))
+    run = g.simulate(w, quoter, 40_000, 11)
+    assert abs(run.reward.mean() - value) < 4 * run.reward.std() / np.sqrt(40_000)
+    assert np.all(np.abs(run.q) <= w.Q)
