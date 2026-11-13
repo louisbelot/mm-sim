@@ -9,6 +9,8 @@ from numpy.polynomial.hermite_e import hermegauss
 from scipy.special import expit, logit
 
 from . import robust as r
+from .arl import DELTAS
+from .ppo import Policy
 
 
 @dataclass(frozen=True)
@@ -302,3 +304,61 @@ def simulate(
     spread = np.divide(quoted, sides, out=np.full(paths, np.nan), where=sides > 0)
     extra = tuple(hist) if hist is not None else ()
     return Run(x + q * z, q, spread, reward, *extra)
+
+
+class Env:
+    def __init__(self, w: World, belief: bool = True, deltas: np.ndarray = DELTAS) -> None:
+        self.w = w
+        self.belief = belief
+        self.deltas = deltas
+
+    def reset(self, *, seed: int | None = None) -> tuple[np.ndarray, dict]:
+        self.rng = np.random.default_rng(seed)
+        self.s = int(self.rng.random() < self.w.pi0)
+        self.pi = self.w.pi0
+        self.n, self.q, self.x, self.z = 0, 0, 0.0, 100.0
+        return self.obs(), {}
+
+    def obs(self) -> np.ndarray:
+        o = [1 - self.n / self.w.N, self.q / self.w.Q]
+        return np.array(o + [2 * self.pi - 1] if self.belief else o)
+
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
+        w, rng = self.w, self.rng
+        i, j = divmod(action, len(self.deltas))
+        db, da = self.deltas[i], self.deltas[j]
+        a = w.A * w.dt
+        pb = 0.0 if self.q == w.Q else a * np.exp(-w.k * db)
+        pa = 0.0 if self.q == -w.Q else a * np.exp(-w.k * da)
+        before = self.x + self.q * self.z
+        if rng.random() < pb:
+            self.x -= self.z - db
+            self.q += 1
+        if rng.random() < pa:
+            self.x += self.z + da
+            self.q -= 1
+        sigma = w.sigma[self.s]
+        dz = w.b[self.s] * w.dt + sigma * np.sqrt(w.dt) * rng.standard_normal()
+        self.z += dz
+        self.pi = float(update(w, self.pi, dz))
+        if rng.random() < w.P[self.s, 1 - self.s]:
+            self.s = 1 - self.s
+        self.n += 1
+        reward = self.x + self.q * self.z - before - w.phi * sigma**2 * w.dt * self.q**2
+        done = self.n == w.N
+        if done:
+            reward -= w.eta * self.q**2
+        return self.obs(), reward, done, False, {"q": self.q}
+
+
+def learned(w: World, policy: Policy, belief: bool = True, deltas: np.ndarray = DELTAS) -> Quoter:
+    def quote(n, i, pi, s):
+        o = [np.full(len(i), 1 - n / w.N), (i - w.Q) / w.Q]
+        if belief:
+            o.append(2 * pi - 1)
+        a = policy.pi(np.stack(o, axis=1)).argmax(axis=1)
+        ib, ia = np.divmod(a, len(deltas))
+        q = i - w.Q
+        return np.where(q == w.Q, np.inf, deltas[ib]), np.where(q == -w.Q, np.inf, deltas[ia])
+
+    return quote

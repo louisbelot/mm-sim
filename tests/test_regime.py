@@ -4,6 +4,7 @@ from scipy.stats import norm
 
 from mmsim import regime as g
 from mmsim import robust as r
+from mmsim.ppo import Policy
 
 SMALL = g.World(T=0.3, Q=15, phi=0.01, eta=0.05)
 
@@ -145,3 +146,35 @@ def test_monte_carlo_agrees_with_the_exact_value(who):
     run = g.simulate(w, quoter, 40_000, 11)
     assert abs(run.reward.mean() - value) < 4 * run.reward.std() / np.sqrt(40_000)
     assert np.all(np.abs(run.q) <= w.Q)
+
+
+def test_env_reward_matches_the_exact_value_of_a_constant_quote():
+    w = g.World(T=0.05, Q=3, phi=0.05, eta=0.1, sigma=(1.0, 3.0), rate=(20.0, 5.0))
+    env = g.Env(w)
+    action = 3 * len(env.deltas) + 2
+    bid = np.full((w.N, len(w.q)), env.deltas[3])
+    ask = np.full((w.N, len(w.q)), env.deltas[2])
+    value = g.start(w, g.evaluate(w, bid, ask))
+    total = []
+    for seed in range(6000):
+        env.reset(seed=seed)
+        done, rew = False, 0.0
+        while not done:
+            _, x, done, _, _ = env.step(action)
+            rew += x
+        total.append(rew)
+    assert abs(np.mean(total) - value) < 4 * np.std(total) / np.sqrt(len(total))
+
+
+def test_learned_quoter_is_the_greedy_policy():
+    w = g.World(Q=10)
+    policy = Policy(3, 81, (16,), np.random.default_rng(0))
+    quote = g.learned(w, policy)
+    i = np.arange(1, 2 * w.Q)
+    pi = np.linspace(0.05, 0.95, len(i))
+    bid, ask = quote(7, i, pi, None)
+    for k in range(len(i)):
+        env = g.Env(w)
+        env.n, env.q, env.pi = 7, int(i[k] - w.Q), pi[k]
+        a = policy.greedy(env.obs())
+        assert (bid[k], ask[k]) == (env.deltas[a // 9], env.deltas[a % 9])
