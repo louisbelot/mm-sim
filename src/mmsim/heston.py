@@ -6,9 +6,11 @@ from functools import cached_property
 from typing import NamedTuple
 
 import numpy as np
+from scipy.integrate import solve_ivp
 from scipy.optimize import brentq
 
 from mmsim import options as o
+from mmsim.multi import Market
 
 
 @dataclass(frozen=True)
@@ -98,3 +100,115 @@ def iv(price: float, S: float, K: float, T: float, call: bool = True) -> float:
         return float(o.greeks(S, K, T, s, call).price) - price
 
     return brentq(gap, 1e-4, 4.0, xtol=1e-12)
+
+
+def _lerp(lo: float, h: float, n: int, x):
+    t = np.clip((np.asarray(x, float) - lo) / h, 0, n - 1)
+    i = np.minimum(t.astype(int), n - 2)
+    return i, t - i
+
+
+@dataclass(frozen=True)
+class Reduced:
+    m: Market
+    vega: np.ndarray
+    P: Heston
+    Q: Heston
+    nu_lo: float
+    nu_hi: float
+    vbar: float
+    T: float
+    rows: int = 31
+    points: int = 401
+    mv: bool = False
+    rtol: float = 1e-8
+
+    @property
+    def eta(self) -> float:
+        return self.P.xi / 2 * math.sqrt(1 - self.P.rho**2 * self.mv)
+
+    @cached_property
+    def nu(self) -> np.ndarray:
+        return np.linspace(self.nu_lo, self.nu_hi, self.rows)
+
+    @cached_property
+    def v(self) -> np.ndarray:
+        return np.linspace(-self.vbar, self.vbar, self.points)
+
+    def edge(self, nu):
+        return (self.P.drift(nu) - self.Q.drift(nu)) / (2 * np.sqrt(nu))
+
+    @cached_property
+    def _legs(self):
+        h, tol = self.v[1] - self.v[0], 1e-9 * self.vbar
+        legs = []
+        for f, z, V in zip(self.m.flow, self.m.z, self.vega, strict=True):
+            for side in (1, -1):
+                nxt = self.v + side * z * V
+                i, t = _lerp(-self.vbar, h, self.points, nxt)
+                legs.append((f, z, i, t, np.abs(nxt) <= self.vbar + tol))
+        return legs
+
+    @cached_property
+    def _static(self) -> np.ndarray:
+        nu, v = self.nu[:, None], self.v[None, :]
+        return v * self.edge(nu) - self.m.gamma / 2 * (self.eta * v) ** 2
+
+    def rhs(self, w: np.ndarray) -> np.ndarray:
+        W = w.reshape(self.rows, self.points)
+        out = self._static.copy()
+        if self.rows > 1:
+            h, nu = self.nu[1] - self.nu[0], self.nu[:, None]
+            a = self.P.drift(nu)
+            E = np.pad(W, ((1, 1), (0, 0)), mode="edge")
+            up = np.where(a > 0, E[2:] - W, W - E[:-2]) / h
+            R = np.pad(W, ((1, 1), (0, 0)), mode="reflect")
+            out += a * up + self.P.xi**2 * nu / 2 * (R[2:] - 2 * W + R[:-2]) / h**2
+        for f, z, i, t, ok in self._legs:
+            nxt = W[:, i] * (1 - t) + W[:, i + 1] * t
+            out += np.where(ok, z * f.H((W - nxt) / z), 0.0)
+        return out.ravel()
+
+    @cached_property
+    def _sol(self):
+        return solve_ivp(
+            lambda _, w: self.rhs(w),
+            (0, self.T),
+            np.zeros(self.rows * self.points),
+            method="DOP853",
+            rtol=self.rtol,
+            atol=self.rtol * self.vbar,
+            dense_output=True,
+        )
+
+    def w(self, tau: float) -> np.ndarray:
+        return self._sol.sol(min(tau, self.T)).reshape(self.rows, self.points)
+
+    def _at(self, W: np.ndarray, nu, v):
+        if self.rows == 1:
+            row = np.broadcast_to(W[0], np.shape(nu) + (self.points,))
+        else:
+            j, s = _lerp(self.nu_lo, self.nu[1] - self.nu[0], self.rows, nu)
+            row = W[j] * (1 - s[..., None]) + W[j + 1] * s[..., None]
+        i, t = _lerp(-self.vbar, self.v[1] - self.v[0], self.points, v)
+        pick = np.take_along_axis
+        return pick(row, i, -1) * (1 - t) + pick(row, i + 1, -1) * t
+
+    def value(self, nu: float) -> float:
+        return float(self._at(self.w(self.T), np.array([nu]), np.zeros((1, 1)))[0, 0])
+
+    def quotes(self, tau: float, nu, v) -> tuple[np.ndarray, np.ndarray]:
+        W = self.w(tau)
+        nu = np.atleast_1d(np.asarray(nu, float))
+        v = np.broadcast_to(np.asarray(v, float), nu.shape)[:, None]
+        here = self._at(W, nu, v)
+        out = []
+        for side in (1, -1):
+            nxt = v + side * self.m.z * self.vega
+            gap = (here - self._at(W, nu, nxt)) / self.m.z
+            q = np.stack([f.delta(gap[:, i]) for i, f in enumerate(self.m.flow)], axis=-1)
+            out.append(np.where(np.abs(nxt) <= self.vbar * (1 + 1e-9), q, np.inf))
+        return out[0], out[1]
+
+    def policy(self, tau: float, nu: np.ndarray, n: np.ndarray, vega: np.ndarray):
+        return self.quotes(tau, nu, (n * self.m.z * vega).sum(axis=-1))

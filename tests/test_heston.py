@@ -3,6 +3,7 @@ import pytest
 
 from mmsim import heston as h
 from mmsim import options as o
+from mmsim.multi import Logistic, Market
 
 Q = h.Heston(3.0, 0.0225, 0.2, -0.5)
 P = h.Heston(2.0, 0.04, 0.2, -0.5)
@@ -29,6 +30,17 @@ PAPER = [
     (12, 2.0, 0.21, 0.67, 0.1395),
     (12, 3.0, 0.36, 0.65, 0.1423),
 ]
+
+
+def book(K=(9.0, 10.0, 11.0), T=(1.0, 2.0), gamma=1e-3, lam=252 * 30):
+    K, T = (a.ravel() for a in np.meshgrid(K, T))
+    pr = h.Pricer.of(Q, K, nu_lo=0.0144)
+    g = pr.greeks(10.0, 0.0225, T)
+    V = pr.vega(10.0, 0.0225, T)
+    lam = lam / (1 + 0.7 * np.abs(10 - K))
+    flow = tuple(Logistic(a, 0.7, 150 / v) for a, v in zip(lam, V, strict=True))
+    m = Market(0.01 * np.outer(V, V), flow, gamma, 5e5 / g.price, np.zeros(len(K)))
+    return pr, T, V, m
 
 
 def test_fang_oosterlee_reference():
@@ -76,3 +88,27 @@ def test_paper_chain():
     assert np.abs(g.price - [r[2] for r in PAPER]).max() < 0.01
     assert np.abs(V - [r[3] for r in PAPER]).max() < 0.025
     assert np.abs(np.array(vols) - [r[4] for r in PAPER]).max() < 0.003
+
+
+def test_same_drift_matches_one_dimensional_hjb():
+    pr, T, V, m = book()
+    one = o.Reduced(m, V, 0.1, 1e7, 0.0012, points=81)
+    two = h.Reduced(m, V, Q, Q, 0.0144, 0.0324, 1e7, 0.0012, rows=5, points=81)
+    W = two.w(0.0012)
+    assert np.abs(W - one.w(0.0012)).max() < 1e-6 * np.abs(W).max()
+    b1, a1 = one.quotes(0.0012, 2e6)
+    b2, a2 = two.quotes(0.0012, [0.015, 0.03], 2e6)
+    assert np.allclose(b2, b1, rtol=1e-8) and np.allclose(a2, a1, rtol=1e-8)
+
+
+def test_variance_drift_tilts_toward_long_vega():
+    pr, T, V, m = book(gamma=1e-5)
+    flat = o.Reduced(m, V, 0.1, 1e7, 0.0012, points=81)
+    up = h.Reduced(m, V, P, Q, 0.0144, 0.0324, 1e7, 0.0012, rows=5, points=81)
+    dn = h.Reduced(m, V, Q, P, 0.0144, 0.0324, 1e7, 0.0012, rows=5, points=81)
+    b0, a0 = flat.quotes(0.0012, 0.0)
+    bu, au = up.quotes(0.0012, 0.0225, 0.0)
+    bd, ad = dn.quotes(0.0012, 0.0225, 0.0)
+    assert np.all(bu < b0) and np.all(au > a0)
+    assert np.all(bd > b0) and np.all(ad < a0)
+    assert up.value(0.0225) > flat.value()
