@@ -238,3 +238,103 @@ def own(r: Reduced, quotes: Quotes, *, nu0: float, dt: float, paths: int, seed: 
         out += r.eta * v * math.sqrt(dt) * zs
         nu = np.maximum(nu + r.P.drift(nu) * dt + r.P.xi * np.sqrt(nu * dt) * zn, 1e-8)
     return out
+
+
+Policy = Callable[[float, np.ndarray, np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]
+TERMS = ("spread", "delta", "vega", "cost", "other")
+
+
+@dataclass(frozen=True)
+class Session:
+    pnl: np.ndarray
+    penalty: np.ndarray
+    terms: dict[str, np.ndarray]
+    fills: np.ndarray
+    vega: np.ndarray
+    peak: np.ndarray
+
+    @property
+    def objective(self) -> np.ndarray:
+        return self.pnl - self.penalty
+
+
+def simulate(
+    pr: Pricer,
+    expiry: np.ndarray,
+    m: Market,
+    policy: Policy,
+    *,
+    P: Heston,
+    S0: float,
+    nu0: float,
+    T: float,
+    dt: float,
+    paths: int,
+    mv: bool = False,
+    h: float = 0.0,
+    every: int = 1,
+    vbar: float = math.inf,
+    n0=0.0,
+    seed: int = 0,
+) -> Session:
+    if T > np.min(expiry):
+        raise ValueError("horizon runs past the first expiry")
+    rng = np.random.default_rng(seed)
+    d, z = len(pr.K), m.z
+    eta = P.xi / 2 * math.sqrt(1 - P.rho**2 * mv)
+    n = np.broadcast_to(np.asarray(n0, float), (paths, d)).copy()
+    S, nu = np.full(paths, S0), np.full(paths, nu0)
+    g = pr.greeks(S, nu, expiry)
+    wealth0 = (n * z * g.price).sum(axis=1)
+    hedge, cash = np.zeros(paths), np.zeros(paths)
+    terms = {k: np.zeros(paths) for k in TERMS}
+    penalty, peak = np.zeros(paths), np.zeros(paths)
+    fills = np.zeros((paths, d), dtype=int)
+    for s in range(round(T / dt)):
+        vegas = 2 * np.sqrt(nu)[:, None] * g.dnu
+        bid, ask = policy(T - s * dt, nu, n, vegas)
+        u = rng.random((paths, d, 2))
+        vega = (n * z * vegas).sum(axis=1)
+        for i in range(d):
+            dv, f = z[i] * vegas[:, i], m.flow[i]
+            for side, quote, k in ((1.0, bid[:, i], 0), (-1.0, ask[:, i], 1)):
+                ok = np.isfinite(quote) & (np.abs(vega + side * dv) <= vbar)
+                q = np.where(ok, quote, 0.0)
+                hit = ok & (u[:, i, k] < -np.expm1(-f.rate(q) * dt))
+                n[:, i] += side * hit
+                fills[:, i] += hit
+                terms["spread"] += np.where(hit, z[i] * q, 0.0)
+                cash += np.where(hit, z[i] * (q - side * g.price[:, i]), 0.0)
+                vega += side * hit * dv
+        np.maximum(peak, np.abs(vega), out=peak)
+        penalty += m.gamma / 2 * (eta * vega) ** 2 * dt
+        nz = n * z
+        held = (nz * g.delta).sum(axis=1)
+        if s % every == 0:
+            target = -held - mv * P.rho * P.xi * (nz * g.dnu).sum(axis=1) / S
+            trade = target - hedge
+            cost = h * np.abs(trade)
+            cash -= trade * S + cost
+            terms["cost"] -= cost
+            hedge = target
+        zs, zn = rng.standard_normal((2, paths))
+        zn = P.rho * zs + math.sqrt(1 - P.rho**2) * zn
+        S1 = S * np.exp(np.sqrt(nu * dt) * zs - nu * dt / 2)
+        nu1 = np.maximum(nu + P.drift(nu) * dt + P.xi * np.sqrt(nu * dt) * zn, 1e-8)
+        g1 = pr.greeks(S1, nu1, expiry - (s + 1) * dt)
+        dS, dnu = S1 - S, nu1 - nu
+        parts = {"delta": (held + hedge) * dS, "vega": (nz * g.dnu).sum(axis=1) * dnu}
+        for k, p in parts.items():
+            terms[k] += p
+        exact = (nz * (g1.price - g.price)).sum(axis=1) + hedge * dS
+        terms["other"] += exact - sum(parts.values())
+        S, nu, g = S1, nu1, g1
+    wealth = cash + hedge * S + (n * z * g.price).sum(axis=1)
+    return Session(
+        pnl=wealth - wealth0,
+        penalty=penalty,
+        terms=terms,
+        fills=fills,
+        vega=(n * z * 2 * np.sqrt(nu)[:, None] * g.dnu).sum(axis=1),
+        peak=peak,
+    )

@@ -45,6 +45,10 @@ def book(K=(9.0, 10.0, 11.0), T=(1.0, 2.0), gamma=1e-3, lam=252 * 30):
     return pr, T, V, m
 
 
+def never(tau, nu, n, vega):
+    return np.full(n.shape, np.inf), np.full(n.shape, np.inf)
+
+
 def test_fang_oosterlee_reference():
     m = h.Heston(1.5768, 0.0398, 0.5751, -0.5711)
     p = h.Pricer.of(m, [100.0], nu_lo=0.0175)
@@ -125,3 +129,37 @@ def test_value_matches_its_own_model():
     assert abs(x.mean() - r.value(0.0225)) < 4 * se
     lazy = h.own(r, lambda tau, nu, v: r.quotes(r.T, 0.0225, 0.0), **run)
     assert lazy.mean() < x.mean()
+
+
+def test_attribution_and_limit():
+    pr, T, V, m = book()
+    r = h.Reduced(m, V, P, Q, 0.0144, 0.0324, 4e6, 0.0012, rows=5, points=81)
+    run = dict(P=P, S0=10.0, nu0=0.0225, T=0.0012, dt=0.0012 / 40, paths=300, h=0.002, every=4)
+    for mv in (False, True):
+        s = h.simulate(pr, T, m, r.policy, vbar=4e6, mv=mv, **run)
+        total = sum(s.terms.values())
+        assert np.abs(total - s.pnl).max() < 1e-8 * np.abs(s.pnl).max()
+        assert s.peak.max() <= 4e6
+        assert s.fills.sum() > 0
+
+
+def test_hedged_option_earns_the_variance_drift():
+    pr, T, V, m = book()
+    n0 = np.array([5.0, -2.0, 3.0, 4.0, 1.0, -1.0])
+    nz = n0 * m.z
+    dnu = pr.greeks(10.0, 0.0225, T).dnu
+    for model in (P, Q):
+        run = dict(S0=10.0, nu0=0.0225, T=0.02, dt=0.0005, paths=4000, n0=n0, seed=5)
+        s = h.simulate(pr, T, m, never, P=model, **run)
+        drift = (nz * dnu).sum() * (model.drift(0.0225) - Q.drift(0.0225)) * 0.02
+        se = s.pnl.std() / math.sqrt(4000)
+        assert abs(s.pnl.mean() - drift) < 4 * se
+
+
+def test_minimum_variance_hedge_removes_rho_squared():
+    pr, T, V, m = book()
+    n0 = np.array([5.0, 2.0, 3.0, 4.0, 1.0, 1.0])
+    run = dict(P=P, S0=10.0, nu0=0.0225, T=0.004, dt=0.0001, paths=3000, n0=n0, seed=9)
+    delta = h.simulate(pr, T, m, never, **run).pnl.var()
+    mv = h.simulate(pr, T, m, never, mv=True, **run).pnl.var()
+    assert mv / delta == pytest.approx(1 - P.rho**2, abs=0.04)
