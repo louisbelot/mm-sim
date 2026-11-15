@@ -2752,6 +2752,92 @@ snapshot, the surface and the SVI fit. mm-sim carries its own Black-Scholes
 Greeks, and a test compares them with vol-lab's to 1e-12 when vol-lab is
 importable.
 
+### The paper's own setting: Heston
+
+The section above moves an implied vol factor. The paper itself works with a
+stochastic volatility model: the variance nu follows Heston dynamics with
+drift a_P(nu) = kappa_P (theta_P - nu) under the real-world measure and
+a_Q(nu) = kappa_Q (theta_Q - nu) under the pricing measure, and options are
+marked at their Heston prices. `heston.py` builds that setting.
+
+The pricer uses the Albrecher et al. "little trap" form of the characteristic
+function and Lewis's single-integral formula, C = S - sqrt(SK)/pi times the
+integral of Re[exp(iuk) phi(u - i/2)] / (u^2 + 1/4), on 192 Gauss-Legendre
+nodes up to where the integrand falls below 1e-13. Delta and the variance
+sensitivity come from the same integral: d/dnu multiplies the integrand by
+the D(u) term of the characteristic function, so no finite differences are
+needed. With the Fang-Oosterlee test parameters it gives 5.785155434 against
+their published 5.785155450, the same value adaptive quadrature finds; with
+the vol of vol near zero it is Black-Scholes. On the paper's chain (S0 10,
+nu0 0.0225, kappa_Q 3, theta_Q 0.0225, xi 0.2, rho -0.5, calls at strikes 8
+to 12 and one to three years) prices, vegas and implied vols land on the
+two-decimal values in the paper's Figure 4 legend, within the noise of the
+1e5 Monte Carlo paths they used.
+
+The paper's vega is the sensitivity to sqrt(nu), V_i = 2 sqrt(nu) dO_i/dnu.
+Delta hedged, a book with portfolio vega V then earns
+V (a_P - a_Q) / (2 sqrt(nu)) dt in expectation and carries V xi / 2 dW of
+noise, which gives the paper's HJB (their equation 4) in two state variables,
+nu and V:
+
+    0 = d_t v + a_P d_nu v + 1/2 xi^2 nu d_nu^2 v
+          + V (a_P - a_Q) / (2 sqrt(nu)) - gamma xi^2 V^2 / 8
+          + sum_i,side z_i H_i((v(t, nu, V) - v(t, nu, V +- z_i V_i)) / z_i)
+
+`heston.Reduced` solves it by the method of lines: upwind differences for the
+nu drift, central for the diffusion, reflecting edges, and the jump terms
+interpolated along V, all stepped with DOP853. With a_P = a_Q every nu row
+equals the one-dimensional `options.Reduced` to 1e-6 of the value, and
+`heston.own` simulates the model itself (nu under P, vega moved only by fills)
+to check the value: 163,511 (se 542) against 164,044 at the paper's
+parameters.
+
+The drift term is the only thing nu changes, and at the paper's numbers it is
+small. a_P - a_Q is positive across the grid (kappa_P 2, theta_P 0.04), worth
+0.117 a year per unit of vega at nu0, so the solver tilts toward long vega:
+lower bids and higher asks than the drift-free solution, by 0.3% of the quote
+at most across nu from 0.0144 to 0.0324. The value moves by 0.13 out of
+164,044 across that range, which is the paper's remark that "the dependence in
+nu is low", measured. The Markowitz target edge / (gamma xi^2 / 4) is 11,667
+of vega at gamma 1e-3 and only passes the limit near gamma 1e-6, and even at the
+limit the drift pays about 4,600 a day against roughly 640,000 of spread.
+
+`heston.simulate` runs the full model: spot and variance under P, every option
+repriced with the Fourier pricer at each step, client fills, a vega limit on
+true vega, and either a delta hedge or the paper's minimum-variance hedge from
+their appendix A.1, q_S = -Delta - rho xi sum_i q_i dO_i/dnu / S, which
+removes the part of the vega noise that the spot can absorb and leaves
+(1 - rho^2) of its variance. P&L splits exactly into spread, delta, the
+dO/dnu dnu vega term, hedging cost and a remainder. Two checks run on it: a
+fixed, delta-hedged book earns sum q_i dO_i/dnu (a_P - a_Q) dt on average
+(within 4 se under P, nothing under Q), and its variance under the
+minimum-variance hedge is 1 - rho^2 = 0.75 of the delta-hedged one.
+
+`examples/heston_mm.py` replicates the paper's 20-option book (lots of 5e5 of
+premium, 30 requests a day at the money, alpha 0.7, beta 150, vega limit 1e7)
+and runs one trading day under P, 1000 paths, 100 steps, with the stationary
+quotes. Differences are paired on the same random numbers:
+
+| gamma | (nu, V) HJB, delta hedge | min-variance hedge gain (se) | variance ratio | drift-aware minus drift-free (se) | HJB minus closed form (se) |
+| ----- | ------------------------ | ---------------------------- | -------------- | --------------------------------- | -------------------------- |
+| 1e-3 | 510,748 | 21,926 (928) | 0.862 | -658 (332) | 595 (806) |
+| 1e-4 | 615,325 | 5,660 (663) | 0.780 | -870 (418) | -990 (719) |
+| 1e-5 | 636,914 | 1,046 (440) | 0.756 | -374 (411) | 12,035 (1,353) |
+| 1e-6 | 639,985 | 309 (390) | 0.725 | -232 (442) | 21,046 (1,595) |
+
+The hedge is the part worth having. It cuts the variance of the non-spread P&L
+to 0.73 to 0.86 of the delta-hedged level (0.75 is the constant-vega theory;
+the gap is largest at gamma 1e-3, where the book stays small) and, since
+the penalty the quoter optimizes falls with it, the quoter takes more flow:
+spread rises from 585,870 to 598,217 a day at gamma 1e-3. Knowing that the
+real-world variance drifts up is worth nothing measurable. In its own model
+the solver values it at 0.7 over the 0.3-day horizon at gamma 1e-3 and 2.9 at
+1e-4, and the simulated differences are a few hundred, about 2 se or less. The closed
+form is as good as the exact HJB down to gamma 1e-4 and falls behind once the
+hard limit is what drives the skew, as it did on SPY.
+
+![Heston market making](docs/heston_mm.png)
+
 ## An executor on the other side
 
 So far the market maker's counterparties were noise or traders who know the
@@ -3713,7 +3799,8 @@ multi-asset one in about two minutes. `dynamic_fees.py` runs 68 sessions of
 `data/` and take about two minutes each, `etf_basis.py` under one.
 `options_mm.py` reads vol-lab's SPY snapshot (from `../vol-lab/data/cboe`, or
 the folder in `VOLLAB_CBOE`) and runs 33 simulated batches in about three and a
-half minutes.
+half minutes. `heston_mm.py` solves the paper's book and runs 20 simulated
+days in a few minutes.
 `execution.py` runs about 66,000 sessions in seven minutes, `stealth.py` about
 36,000 in six and `toxic_bursts.py` about 7,000 in two and a half.
 `flash_crash.py` runs about 17,000 sessions in seven minutes, and
