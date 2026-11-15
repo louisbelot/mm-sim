@@ -2260,3 +2260,98 @@ Results (100,000 paths):
 Next: regimes in the intensities (Campi and Zabaljauregui 2020), where fills
 carry information and the quotes become a dual-control problem, so QMDP should
 finally fall behind; then two market makers against one adversary.
+
+## 2026-11-15: The options market maker under Heston
+
+Built:
+
+- `heston.py`: a `Heston` model (drift, characteristic function in the
+  "little trap" form), a vectorized Fourier `Pricer` (Lewis's formula on
+  Gauss-Legendre nodes, analytic delta and dO/dnu), an implied vol inverter,
+  `Reduced` (the Baldacci-Bergault-Gueant HJB in nu and portfolio vega),
+  `own` (Monte Carlo of that model for any quote rule) and `simulate` (spot
+  and variance under P, Heston marks, client fills, vega limit, delta or
+  minimum-variance hedge, exact P&L split).
+- `examples/heston_mm.py`: the paper's 20-call book, its pricing table next to
+  the paper's, the value and quote shifts across nu, the in-model check, and
+  20 one-day simulations over gamma, policy and hedge.
+
+Design notes:
+
+- Lewis's formula needs one integral per option for the price and the same
+  integrand times (1/2 + iu) for delta and times D(u) for dO/dnu. C(u) and
+  D(u) depend only on the option and the node, so pricing 1000 paths times 20
+  options is one complex exponential per path, option and node (0.17 s per
+  step at 192 nodes). The upper limit of the integral is set per maturity from
+  the envelope at the lowest variance the caller will price at.
+- The paper's vega is with respect to sqrt(nu), not nu, which is where the
+  1/(2 sqrt(nu)) in the drift term and the xi^2 / 8 in the penalty come from.
+  The code keeps dO/dnu as the primitive and builds V_i = 2 sqrt(nu) dO/dnu.
+- The nu direction of the HJB is a plain linear PDE: upwind first
+  differences (forward where a_P > 0, which on the paper's grid is
+  everywhere), central second differences, edge padding for the drift and
+  reflection for the diffusion, so both are zero-flux at the boundaries like
+  the paper's Neumann conditions. The jump legs shift V by the same amount on
+  every nu row, so their interpolation indices are computed once per leg.
+- `Reduced` with one nu row skips the nu terms entirely, which is how the
+  drift-free policy in the example is built.
+- The first test of the Black-Scholes limit used xi = 1e-5 and failed at 5e-6:
+  (b - d)/xi^2 cancels catastrophically when xi is that small. At xi = 1e-3 the
+  Heston-to-Black-Scholes gap is O(xi^2) and the test holds to 1e-7.
+- The pricer agrees with adaptive quadrature to 1e-10, and both sit 1.6e-8
+  below the published Fang-Oosterlee value, so that test allows 5e-8.
+
+Checks:
+
+- Fang-Oosterlee reference price, Black-Scholes limit for calls and puts
+  (price and delta), delta and dO/dnu against central differences, put-call
+  parity to 1e-12, phi(0) = phi(-i) = 1.
+- The paper's Figure 4 legend: all 20 prices within 0.01, vegas within 0.025,
+  implied vols within 0.003. Ours run slightly higher at one year (2.0597
+  against 2.06 and implied vol 0.1649 against 0.1622 for K 8); the paper's
+  values come from 1e5 Monte Carlo paths, whose standard error on a deep
+  in-the-money call is about 0.005.
+- With a_P = a_Q, every nu row of the 2D solution equals `options.Reduced` to
+  1e-6 of the value, and so do the quotes.
+- With a_P above a_Q, bids fall and asks rise against the drift-free
+  quotes; swapping P and Q reverses both.
+- The value matches `own` in its own model within 4 se, and a quote rule that
+  ignores the state does worse there.
+- Attribution adds up to 1e-8 with both hedges, and the vega limit holds.
+- A fixed book, delta hedged over 0.02 years, earns
+  sum q_i z_i dO_i/dnu (a_P - a_Q) T on average within 4 se under P and zero
+  under Q. Its variance under the minimum-variance hedge is (1 - rho^2) of the
+  delta-hedged variance within 0.04.
+
+Results:
+
+- Paper's book, gamma 1e-3, 31 by 401 grid: value 164,043.90 at nu0 against
+  164,043 for the drift-free solver; 164,043.85 at nu 0.0144 and 164,043.98 at
+  0.0324. Quotes shift by at most 2.7e-3 and 3.0e-3 of their size at the two
+  ends of the nu range. `own` with 8000 paths: 163,511 (se 542).
+- At zero vega the quotes sit above the myopic logistic optimum, which solves
+  x = 1 + exp(-(alpha + x)) in units of beta delta / V (x = 1.156): 1.167 for
+  the one-year 8-strike call, whose lot carries 101k of vega, and 1.306 for
+  the one-year at-the-money call, whose lot carries 1.07M. A fill that moves
+  the book by a million of vega uses up risk and limit room, and the quote
+  charges for it.
+- One day under P, 1000 paths: objective 510,748 (gamma 1e-3), 615,325,
+  636,914 and 639,985 (1e-6) for the (nu, V) HJB with a delta hedge. The
+  minimum-variance hedge adds 21,926 (se 928), 5,660 (663), 1,046 (440) and
+  309 (390), with variance ratios 0.862, 0.780, 0.756 and 0.725. Knowing the
+  drift adds -658 (332), -870 (418), -374 (411) and -232 (442). The exact HJB
+  beats the closed form by 12,035 (1,353) at gamma 1e-5 and 21,046 (1,595) at
+  1e-6, and ties it at 1e-3 and 1e-4.
+- In its own model the drift-aware solver is worth 0.66 more than the
+  drift-free one at gamma 1e-3 and 2.92 at 1e-4 (value difference over the
+  0.3-day horizon); the paired Monte Carlo difference there is -110 (49) and
+  50 (63), so the simulated gaps are noise.
+
+Not done: the first-order correction to the constant-vega approximation from
+the paper's appendix A.2. It is a Feynman-Kac expectation along the
+zero-order optimal fills, one Monte Carlo per neighbouring inventory, and over
+a 0.3-day horizon the vegas barely move, so it should be small; it needs
+measuring rather than assuming.
+
+Next: that vega correction, then quoting the smile on the exchange with depth
+and queue position per strike instead of answering requests.
