@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property
 from typing import NamedTuple
@@ -212,3 +213,28 @@ class Reduced:
 
     def policy(self, tau: float, nu: np.ndarray, n: np.ndarray, vega: np.ndarray):
         return self.quotes(tau, nu, (n * self.m.z * vega).sum(axis=-1))
+
+
+Quotes = Callable[[float, np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]
+
+
+def own(r: Reduced, quotes: Quotes, *, nu0: float, dt: float, paths: int, seed: int = 0):
+    rng = np.random.default_rng(seed)
+    nu, v = np.full(paths, nu0), np.zeros(paths)
+    zV = r.m.z * r.vega
+    out = np.zeros(paths)
+    for s in range(round(r.T / dt)):
+        bid, ask = quotes(r.T - s * dt, nu, v)
+        u = rng.random((paths, r.m.d, 2))
+        for i, f in enumerate(r.m.flow):
+            for side, q, k in ((1.0, bid[:, i], 0), (-1.0, ask[:, i], 1)):
+                ok = np.isfinite(q) & (np.abs(v + side * zV[i]) <= r.vbar * (1 + 1e-9))
+                q = np.where(ok, q, 0.0)
+                hit = ok & (u[:, i, k] < -np.expm1(-f.rate(q) * dt))
+                out += np.where(hit, r.m.z[i] * q, 0.0)
+                v += side * hit * zV[i]
+        zn, zs = rng.standard_normal((2, paths))
+        out += (v * r.edge(nu) - r.m.gamma / 2 * (r.eta * v) ** 2) * dt
+        out += r.eta * v * math.sqrt(dt) * zs
+        nu = np.maximum(nu + r.P.drift(nu) * dt + r.P.xi * np.sqrt(nu * dt) * zn, 1e-8)
+    return out

@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import pytest
 
@@ -112,3 +114,14 @@ def test_variance_drift_tilts_toward_long_vega():
     assert np.all(bu < b0) and np.all(au > a0)
     assert np.all(bd > b0) and np.all(ad < a0)
     assert up.value(0.0225) > flat.value()
+
+
+def test_value_matches_its_own_model():
+    pr, T, V, m = book()
+    r = h.Reduced(m, V, P, Q, 0.0144, 0.0324, 1e7, 0.0012, rows=7, points=101)
+    run = dict(nu0=0.0225, dt=0.0012 / 120, paths=3000, seed=3)
+    x = h.own(r, r.quotes, **run)
+    se = x.std() / math.sqrt(len(x))
+    assert abs(x.mean() - r.value(0.0225)) < 4 * se
+    lazy = h.own(r, lambda tau, nu, v: r.quotes(r.T, 0.0225, 0.0), **run)
+    assert lazy.mean() < x.mean()
