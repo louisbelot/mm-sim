@@ -2355,3 +2355,88 @@ measuring rather than assuming.
 
 Next: that vega correction, then quoting the smile on the exchange with depth
 and queue position per strike instead of answering requests.
+
+## 2026-11-16: Hidden liquidity regimes, where quotes decide what is learned
+
+Built:
+
+- `hidden.py`: a `World` whose hidden two-state chain sets the fill law
+  A_s dt exp(-k_s delta) on each side, with a driftless mid. The fill filter
+  (`update`, Bayes on the four fill outcomes then one Markov step),
+  `information` (mutual information between the regime and one step of fills),
+  and the exact belief-state solver `bayes`: backward induction over
+  (n, pi, q) with the per-cell quote pair found by `best` (global grid on the
+  first sweep, local grid after, safeguarded Newton on finite differences) and
+  cubic Hermite interpolation of the continuation in the belief.
+- The comparison quoters: `informed` (sees the regime, `robust.respond` per
+  row), `ce` (plans as if the belief only drifts with the prior, runs on the
+  real filter), `qmdp`, `plugin` (informed quotes of the more likely regime)
+  and `blind` (the ce table at the prior belief), all scored exactly by
+  `evaluate` on the same grid, plus a Monte Carlo `simulate` with the true
+  hidden state.
+- `examples/hidden_flow.py` and `docs/hidden_flow.png`: depth regimes
+  (A 140/40, k 1.5/0.75), Campi and Zabaljauregui's intensity shapes, and a
+  switching-rate sweep.
+
+Design notes:
+
+- With k different across regimes the two fill curves cross at
+  delta_c = log(A_0/A_1)/(k_0 - k_1) = 1.67, where a fill and a miss are equally
+  likely in both regimes and nothing is learned. Information per step falls
+  from 0.23 nats at depth 0 to zero there. That is the lever the Bayes quoter
+  pulls.
+- First version used linear interpolation in the belief, as `regime.py` does.
+  Here it fails: the posterior moves with the quote, so the stage objective is
+  kinked wherever a posterior crosses a grid node. Golden section and Newton
+  both landed on kinks (bid 0.667 at pi 0.1, below the 0.673 at pi 0), the
+  coordinate sweeps never converged, and a solve took 107 s. Catmull-Rom
+  interpolation made the objective C1, the sweeps stop early, and a solve
+  takes about 30 s. The value is 50.9682, 50.9673, 50.9673 and 50.9673 on 26,
+  51, 101 and 201 belief points.
+- The certainty equivalent is defined by what the planner assumes, not by
+  what it sees: it uses the true filter at run time but its table was solved
+  with pi' = pi P for every outcome, so the value of quoting to learn is
+  bayes minus ce, and the value of filtering at all is ce minus blind.
+
+Checks:
+
+- Filter step equals Bayes' rule plus one Markov step to 1e-15; the posterior
+  is a martingale to 1e-15; the no-fill drift matches the continuous-time
+  -(lambda_1 - lambda_0) pi (1 - pi) plus switching terms with an error that
+  falls faster than dt.
+- Mutual information is zero at delta_c and for identical regimes, positive on
+  either side of delta_c.
+- Interpolation exact on nodes, lines and interior quadratics.
+- `best` within 1e-9 of a 301 by 301 brute force on a small stage.
+- Identical regimes give `robust.best_response` to 1e-10 at every belief; no
+  switching gives the informed rows at pi = 0 and 1 to 1e-9.
+- Bayes dominates the other four at every cell at t = 0 in the test world,
+  informed beats Bayes, Monte Carlo agrees with the exact Bayes and informed
+  values within 4 se, and the simulated filter is calibrated.
+
+Results (100,000 paths, common random numbers):
+
+- Depth regimes, rate 2: informed 52.884, bayes 50.967, ce 50.932, qmdp
+  50.930, blind 50.154, plugin 47.314 (exact). Paired Monte Carlo: bayes minus
+  ce 0.034 +- 0.006, minus qmdp 0.036 +- 0.006, minus blind 0.812 +- 0.011,
+  minus plugin 3.657 +- 0.023.
+- Bayes quotes tighter than ce at every interior belief, up to 0.064 at
+  pi 0.75, and fills 59.5 times against 58.0. Planning to learn is worth
+  0.105 at rate 0.25, 0.059 at 1, 0.018 at 4 and 0.002 at 16. Filtering
+  (ce minus blind) is worth 1.556, 1.066, 0.513 and 0.157.
+- Plugin is worse than never looking: quoting the thin regime's 1.35 when the
+  book is deep costs a quarter of the fills.
+- QMDP quotes within 0.003 of ce and is as close in value. The 2026-11-13
+  entry expected QMDP to fall apart once fills carried information; it does
+  not probe, but probing is only worth 0.036 here.
+- Campi and Zabaljauregui's shapes (equal k, A ratio 5, rate 5, 10 time
+  units): the regime is worth 0.006 out of 0.92, and Bayes quotes sit below
+  the belief-weighted informed quotes (0.065 against 0.068 at pi 0.6). The
+  paper reports partial-information spreads 6 to 30% above full information at
+  pi 0.6; not reproduced, and I could not recover their time scale or which
+  full-information curve their figure uses.
+
+Next: two market makers against one adversary (stage Nash by best-response
+iteration on (q1, q2) with a tie rule), and a longer-horizon run of the
+hidden-liquidity world where probing should matter more, with regimes that
+also differ in adverse selection.
