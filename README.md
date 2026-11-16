@@ -3593,9 +3593,9 @@ exactly, and Monte Carlo means for the Bayes, informed and blind quoters
 agree with their exact values within 4 se.
 
 Hidden regimes are studied in continuous time by Campi and Zabaljauregui
-(2020), who let the hidden chain drive the order arrival intensities. That is
-the harder case: fills then carry information, quotes change what the market
-maker learns, and QMDP is no longer close.
+(2020), who let the hidden chain drive the order arrival intensities. There
+fills carry information and quotes change what the market maker learns; that
+case is the next section.
 
 ### PPO in the switching world
 
@@ -3621,6 +3621,145 @@ PPO cannot beat a fixed AS quoter: it has nothing that tells it which way the
 drift goes, and the best it can do is the blind table, which it falls short
 of by 1 to 4. The feature that makes the learner work is the filter, not the
 network.
+
+## Hidden liquidity: when the quotes decide what you learn
+
+`hidden.py` moves the hidden regime from the price into the order flow, the
+setting of Campi and Zabaljauregui (2020). A two-state Markov chain s sets the
+fill law: a quote at depth delta fills in a step with probability
+A_s dt exp(-k_s delta), independently on each side, and the regime leaves state
+j at rate lambda_j. The mid is a driftless Brownian motion in both regimes, so
+prices say nothing, and the only signal is the market maker's own fills. The
+objective is the drift world's: cash plus marked inventory, minus phi sigma^2
+dt q'^2 a step and eta q^2 at the end.
+
+After a step with outcome (bought, sold) at quotes (delta_b, delta_a), the
+filter multiplies the odds by the likelihood ratio L_1 / L_0, with
+L_s = p_s^b or 1 - p_s^b times p_s^a or 1 - p_s^a, then takes one Markov
+step. The likelihood ratio depends on the quotes, so how much the market maker
+learns is a choice. In continuous time the belief jumps at each fill and
+between fills drifts at -(lambda_1(delta) - lambda_0(delta)) pi (1 - pi) plus
+the switching terms; `test_filter_drift_between_fills_matches_continuous_time`
+checks the discrete filter against that drift with an error that shrinks like
+dt^2. When k differs across regimes, the two fill curves cross at
+delta_c = log(A_0 / A_1) / (k_0 - k_1): a quote there fills equally often in
+both regimes, and neither a fill nor a miss moves the belief (the middle panel
+below, mutual information per step against depth).
+
+The Bayes quoter solves backward induction over (n, pi, q). The belief is
+still a sufficient statistic, but the next belief depends on the quote, so
+the per-cell problem is no longer the closed-form fixed point that `respond`
+solves. `hidden.best` maximizes the stage value over (delta_b, delta_a) by
+coordinate ascent: an 81-point global grid on the first sweep, five points
+around the incumbent after that, then six safeguarded Newton steps on finite
+differences inside the bracket. The continuation is read off a 101-point
+belief grid with cubic Hermite (Catmull-Rom) interpolation. Linear
+interpolation was the first version and made the objective kinked wherever a
+posterior crossed a grid node; the quotes jumped (0.667 at pi 0.1, below the
+0.673 at pi 0) and the sweeps never met their tolerance. With the cubic the
+Bayes value is 50.9682 on 26 points and 50.9673 on 51, 101 and 201, and a
+full-horizon solve takes about 30 s.
+
+The quoters:
+
+- informed: sees s. Exact backward induction over (n, s, q) with `respond`.
+- bayes: the belief-state optimum, which plans for what its fills will teach it.
+- ce: certainty equivalent. The same grid solve, but the planner assumes the
+  belief will only drift with the prior (pi' = pi P whatever happens); in use it
+  is fed the real filter. It updates on what it learns but never quotes to learn.
+- qmdp: mixes the informed continuations by the belief, which assumes the
+  regime is revealed after one step.
+- plugin: the informed quotes of the more likely regime.
+- blind: the ce table read at the prior belief instead of the filter.
+
+`examples/hidden_flow.py`, depth regimes A = (140, 40), k = (1.5, 0.75),
+switching rate 2 each way, phi 0.01, eta 0.05, Q 10, 100,000 paths with common
+random numbers (the paired differences are Bayes minus each row on the same
+paths):
+
+| quoter | exact | simulated | spread | fills | Bayes minus this |
+|---|---|---|---|---|---|
+| informed | 52.884 | 52.950 +- 0.039 | 2.034 | 58.9 | |
+| bayes | 50.967 | 51.019 +- 0.039 | 1.708 | 59.5 | |
+| ce | 50.932 | 50.985 +- 0.039 | 1.757 | 58.0 | 0.034 +- 0.006 |
+| qmdp | 50.930 | 50.983 +- 0.039 | 1.762 | 57.9 | 0.036 +- 0.006 |
+| plugin | 47.314 | 47.363 +- 0.038 | 2.353 | 44.4 | 3.657 +- 0.023 |
+| blind | 50.154 | 50.208 +- 0.040 | 1.638 | 58.0 | 0.812 +- 0.011 |
+
+Bid depth at t = 0 and q = 0:
+
+| belief in the thin regime | 0 | 0.25 | 0.5 | 0.6 | 0.75 | 1 |
+|---|---|---|---|---|---|---|
+| bayes | 0.673 | 0.711 | 0.774 | 0.818 | 0.933 | 1.352 |
+| ce | 0.673 | 0.725 | 0.815 | 0.872 | 0.997 | 1.351 |
+| qmdp | 0.674 | 0.726 | 0.816 | 0.873 | 0.998 | 1.354 |
+| belief average of the informed quotes | 0.674 | 0.844 | 1.014 | 1.082 | 1.184 | 1.354 |
+
+Exact values at pi0 = 0.5 as the switching rate changes:
+
+| rate | informed | bayes | ce | qmdp | plugin | blind |
+|---|---|---|---|---|---|---|
+| 0.25 | 52.890 | 51.773 | 51.668 | 51.664 | 48.668 | 50.112 |
+| 1 | 52.884 | 51.258 | 51.199 | 51.197 | 47.851 | 50.133 |
+| 4 | 52.891 | 50.711 | 50.693 | 50.692 | 46.804 | 50.180 |
+| 16 | 52.917 | 50.386 | 50.384 | 50.384 | 46.048 | 50.227 |
+
+![Hidden liquidity](docs/hidden_flow.png)
+
+What the numbers say:
+
+- The Bayes quoter probes. At every interior belief it quotes tighter than
+  the certainty equivalent, by up to 0.064 at pi = 0.75 (0.933 against 0.997),
+  and it fills 59.5 times a session against 58.0. Information per step falls
+  with depth until delta_c = 1.67, so a tighter quote buys a sharper read on
+  the regime. That is the dual effect, and here it is worth 0.035 (paired
+  Monte Carlo 0.034 +- 0.006): about 2% of the 1.92 gap to the informed
+  quoter. It is worth 0.105 when regimes last four sessions (rate 0.25) and
+  0.002 at rate 16, where whatever is learned is stale a few steps later.
+- Using the filter at all is worth much more: ce beats blind by 0.78 at rate
+  2, 1.56 at rate 0.25 and 0.16 at rate 16.
+- Hard classification is the worst choice in the table. Plugin loses 3.66 to
+  Bayes and 2.84 to a quoter that never looks at its fills. Quoting the thin
+  regime's 1.35 while the book is actually deep gives up a quarter of the
+  fills (44.4 against 59.5). The belief-weighted average of the informed
+  quotes is no good either: it sits 0.2 to 0.25 above the Bayes quotes in the
+  middle of the range. The depth that is best against a mixture of fill curves
+  leans toward the curve that supplies most of the fills, and at depth 0.8 the
+  deep regime gives 42 arrivals a session against 22.
+- QMDP ends up beside the certainty equivalent, 0.036 below Bayes, with
+  quotes within 0.003 of ce's. QMDP believes the regime will be revealed for
+  free after one step, so it has no reason to pay for information; ce
+  believes nothing will ever be revealed, and also has no reason to. The
+  previous section guessed that QMDP would no longer be close once fills
+  carried information. Its quotes do miss the probing, but in this world the
+  probing is worth 0.036.
+
+With Campi and Zabaljauregui's intensity shapes (lambda_1 = 2 exp(-25 delta),
+lambda_2 = 5 lambda_1, sigma 0.1, inventory bound 3, switching rate 5, phi
+chosen so that the running penalty is their zeta q^2 dt with zeta 0.1, here
+over 10 time units with dt 0.02) the regime is worth little: 0.924 informed,
+0.918 Bayes, 0.918 ce, 0.918 blind, and plugin 0.905. With equal k there is no
+crossing depth, and the Bayes quotes sit below the belief-weighted informed
+quotes (0.065 against 0.068 at pi = 0.6). The paper reports partial-information
+spreads 6 to 30% above the full-information ones at pi = 0.6. I have not
+reproduced that. Their time scale and the exact full-information curve their
+figure compares against are not things I could pin down, so this is a
+non-replication with a known gap, not evidence against them.
+
+The checks: the filter step is Bayes' rule on the four fill outcomes followed
+by one Markov step, to 1e-15, and the posterior is a martingale (the
+outcome-weighted posterior equals the prior to 1e-15). Mutual information is
+zero at delta_c and positive on either side, and zero for identical regimes.
+The interpolation is exact on grid nodes, on lines, and on quadratics away
+from the two edge intervals. On a small stage `best` matches a 301 by 301
+brute-force search to 1e-9. With identical regimes the Bayes solution equals
+the single-regime `robust.best_response` to 1e-10 at every belief; with no
+switching its pi = 0 and pi = 1 rows equal the informed solution to 1e-9.
+In the test world Bayes dominates ce, qmdp, plugin and blind at every
+grid cell at t = 0, informed beats
+Bayes, and Monte Carlo means of the Bayes and informed quoters agree with their
+exact values within 4 se. In simulation E[1{s_n = 1} - pi_n] and
+E[(1{s_n = 1} - pi_n) pi_n] are zero within 4 se and E[pi_n] follows the prior.
 
 ## Install
 
@@ -3810,7 +3949,9 @@ days in a few minutes.
 under a minute, and `inverse_rl.py` fits the penalties in about five.
 `regime_mm.py` solves and simulates both regime worlds and the switching-rate
 sweep in about a minute and a half; `regime_rl.py` trains six PPO agents in
-parallel in about eight minutes.
+parallel in about eight minutes. `hidden_flow.py` solves the two
+hidden-liquidity worlds and the switching-rate sweep on six workers and
+simulates 100,000 paths per quoter in a few minutes.
 
 ## Notes
 
