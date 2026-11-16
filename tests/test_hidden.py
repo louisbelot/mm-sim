@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from mmsim import hidden as h
+from mmsim import robust as r
 
 SMALL = h.World(T=0.2, Q=6, phi=0.01, eta=0.05, rate=(1.0, 1.0))
 
@@ -62,3 +63,40 @@ def test_fills_carry_no_information_at_the_crossing_depth():
     assert h.information(w, 0.5, 2 * d, d) > 0
     same = h.World(A=(100.0, 100.0), k=(1.0, 1.0))
     assert h.information(same, 0.3, 0.2, 0.7) == pytest.approx(0.0, abs=1e-15)
+
+
+def test_interp_is_exact_on_nodes_lines_and_inner_quadratics():
+    G = 11
+    x = np.linspace(0, 1, G)
+    W = np.stack([x**2, 3 * x - 1, np.ones(G)], axis=1)
+    assert np.allclose(h.interp(W, x[:, None], np.arange(3)[None]), W, atol=1e-14)
+    pi = np.linspace(0, 1, 37)
+    assert np.allclose(h.interp(W, pi, 1), 3 * pi - 1, atol=1e-14)
+    inner = pi[(pi > 0.1) & (pi < 0.9)]
+    assert np.allclose(h.interp(W, inner, 0), inner**2, atol=1e-14)
+
+
+def test_best_matches_a_brute_force_search():
+    w = h.World(T=0.01, Q=3, phi=0.05)
+    c = h.cells(w, 9)
+    pi, q = np.linspace(0, 1, 9)[:, None], w.q[None, :]
+    W = -0.05 * q**2 + 0.4 * (pi - 0.5) ** 2 + 0.1 * pi * q
+
+    def f(b, a):
+        return h.objective(w, W, c, b, a)
+
+    bid, ask = h.best(w, f, c)
+    got = f(bid, ask)
+    d = np.linspace(0, 5 / min(w.k), 301)
+    brute = np.max([f(np.full((9, 7), x), d[:, None, None]).max(axis=0) for x in d], axis=0)
+    assert np.all(got >= brute - 1e-9)
+
+
+def test_identical_regimes_reduce_to_the_one_regime_solution():
+    w = h.World(T=0.2, Q=6, A=(140.0, 140.0), k=(1.5, 1.5), phi=0.01, eta=0.05)
+    plan = h.bayes(w, 11)
+    game = r.Game(T=w.T, dt=w.dt, sigma=w.sigma, Q=w.Q, zeta=w.phi * w.sigma**2 * w.dt, eta=w.eta)
+    one = r.best_response(game, r.Market(0.0, 140.0, 1.5))
+    assert np.allclose(plan.V, one.V[:, None], atol=1e-10)
+    inner = np.isfinite(one.bid)
+    assert np.allclose(plan.bid[:, :, inner[0]], one.bid[:, None, inner[0]], atol=1e-6)
