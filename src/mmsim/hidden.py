@@ -7,6 +7,9 @@ from typing import NamedTuple
 
 import numpy as np
 
+from . import regime
+from . import robust as r
+
 OUTCOMES = ((0, 0), (1, 0), (0, 1), (1, 1))
 
 
@@ -217,3 +220,83 @@ def bayes(w: World, grid: int = 101) -> Plan:
 
 def ce(w: World, grid: int = 101) -> Plan:
     return solve(w, grid, learn=False)
+
+
+def evaluate(w: World, bid: np.ndarray, ask: np.ndarray) -> np.ndarray:
+    c = cells(w, bid.shape[1])
+    V = np.empty((w.N + 1,) + bid.shape[1:])
+    V[w.N] = w.terminal()
+    pen = w.penalty()
+    for n in range(w.N - 1, -1, -1):
+        V[n] = objective(w, V[n + 1] - pen, c, bid[n], ask[n])
+    return V
+
+
+def informed(w: World) -> Plan:
+    M = len(w.q)
+    A, k = (np.repeat(x, M) for x in (w.A, w.k))
+    V = np.empty((w.N + 1, 2, M))
+    V[w.N] = w.terminal()
+    bid, ask = np.empty((w.N, 2, M)), np.empty((w.N, 2, M))
+    warm = None
+    for n in range(w.N - 1, -1, -1):
+        st = regime.stage(w, w.P @ V[n + 1] - w.penalty())
+        qb, qa = warm = r.respond(st, 0.0, A, k, warm)
+        bid[n], ask[n] = qb.reshape(2, M), qa.reshape(2, M)
+        V[n] = r.payoff(st, qb, qa, 0.0, A, k).reshape(2, M)
+    return Plan(V, bid, ask)
+
+
+def qmdp(w: World, full: Plan, grid: int = 101) -> Plan:
+    c = cells(w, grid)
+    M = len(w.q)
+    bid, ask = np.empty((w.N, grid, M)), np.empty((w.N, grid, M))
+    warm = None
+    for n in range(w.N - 1, -1, -1):
+        sts = [regime.stage(w, (w.P @ full.V[n + 1] - w.penalty())[s][None]) for s in (0, 1)]
+
+        def f(b, a, sts=sts):
+            v = [r.payoff(sts[s], b, a, 0.0, w.A[s], w.k[s]) for s in (0, 1)]
+            return (1 - c.pi) * v[0] + c.pi * v[1]
+
+        bid[n], ask[n] = warm = best(w, f, c, warm)
+    return Plan(evaluate(w, bid, ask), bid, ask)
+
+
+def plugin(w: World, full: Plan, grid: int = 101) -> Plan:
+    s = (np.linspace(0.0, 1.0, grid) >= 0.5).astype(int)
+    bid, ask = full.bid[:, s], full.ask[:, s]
+    return Plan(evaluate(w, bid, ask), bid, ask)
+
+
+def priors(w: World) -> np.ndarray:
+    pi = np.empty(w.N + 1)
+    pi[0] = w.pi0
+    for n in range(w.N):
+        pi[n + 1] = predict(w, pi[n])
+    return pi
+
+
+def lookup(table: np.ndarray, n: int, i, pi):
+    G = table.shape[1]
+    pos = np.asarray(pi) * (G - 1)
+    j = np.clip(pos.astype(int), 0, G - 2)
+    a, b = table[n, j, i], table[n, j + 1, i]
+    return regime.lerp(a, b, np.broadcast_to(pos - j, a.shape))
+
+
+def blind(w: World, plan: Plan) -> Plan:
+    pi = priors(w)
+    G, M = plan.bid.shape[1:]
+    i = np.arange(M)
+    bid = np.stack([np.broadcast_to(lookup(plan.bid, n, i, pi[n]), (G, M)) for n in range(w.N)])
+    ask = np.stack([np.broadcast_to(lookup(plan.ask, n, i, pi[n]), (G, M)) for n in range(w.N)])
+    return Plan(evaluate(w, bid, ask), bid, ask)
+
+
+def start(w: World, plan: Plan, pi0: float | None = None, q0: int = 0) -> float:
+    pi = w.pi0 if pi0 is None else pi0
+    G = plan.V.shape[1]
+    if G == 2:
+        return float((1 - pi) * plan.V[0, 0, q0 + w.Q] + pi * plan.V[0, 1, q0 + w.Q])
+    return float(interp(plan.V[0], np.array(pi), q0 + w.Q))

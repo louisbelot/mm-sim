@@ -7,6 +7,13 @@ from mmsim import robust as r
 SMALL = h.World(T=0.2, Q=6, phi=0.01, eta=0.05, rate=(1.0, 1.0))
 
 
+@pytest.fixture(scope="module")
+def plans():
+    full = h.informed(SMALL)
+    bayes, ce = h.bayes(SMALL, 41), h.ce(SMALL, 41)
+    return full, bayes, ce
+
+
 def test_world_rejects_bad_parameters():
     with pytest.raises(ValueError):
         h.World(A=(250.0, 40.0))
@@ -100,3 +107,32 @@ def test_identical_regimes_reduce_to_the_one_regime_solution():
     assert np.allclose(plan.V, one.V[:, None], atol=1e-10)
     inner = np.isfinite(one.bid)
     assert np.allclose(plan.bid[:, :, inner[0]], one.bid[:, None, inner[0]], atol=1e-6)
+
+
+def test_known_regime_without_switching_matches_informed():
+    w = h.World(T=0.2, Q=6, phi=0.01, eta=0.05, rate=(0.0, 0.0))
+    plan, full = h.bayes(w, 21), h.informed(w)
+    assert np.allclose(plan.V[:, 0], full.V[:, 0], atol=1e-9)
+    assert np.allclose(plan.V[:, -1], full.V[:, 1], atol=1e-9)
+
+
+def test_values_are_ordered(plans):
+    full, bayes, ce = plans
+    others = [
+        h.evaluate(SMALL, ce.bid, ce.ask),
+        h.qmdp(SMALL, full, 41).V,
+        h.plugin(SMALL, full, 41).V,
+        h.blind(SMALL, ce).V,
+    ]
+    for V in others:
+        assert np.all(bayes.V[0] >= V[0] - 1e-8)
+    assert h.start(SMALL, full) > h.start(SMALL, bayes)
+    assert h.start(SMALL, bayes) > max(h.start(SMALL, h.Plan(V, None, None)) for V in others)
+
+
+def test_quotes_move_from_one_regime_to_the_other(plans):
+    full, bayes, _ = plans
+    i = SMALL.Q
+    assert bayes.bid[0, 0, i] == pytest.approx(full.bid[0, 0, i], abs=0.02)
+    assert bayes.bid[0, -1, i] == pytest.approx(full.bid[0, 1, i], abs=0.02)
+    assert np.all(np.diff(bayes.bid[0, :, i]) > 0)
