@@ -300,3 +300,59 @@ def start(w: World, plan: Plan, pi0: float | None = None, q0: int = 0) -> float:
     if G == 2:
         return float((1 - pi) * plan.V[0, 0, q0 + w.Q] + pi * plan.V[0, 1, q0 + w.Q])
     return float(interp(plan.V[0], np.array(pi), q0 + w.Q))
+
+
+Quoter = Callable[[int, np.ndarray, np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]
+
+
+def believer(plan: Plan) -> Quoter:
+    return lambda n, i, pi, s: (lookup(plan.bid, n, i, pi), lookup(plan.ask, n, i, pi))
+
+
+def oracle(plan: Plan) -> Quoter:
+    return lambda n, i, pi, s: (plan.bid[n, s, i], plan.ask[n, s, i])
+
+
+class Run(NamedTuple):
+    reward: np.ndarray
+    q: np.ndarray
+    fills: np.ndarray
+    spread: np.ndarray
+    pi: np.ndarray | None = None
+    s: np.ndarray | None = None
+
+
+def simulate(
+    w: World, quoter: Quoter, paths: int = 10_000, seed: int = 0, keep: bool = False
+) -> Run:
+    rng = np.random.default_rng(seed)
+    s = (rng.random(paths) < w.pi0).astype(int)
+    pi = np.full(paths, w.pi0)
+    q = np.zeros(paths, dtype=int)
+    x, z = np.zeros(paths), np.full(paths, 100.0)
+    reward, count, quoted, sides = (np.zeros(paths) for _ in range(4))
+    hist = (np.empty((w.N, paths)), np.empty((w.N, paths), dtype=int)) if keep else None
+    leave = np.array([w.P[0, 1], w.P[1, 0]])
+    A, k = np.array(w.A), np.array(w.k)
+    for n in range(w.N):
+        if hist is not None:
+            hist[0][n], hist[1][n] = pi, s
+        top, bot = q == w.Q, q == -w.Q
+        db, da = quoter(n, q + w.Q, pi, s)
+        pb = np.where(top, 0.0, A[s] * w.dt * np.exp(-k[s] * np.where(top, 0.0, db)))
+        pa = np.where(bot, 0.0, A[s] * w.dt * np.exp(-k[s] * np.where(bot, 0.0, da)))
+        bought, sold = rng.random(paths) < pb, rng.random(paths) < pa
+        both = ~(top | bot)
+        quoted += np.where(both, db + da, 0.0)
+        sides += both
+        before = x + q * z
+        x = x + np.where(sold, z + da, 0.0) - np.where(bought, z - db, 0.0)
+        pi = update(w, pi, db, da, bought, sold, top, bot)
+        q = q + bought - sold
+        count += bought + sold
+        z = z + w.sigma * np.sqrt(w.dt) * rng.standard_normal(paths)
+        reward += x + q * z - before - w.phi * w.sigma**2 * w.dt * q**2
+        s = np.where(rng.random(paths) < leave[s], 1 - s, s)
+    reward -= w.eta * q.astype(float) ** 2
+    spread = np.divide(quoted, sides, out=np.full(paths, np.nan), where=sides > 0)
+    return Run(reward, q, count, spread, *(hist or ()))

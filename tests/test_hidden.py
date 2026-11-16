@@ -130,6 +130,31 @@ def test_values_are_ordered(plans):
     assert h.start(SMALL, bayes) > max(h.start(SMALL, h.Plan(V, None, None)) for V in others)
 
 
+def test_monte_carlo_agrees_with_the_grid_value(plans):
+    _, bayes, _ = plans
+    run = h.simulate(SMALL, h.believer(bayes), 40_000, 2)
+    se = run.reward.std() / np.sqrt(len(run.reward))
+    assert abs(run.reward.mean() - h.start(SMALL, bayes)) < 4 * se
+
+
+def test_informed_oracle_monte_carlo_agrees(plans):
+    full, _, _ = plans
+    run = h.simulate(SMALL, h.oracle(full), 40_000, 3)
+    se = run.reward.std() / np.sqrt(len(run.reward))
+    assert abs(run.reward.mean() - h.start(SMALL, full)) < 4 * se
+
+
+def test_filter_is_calibrated(plans):
+    _, bayes, _ = plans
+    run = h.simulate(SMALL, h.believer(bayes), 40_000, 4, keep=True)
+    se = 4 / np.sqrt(run.s.shape[1])
+    for n in (1, SMALL.N // 2, SMALL.N - 1):
+        s, pi = run.s[n], run.pi[n]
+        assert abs(np.mean(s - pi)) < se
+        assert abs(np.mean((s - pi) * pi)) < se
+        assert abs(pi.mean() - h.priors(SMALL)[n]) < se
+
+
 def test_quotes_move_from_one_regime_to_the_other(plans):
     full, bayes, _ = plans
     i = SMALL.Q
