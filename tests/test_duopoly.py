@@ -135,9 +135,42 @@ def test_queue_priority_is_worth_something():
     assert first.V1[0, Q, Q] > split.V1[0, Q, Q] > first.V2[0, Q, Q]
 
 
+def test_cartel_beats_competition():
+    nash, cart = du.solve(SMALL), du.cartel(SMALL)
+    V, _, _ = du.monopoly(SMALL)
+    Q = SMALL.Q[0]
+    assert np.all(cart.V1[0] + cart.V2[0] >= nash.V1[0] + nash.V2[0] - 1e-9)
+    assert cart.V1[0, Q, Q] + cart.V2[0, Q, Q] >= V[0, Q] - 1e-9
+    assert nash.V1[0, Q, Q] + nash.V2[0, Q, Q] < V[0, Q]
+
+
+def test_cartel_cannot_be_improved():
+    cart = du.cartel(SMALL)
+    Q = SMALL.Q[0]
+    best = (cart.V1 + cart.V2)[0, Q, Q]
+    rng = np.random.default_rng(2)
+    for _ in range(4):
+        shifted = []
+        for x in cart.quotes:
+            y = x + SMALL.tick * rng.integers(-1, 2, x.shape)
+            shifted.append(np.where(np.isfinite(x), np.maximum(y, SMALL.tick / 2), x))
+        V1, V2 = du.evaluate(SMALL, shifted)
+        assert (V1 + V2)[0, Q, Q] < best
+
+
 def test_evaluate_reproduces_solve():
     game = du.Game(**{**SMALL.__dict__, "beta": 2.0})
     sol = du.solve(game)
     V1, V2 = du.evaluate(game, sol.quotes)
     np.testing.assert_allclose(V1, sol.V1, atol=1e-12)
     np.testing.assert_allclose(V2, sol.V2, atol=1e-12)
+
+
+def test_large_tick_protects_rent():
+    Q = SMALL.Q[0]
+    ratio = []
+    for tick in (0.05, 1.0):
+        game = du.Game(**{**SMALL.__dict__, "tick": tick})
+        nash, cart = du.solve(game), du.cartel(game)
+        ratio.append((nash.V1 + nash.V2)[0, Q, Q] / (cart.V1 + cart.V2)[0, Q, Q])
+    assert ratio[0] < 0.5 < ratio[1]

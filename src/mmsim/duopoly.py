@@ -252,6 +252,34 @@ def solve(game: Game) -> Solution:
     return backward(game, policy)._replace(hard=hard)
 
 
+def cartel(game: Game) -> Solution:
+    q1, q2 = game.grid()
+    Q1, Q2 = game.Q
+    shape = (q1.size, q2.size)
+    S = np.broadcast_to(-game.eta * (q1**2 + q2**2), shape).astype(float)
+    total = q1 + q2
+
+    def pick(G1, G2, can1, can2):
+        d1, d2 = best(game, G1), best(game, G2)
+        f1 = np.where(can1, edge(game, d1, G1), -np.inf)
+        f2 = np.where(can2, edge(game, d2, G2), -np.inf)
+        one = (f1 >= f2) & (f1 > 0)
+        two = ~one & (f2 > 0)
+        gain = np.maximum(0.0, np.maximum(f1, f2))
+        return np.where(one, d1, np.inf), np.where(two, d2, np.inf), gain
+
+    def policy(n, V1, V2):
+        nonlocal S
+        up1, up2, dn1, dn2 = gains(S)
+        b1, b2, gb = pick(up1, up2, q1 < Q1, q2 < Q2)
+        a1, a2, ga = pick(dn1, dn2, q1 > -Q1, q2 > -Q2)
+        S = S + game.drift(total) * game.dt * total
+        S = S - game.phi * (q1**2 + q2**2) * game.dt + gb + ga
+        return b1, a1, b2, a2
+
+    return backward(game, policy)
+
+
 def monopoly(game: Game) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     Q = game.Q[0]
     q = np.arange(-Q, Q + 1)
