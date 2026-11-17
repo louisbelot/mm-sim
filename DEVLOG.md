@@ -2440,3 +2440,87 @@ Next: two market makers against one adversary (stage Nash by best-response
 iteration on (q1, q2) with a tie rule), and a longer-horizon run of the
 hidden-liquidity world where probing should matter more, with regimes that
 also differ in adverse selection.
+
+## 2026-11-17: two market makers, a tick and an adversary
+
+Built `duopoly.py`: two makers on one book, each with its own inventory, the
+dynamic game solved exactly on (n, q1, q2), plus the cartel and the lone
+monopolist in the same flow, policy evaluation and a Monte Carlo simulator.
+`examples/duopoly.py` sweeps the tick with and without a drift adversary and
+draws `docs/duopoly.png`.
+
+Design notes:
+
+- The flow model changed from `robust.py`'s independent bid and ask fills to
+  at most one market order per step (sell with probability A dt, buy with A
+  dt), each reaching a depth D ~ Exp(k) and filling the best quote only. With
+  two makers the independent-sides model couples the bid and ask choices
+  through the both-filled term; with one order per step the two sides are
+  separate stage games, each a scalar Bertrand game. The price is a smaller dt
+  (0.0025 instead of 0.005 at A = 140).
+- Quotes live on a tick grid at (j + 1/2) tick. Without a tick there is no
+  pure equilibrium at all (the usual asymmetric Bertrand problem), and the
+  tick is what the results are about anyway.
+- Each maker's stage payoff depends on the competitor's fill through
+  h = V_i(state after the competitor trades) - V_i(state). This is what makes
+  the game interesting and what breaks the easy approach.
+- First try was alternating best responses. Without the adversary it
+  converged; with it, it cycled at large opposite inventories ((-19, 18):
+  maker 1 rests when maker 2 quotes tight but undercuts when maker 2 quotes
+  wide, and maker 2 always undercuts). Brute force over all quote pairs
+  confirmed these stages have no pure equilibrium.
+- So `stage` characterizes the equilibria instead. A trade at e is an
+  equilibrium if the loser prefers losing at e, and the winner's e is a best
+  response to some loser quote: one tick behind (pins the winner at e if e is
+  inside its monopoly depth) or no quote (works only at the monopoly depth).
+  Ties need both makers to prefer the tie to undercutting and to losing. All
+  of it is vector algebra over e, so a stage costs O(J M) with no iteration.
+  Selection: widest traded quote, then larger joint payoff.
+- Where no pure equilibrium exists, `exhaust` brute-forces the bimatrix game
+  and plays it sequentially (strong Stackelberg), choosing the order with the
+  larger joint payoff. A mixed equilibrium would be the textbook answer, but
+  it would make the quote tables random, and the cases are rare: none at
+  phi = 0.5 without the adversary, 4 of about 1.3 million at tick 0.02 with
+  it.
+- The adversary's drift enters through b dt q on the inventory held at the
+  start of the step, so it does not change the step's quote choice and its
+  best response is bang-bang on sign(q1 + q2). Against one maker that is
+  exactly a linear penalty beta |q|, the continuous-time version of what the
+  2026-11-12 entry found numerically for `robust.py`.
+
+Checks:
+
+- 1,600 random stage games: every returned pair is a mutual best response
+  over the full grid, missing equilibria are reported exactly when brute force
+  finds none, and the selected payoffs equal a brute-force selection.
+- Second maker's inventory bound 0: values and quotes equal `monopoly` to
+  1e-11, adversary included.
+- `monopoly` at tick 0 against the Cartea-Jaimungal-Penalva matrix exponential
+  (omega = exp(M tau) omega_T, h = log(omega)/k): within 2e-3 at dt 1e-4,
+  with the optimal depths checked positive so the closed form applies.
+- Symmetry V2(q1, q2) = V1(q2, q1) to 1e-12 with split ties; priority orders
+  the values; cartel joint value >= Nash at every state and >= monopoly, and
+  one-tick shifts of the cartel quotes lower it; evaluate reproduces solve to
+  1e-12; 20,000 simulated sessions match both values within 4 se.
+- The example's Monte Carlo agrees with every exact value in the sweep within
+  2 se (20,000 sessions each).
+
+Results (A 140, k 1.5, phi 0.5, T 1, values per maker at q = (0, 0)):
+
+- Tick 0.02: Nash 8.88, cartel/2 32.93, monopoly 64.79. The two makers keep
+  27% of what a cartel would. Touch 0.14 against the cartel's 1.38.
+- Tick 1: Nash 29.67 against cartel/2 30.74. Rents survive the large tick.
+- Strict time priority at tick 1: first 58.53, second 1.05. At tick 0.02:
+  14.25 and 1.30.
+- Raising phi from 0.1 to 2 raises the Nash value at tick 0.05 from 9.1 to
+  12.1 while the cartel's falls: inventory aversion softens the price war.
+- Drift adversary (beta 5): monopoly loses 10%, cartel 11%, Nash makers
+  between -8% and +5% for ticks up to 0.2 and -13% at tick 1. The drift against the
+  aggregate pays the maker on the other side of it, so it shifts value between
+  the makers more than it removes it.
+- phi = 0 is degenerate: the makers drift to opposite inventory bounds (mean
+  |q1| 19.2 at tick 0.05) where each quotes only one side.
+
+Next: learning in this game. Two PPO makers (or Q-learners as in Cont and
+Xiong) trained against each other, and whether they find the Nash spreads or
+something wider; then the same with queue position as state.
