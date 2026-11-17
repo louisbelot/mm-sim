@@ -3761,6 +3761,120 @@ Bayes, and Monte Carlo means of the Bayes and informed quoters agree with their
 exact values within 4 se. In simulation E[1{s_n = 1} - pi_n] and
 E[(1{s_n = 1} - pi_n) pi_n] are zero within 4 se and E[pi_n] follows the prior.
 
+## Two market makers and a tick
+
+Every quoter so far had the order flow to itself. `duopoly.py` puts two of
+them on the same book, each with its own inventory, and solves the dynamic
+game between them exactly on the joint state (n, q1, q2). This is the
+oligopoly Spooner and Savani (2020) leave for future work, and the competitive
+benchmark of Cont and Xiong (2024), who compare Nash equilibrium spreads with
+the Pareto (collusive) ones.
+
+The flow is the usual one, split so the makers can compete for it. In each
+step of length dt a sell market order arrives with probability A dt and a buy
+order with the same probability, never both (so 2 A dt has to stay below 1).
+The order reaches a depth D drawn from Exp(k), so a quote at depth delta is
+reached with probability exp(-k delta), and the order fills the best quote
+only. Quotes sit on a tick grid, (j + 1/2) tick from the mid, j = 0, 1, ...
+On equal quotes maker 1 gets the order with probability `share` (0.5 for a
+coin flip, 1 for strict time priority). Each maker pays phi q_i^2 dt and marks
+to market; an optional adversary sets the drift to -beta sign(q1 + q2), the
+worst case for the two makers' joint inventory.
+
+With at most one order per step the bid and the ask are separate games, and
+each is a two-player Bertrand game in which fills have externalities. For
+maker 1 on the bid, with g = V1(q1 + 1, q2) - V1(q1, q2) its own gain from
+buying and h = V1(q1, q2 + 1) - V1(q1, q2) its gain when the competitor buys,
+the stage payoff is p(d1)(d1 + g) when its quote is strictly better, p(d2) h
+when the competitor's is, and the share-weighted mix on a tie. h is not zero:
+the competitor's fill puts it in a different position for the rest of the
+session. `duopoly.stage` finds every pure equilibrium on the grid without
+looping over quote pairs. In an equilibrium either one maker wins at e and the
+other prefers to lose there, or both tie at e, or nobody trades. The winner's
+quote has to be a best response to something the loser could quote: one tick
+behind (which pins it at e if e is inside its monopoly depth) or nothing at
+all (which only works at its monopoly depth). Each condition is a vector over
+e, so the whole stage is a few array operations over (e, q1, q2). When several
+equilibria exist it takes the widest traded quote, then the larger joint
+payoff, which is the Bertrand selection where the winner prices at the rival's
+indifference point. Some stages have no pure equilibrium: a maker that would
+rather the competitor bought (h > g) but undercuts when the competitor quotes
+wide can make the best responses cycle. There the stage is played
+sequentially (strong Stackelberg), in the order that gives the larger joint
+payoff, and `Solution.hard` counts how often that happened.
+
+`duopoly.cartel` maximizes the joint value (who quotes, and where) and
+`duopoly.monopoly` solves one maker alone in the same flow.
+`examples/duopoly.py`, A = 140, k = 1.5, phi 0.5, T = 1, dt = 0.0025,
+inventories within +-20, values per maker at q = (0, 0):
+
+```
+no adversary
+ tick   Nash  Monte Carlo   first  second  cartel/2  monopoly  Nash spread  cartel spread
+ 0.02   8.88   8.91 +-0.03  14.25   1.30   32.93     64.79      0.14          1.38
+ 0.05  10.79  10.81 +-0.03  17.48   1.18   32.92     64.78      0.25          1.35
+ 0.10  14.10  14.12 +-0.03  21.57   1.32   32.90     64.73      0.30          1.30
+ 0.20  18.08  18.13 +-0.03  29.41   1.20   32.81     64.54      0.60          1.40
+ 0.50  24.38  24.42 +-0.03  45.92   1.54   32.21     63.29      0.50          1.50
+ 1.00  29.67  29.72 +-0.04  58.53   1.05   30.74     60.19      1.00          1.00
+
+adversary on q1 + q2, drift bound 5
+ 0.02   9.34   9.37 +-0.02  17.30   1.75   29.43     58.44      0.30          1.54
+ 0.05  10.62  10.66 +-0.02  18.90   1.11   29.43     58.43      0.35          1.55
+ 1.00  25.73  25.77 +-0.04  52.00   0.14   26.74     53.18      1.00          1.00
+```
+
+"first" and "second" are the two makers when maker 1 always wins ties.
+
+![Two market makers](docs/duopoly.png)
+
+- Competition takes most of the rent when the tick is small. At tick 0.02 the
+  two makers together keep 17.8 of the 65.9 a cartel would make, and the
+  touch is 0.14 wide against the cartel's 1.38. They trade 243 times a
+  session between them, at a tenth of the cartel's spread.
+- The tick gives the rent back. At tick 1 neither maker can undercut the
+  other, both sit half a tick out and split the flow, and the Nash value
+  (29.7) is within 4% of half the cartel's (30.7). This is the Yao and Ye
+  argument that a uniform tick creates rents for liquidity providers, in a
+  model small enough to solve exactly.
+- Time priority decides who gets those rents. With strict priority the first
+  maker keeps 58.5 at tick 1, almost the monopoly value, and the second gets
+  1.05. Even at tick 0.02 priority is worth 14.3 against 1.3. The second
+  maker trades only when the first is loaded with inventory.
+- The right panel shows who sets the best bid at t = 0, tick 0.05. The maker
+  that is shorter (or less long) wins the bid, so the two books share
+  inventory: whoever holds less risk takes the next fill. On the diagonal and
+  where both are short they tie.
+- The adversary is a cost to the group and a transfer inside it. It costs the
+  monopolist 6.4 (10%) and the cartel 11% of its value. Competing makers at
+  ticks up to 0.2 lose at most 8%, and at tick 0.02 gain (9.34 against 8.88);
+  at tick 1, where they hardly compete, they lose 13% like the cartel. A
+  drift against q1 + q2 pays whichever maker sits on the other side of the aggregate, so the
+  makers fight harder for the fills that bring the aggregate back to zero, and
+  part of what the adversary takes from one maker the other collects.
+- Without the adversary no stage needed the sequential fallback. With it, 4
+  of about 1.3 million stage games at tick 0.02 had no pure equilibrium.
+  Without an inventory penalty (phi = 0) they are more common, at large
+  opposite inventories, and the makers drift to opposite inventory bounds,
+  where each one can quote only one side and they stop competing.
+
+The checks: on 1,600 random stage games (random gains, random inventory
+bounds) every quote pair `stage` returns is a mutual best response against
+the whole grid, `stage` reports a missing pure equilibrium exactly when a
+brute-force search finds none, and its selection pays the same as a
+brute-force pick under the same rule. On a game with no pure equilibrium it
+returns the Stackelberg pair. With the second maker's inventory bound at 0 the
+first maker's values and quotes equal `monopoly` to 1e-11, adversary
+included. With a continuous quote (tick 0) `monopoly` matches the Cartea,
+Jaimungal and Penalva closed form (h = log(omega)/k, omega = exp(M (T - t))
+omega_T with M tridiagonal) to 2e-3 at dt = 1e-4. With split ties the
+solution is symmetric: V2(q1, q2) = V1(q2, q1) to 1e-12. The cartel's joint
+value is at least the Nash joint value at every state and at least the
+monopoly's, and random one-tick shifts of the cartel's quotes only lower it.
+Evaluating the equilibrium quotes reproduces the solved values to 1e-12, and
+20,000 simulated sessions match both makers' values within 4 se, with and
+without the adversary.
+
 ## Install
 
 ```
@@ -3951,7 +4065,8 @@ under a minute, and `inverse_rl.py` fits the penalties in about five.
 sweep in about a minute and a half; `regime_rl.py` trains six PPO agents in
 parallel in about eight minutes. `hidden_flow.py` solves the two
 hidden-liquidity worlds and the switching-rate sweep on six workers and
-simulates 100,000 paths per quoter in a few minutes.
+simulates 100,000 paths per quoter in a few minutes. `duopoly.py` solves 16
+games four ways each on six workers in about a minute and a half.
 
 ## Notes
 
