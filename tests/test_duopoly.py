@@ -166,6 +166,17 @@ def test_evaluate_reproduces_solve():
     np.testing.assert_allclose(V2, sol.V2, atol=1e-12)
 
 
+@pytest.mark.parametrize("beta", [0.0, 3.0])
+def test_monte_carlo_matches_values(beta):
+    game = du.Game(**{**SMALL.__dict__, "beta": beta, "tick": 0.2})
+    Q = game.Q[0]
+    sol = du.solve(game)
+    run = du.simulate(game, sol.quotes, paths=20_000, seed=4)
+    for r, V in ((run.reward1, sol.V1), (run.reward2, sol.V2)):
+        se = r.std() / np.sqrt(r.size)
+        assert abs(r.mean() - V[0, Q, Q]) < 4 * se
+
+
 def test_large_tick_protects_rent():
     Q = SMALL.Q[0]
     ratio = []

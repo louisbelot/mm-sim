@@ -303,3 +303,44 @@ def monopoly(game: Game) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 def evaluate(game: Game, quotes) -> tuple[np.ndarray, np.ndarray]:
     sol = backward(game, lambda n, V1, V2: tuple(x[n] for x in quotes))
     return sol.V1, sol.V2
+
+
+class Run(NamedTuple):
+    reward1: np.ndarray
+    reward2: np.ndarray
+    q1: np.ndarray
+    q2: np.ndarray
+    trades1: np.ndarray
+    trades2: np.ndarray
+
+
+def simulate(game: Game, quotes, paths: int = 10_000, seed: int = 0) -> Run:
+    rng = np.random.default_rng(seed)
+    Q1, Q2 = game.Q
+    a = game.A * game.dt
+    q1, q2 = np.zeros(paths, dtype=np.int64), np.zeros(paths, dtype=np.int64)
+    r1, r2 = np.zeros(paths), np.zeros(paths)
+    n1, n2 = np.zeros(paths, dtype=np.int64), np.zeros(paths, dtype=np.int64)
+    for n in range(game.N):
+        b1, a1, b2, a2 = (x[n, q1 + Q1, q2 + Q2] for x in quotes)
+        dz = game.drift(q1 + q2) * game.dt + game.sigma * np.sqrt(game.dt) * rng.standard_normal(
+            paths
+        )
+        r1 += q1 * dz - game.phi * q1**2 * game.dt
+        r2 += q2 * dz - game.phi * q2**2 * game.dt
+        u = rng.random(paths)
+        reach = rng.exponential(1 / game.k, paths)
+        first = rng.random(paths) < game.share
+        for hit, d1, d2, sign in ((u < a, b1, b2, 1), ((u >= a) & (u < 2 * a), a1, a2, -1)):
+            hit = hit & (reach >= np.minimum(d1, d2))
+            w1 = hit & ((d1 < d2) | ((d1 == d2) & first))
+            w2 = hit & ~w1
+            r1 += np.where(w1, d1, 0.0)
+            r2 += np.where(w2, d2, 0.0)
+            q1 += sign * w1
+            q2 += sign * w2
+            n1 += w1
+            n2 += w2
+    r1 -= game.eta * q1**2
+    r2 -= game.eta * q2**2
+    return Run(r1, r2, q1, q2, n1, n2)
