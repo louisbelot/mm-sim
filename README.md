@@ -51,7 +51,10 @@ measured and fed back into both models, and a hidden-Markov filter on the trade
 tape that lets a quoter find a working order and lean with it. Last of all, a
 flash-crash scenario puts a volume-paced seller, stop-loss orders and market
 makers with inventory limits in one book, and tests a price collar, LULD bands
-with trading pauses and a trip-and-halt rule against it.
+with trading pauses and a trip-and-halt rule against it. Two market makers
+can also share one book: their dynamic game is solved exactly, and two
+Q-learners trained against each other on it settle above the competitive
+spread when each learns only from the quotes it posted.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -3875,6 +3878,126 @@ Evaluating the equilibrium quotes reproduces the solved values to 1e-12, and
 20,000 simulated sessions match both makers' values within 4 se, with and
 without the adversary.
 
+## Two learners in the duopoly
+
+`learners.py` takes the same two-maker game and asks what happens when the
+makers learn their quotes instead of solving for them. Cont and Xiong (2024)
+found that market makers trained with multi-agent RL settle above the
+competitive spread without talking to each other. The economics literature
+on pricing algorithms (Calvano, Calzolari, Denicolo and Pastorello 2020;
+Asker, Fershtman and Pakes 2022) says how they learn matters as much as what
+they are: a Q-learner that only updates the action it played behaves
+differently from one that also computes what the other actions would have
+paid.
+
+The game is the stationary, discounted version of the duopoly: no terminal
+time, a per-step discount gamma = 0.99 (dt = 0.0025, so the horizon is about
+100 steps or 70 orders), inventories within +-5, tick 0.1, quotes up to 1.5
+from the mid. Each learner is a tabular Q-learner whose state is its own
+inventory and whose action is a (bid, ask) pair on the tick grid, 256 actions
+at tick 0.1. Tables start at the payoff against a rival quoting uniformly at
+random (Calvano's initialization), exploration is epsilon-greedy with epsilon
+= exp(-5e-6 t), the learning rate is 0.1. The asynchronous learner updates the
+pair it quoted. The synchronous learner sees the order (side and depth
+reached) and the rival's quotes, so it can compute the target for every pair
+it could have quoted and updates the whole row: `learners.backup` is that
+target, and its expectation over orders is the Bellman operator (checked to
+4 se on 400,000 draws).
+
+Three benchmarks, all on the joint state (q1, q2):
+
+- Nash. A stationary Markov equilibrium in pure quotes, found by continuation
+  in the discount factor: solve the myopic stage game, raise gamma in 20
+  steps, and at each one run policy iteration where a state keeps its quotes
+  if they are still a stage equilibrium given the exact values of the current
+  profile. A fixed point of that is an equilibrium by the one-shot deviation
+  principle, and the tests check it against an exact best response. Pure
+  stationary equilibria do not always exist (the stage games are Bertrand
+  games with externalities, and some states cycle), and there can be several.
+  Where the continuation loses the equilibrium, `markov` runs 1,500 steps of
+  backward induction, polishes the last 20 iterates, and returns the one with
+  the smallest one-shot gain together with its exploitability (the most
+  either maker gains by best-responding), reported as eps below.
+- Cartel. Value iteration on the joint problem.
+- Exploitability of what was learned. `respond` computes a maker's exact best
+  response to the rival's learned quotes (seeing both inventories), and the
+  exploit column is how much more it would earn than the learned quotes do.
+
+`examples/learners.py`, A = 140, k = 1.5, phi = 0.5, 16 runs of 1,000,000
+steps per row, values per maker at q = (0, 0), gain = (learned - Nash) /
+(cartel - Nash) as in Calvano et al.:
+
+```
+ tick share update    nash  cartel        learned         gain   half  nash  cart exploit
+ 0.10  0.50  async   3.286   8.270   5.485 +-0.501  0.44 +-0.10  0.241  0.15  0.65   8.325  (nash eps 0.0000)
+ 0.10  0.50   sync   3.286   8.270   3.958 +-0.704  0.13 +-0.14  0.156  0.15  0.65   3.957  (nash eps 0.0000)
+ 0.10  1.00  async   2.933   8.270   6.028 +-0.577  0.58 +-0.11  0.266  0.05  0.65  10.092  (nash eps 0.0421)
+ 0.10  1.00   sync   2.933   8.270   4.487 +-0.779  0.29 +-0.15  0.156  0.05  0.65   6.438  (nash eps 0.0421)
+ 0.20  0.50  async   4.573   8.246   4.631 +-0.508  0.02 +-0.14  0.156  0.30  0.70   4.557  (nash eps 0.0072)
+ 0.20  0.50   sync   4.573   8.246   4.722 +-0.746  0.04 +-0.20  0.219  0.30  0.70   3.002  (nash eps 0.0072)
+ 0.20  1.00  async   3.874   8.246   4.704 +-0.511  0.19 +-0.12  0.181  0.10  0.70   4.929  (nash eps 0.2886)
+ 0.20  1.00   sync   3.874   8.246   4.669 +-0.676  0.18 +-0.15  0.194  0.10  0.70   4.240  (nash eps 0.2886)
+ 0.40  0.50  async   5.479   8.162   5.026 +-0.289 -0.17 +-0.11  0.200  0.20  0.60   2.970  (nash eps 0.0000)
+ 0.40  0.50   sync   5.479   8.162   5.388 +-0.381 -0.03 +-0.14  0.225  0.20  0.60   1.552  (nash eps 0.0000)
+ 0.40  1.00  async   5.224   8.162   5.206 +-0.366 -0.01 +-0.12  0.200  0.20  0.60   4.102  (nash eps 0.0932)
+ 0.40  1.00   sync   5.224   8.162   5.749 +-0.430  0.18 +-0.15  0.237  0.20  0.60   3.425  (nash eps 0.0932)
+```
+
+"half" is the inside half-spread of the greedy quotes at q = (0, 0); share 1
+is strict time priority for maker 1. The +- columns are the spread across the
+16 runs.
+
+![Two learners](docs/learners.png)
+
+The left panel averages the inside half-spread over every step of training,
+so over all the inventories the makers pass through, which is why it sits
+above the q = 0 numbers in the table.
+
+- At tick 0.1 the asynchronous learners keep 44% of the gap between Nash and
+  the cartel, and every one of the 16 runs ends above Nash.
+  Their inside half-spread is 0.24 against the Nash 0.15. The synchronous
+  learners keep 13%, and their spread at q = 0 lands on the Nash one. This is
+  the Asker-Fershtman-Pakes result in a market-making game: the learner that
+  only hears about the quote it posted stops trying the undercut once
+  exploration fades, because its estimate of the undercut is stale and low.
+  The synchronous learner hears about the undercut on every order.
+- It is not collusion in the game-theory sense. A learner's state is its own
+  inventory, so it cannot see, remember or punish an undercut, and the
+  learned quotes are far from an equilibrium: a best responder against the
+  asynchronous learner earns 8.3 more than the learner does, 2.5 times the
+  Nash value. The wide spreads survive because neither learner finds out.
+  Calvano et al. needed memory of the rival's price for their collusion to be
+  self-enforcing; here there is no memory and no enforcement, only stale
+  estimates.
+- The tick changes the picture. At 0.2 the learners end at Nash on average,
+  at 0.4 the asynchronous ones end below it (-0.17). With a large tick the
+  Nash equilibrium already keeps two-thirds of the cartel's value (5.48 of
+  8.16) and the learning noise costs more than the coordination gains.
+- Time priority moves the rent towards the second maker. At tick 0.1 the
+  Nash second maker gets 0.67 against the first's 5.20; the learned second
+  maker gets 5.10 (asynchronous) or 3.65 (synchronous). Learners do not
+  fully exploit priority, because the first maker would have to learn to
+  sit exactly on the second's quote.
+- The synchronous curve in the left panel is still falling at 1M steps, and
+  the learning rate is constant, so its Q-values carry noise of the order of
+  sqrt(alpha) times the target's spread. The 3.96 exploit for synchronous
+  learners at tick 0.1 is probably mostly that noise: a lone synchronous
+  learner with alpha 0.01 gets within 10% of the exact best response in 20,000
+  steps (tested), while with alpha 0.02 two of four runs ended 13% and 14%
+  short.
+
+The checks: `value` (exact policy evaluation by a linear solve) agrees with
+1,000 steps of value iteration to 1e-10 for random quote profiles. The Nash
+quotes are a best response for both makers against an independent value
+iteration over every quote to 1e-8, symmetric with split ties, and pass the
+one-shot deviation test; shifting one quote a tick creates a profitable
+deviation that both the stage test and `respond` find. With the second
+maker's inventory bound at 0 the equilibrium equals the cartel (one maker is
+a monopolist). The cartel's joint value beats Nash and random profiles at
+every state. The fallback's eps equals the exact exploitability and stays
+under 5% of the value. A lone learner (the rival can never trade) gets within
+10% (synchronous) or 15% (asynchronous) of the exact optimum.
+
 ## Install
 
 ```
@@ -4067,6 +4190,8 @@ parallel in about eight minutes. `hidden_flow.py` solves the two
 hidden-liquidity worlds and the switching-rate sweep on six workers and
 simulates 100,000 paths per quoter in a few minutes. `duopoly.py` solves 16
 games four ways each on six workers in about a minute and a half.
+`learners.py` trains 192 pairs of learners on twelve workers in about five
+minutes.
 
 ## Notes
 
