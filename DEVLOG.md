@@ -2524,3 +2524,76 @@ Results (A 140, k 1.5, phi 0.5, T 1, values per maker at q = (0, 0)):
 Next: learning in this game. Two PPO makers (or Q-learners as in Cont and
 Xiong) trained against each other, and whether they find the Nash spreads or
 something wider; then the same with queue position as state.
+
+## 2026-11-18: two Q-learners in the duopoly
+
+Built `learners.py`: the duopoly as a stationary discounted game (exact
+policy evaluation, stationary Nash, cartel, exact best response), and two
+tabular Q-learners trained against each other on the same flow, with
+asynchronous or synchronous updates. `examples/learners.py` trains 16 pairs
+for 1M steps at three ticks, with and without time priority, and draws
+`docs/learners.png`. `duopoly.py` lost two closures: the stage equilibrium
+and the cartel's joint step are now `equilibrium` and `joint`, shared by the
+finite-horizon and the stationary solvers.
+
+Design notes:
+
+- `value` evaluates a stationary quote profile exactly. `advance` is linear
+  in V, so applying it to unit vectors builds the transition matrix and one
+  linear solve gives V. Faster and more accurate than iterating at gamma 0.99.
+- Plain value iteration on the stage equilibrium does not converge in the
+  stationary game: the quotes chatter at a few states (28 of 484 quote entries
+  at tick 0.1) with no period under 60, and the value moves by 0.5%. That is
+  the finite-horizon solver run for long, so the finite game has no limit
+  policy there.
+- Policy iteration (evaluate exactly, recompute the stage equilibrium) found
+  an exact equilibrium after three rounds once, then left it: the stage
+  selection picks a different equilibrium of the same stage. Fix: a state
+  keeps its quotes while they are still a stage equilibrium, so equilibria
+  are absorbing. That still cycled (period 3, 4 states) on a small game.
+  Continuation in gamma (myopic game first, 20 steps up to 0.99) fixed the
+  small game and tick 0.1, and found a different equilibrium (1.0998 against
+  1.1017 with 5 steps), so equilibria are not unique.
+- At tick 0.2, tick 0.4 with priority, and tick 0.1 with priority the
+  continuation loses the equilibrium and polishing 50 backward-induction
+  iterates finds none either. A mixed equilibrium exists (Fink 1964) but would
+  make the quotes random. `markov` instead returns the iterate with the
+  smallest one-shot gain and its exact exploitability. eps is 0.007 to 0.29
+  against values of 3 to 10.
+- One-shot deviation: given the exact V of a profile, no state-side has a
+  profitable one-step deviation iff the profile is an equilibrium of the
+  discounted game. `deviation` computes that gain for both makers on both
+  sides with one `side` call over all quotes, so the certificate is cheap;
+  the tests check it against `respond`, a full value iteration over the
+  best-responder's quotes.
+- The learners see only their own inventory, so the learned profile is
+  (b(q1), a(q1), b(q2), a(q2)) and evaluates exactly on the joint grid.
+- `backup` is one function for both update rules: the async learner calls it
+  with its posted quotes, the sync learner with every (bid, ask) pair against
+  the realized order and the rival's posted quotes. Its mean over orders is
+  the Bellman operator; that test is exact up to Monte Carlo error and needs
+  no training.
+- A 12-process sweep first took an hour with almost nothing done: 12 workers
+  each ran multithreaded OpenBLAS for the small linear solves. The example now
+  sets OPENBLAS_NUM_THREADS=1 before the pool spawns and the sweep takes 5
+  minutes (async 127 us a step for 16 runs, sync 220 us).
+
+Results (A 140, k 1.5, phi 0.5, gamma 0.99, Q 5, values per maker at q = 0):
+
+- Tick 0.1, coin-flip ties: Nash 3.29, cartel 8.27. Asynchronous learners
+  5.49 (gain 0.44 +- 0.10, all 16 runs above Nash), synchronous 3.96 (0.13 +-
+  0.14). Inside half-spread 0.24 and 0.16 against Nash 0.15 and cartel 0.65.
+- The learned quotes are not equilibria: best response to the async learner
+  earns 8.3 more, to the sync learner 4.0 more.
+- Tick 0.2: both end at Nash on average (0.02, 0.04). Tick 0.4: async below
+  Nash (-0.17), sync -0.03, where Nash already holds 5.48 of 8.16.
+- Strict priority, tick 0.1: Nash first/second 5.20/0.67, learned async
+  6.96/5.10, sync 5.33/3.65.
+- Lone learner (rival never trades), gamma 0.9, 20k steps: sync with alpha
+  0.01 reaches 93 to 98% of the exact optimum, async with 0.05 reaches 90 to
+  93%, sync with 0.02 86 to 96%.
+
+Next: give the learners memory (the rival's last inside quote relative to
+their own, three states per side) so punishment becomes possible, and check
+for Calvano's impulse responses after a forced undercut; then a decaying
+learning rate so the synchronous runs converge instead of hovering.
