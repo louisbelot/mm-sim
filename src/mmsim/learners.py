@@ -163,3 +163,129 @@ def respond(game: Game, gamma: float, quotes, who: int = 1, tol: float = 1e-11, 
         raise RuntimeError(f"no fixed point in {cap} iterations")
     bid, ask = d[ub.argmax(axis=0), 0, 0], d[ua.argmax(axis=0), 0, 0]
     return (W, bid, ask) if who == 1 else (W.T, bid.T, ask.T)
+
+
+def prior(game: Game, gamma: float, share: float) -> np.ndarray:
+    d = levels(game)
+    j = np.arange(d.size)
+    odds = ((j[:, None] < j[None, :]) + share * (j[:, None] == j[None, :])).mean(axis=1)
+    r = game.A * game.dt * np.exp(-game.k * d) * d * odds
+    return (r[:, None] + r[None, :]).ravel() / (1 - gamma)
+
+
+def wins(d, rival, mine) -> np.ndarray:
+    return np.isfinite(d) & ((d < rival) | ((d == rival) & mine))
+
+
+def backup(bid, ask, rival_bid, rival_ask, buy, sell, r, mine, stay, up, down, cost, gamma):
+    hit_b = buy & (r >= bid) & wins(bid, rival_bid, mine)
+    hit_a = sell & (r >= ask) & wins(ask, rival_ask, mine)
+    return (
+        np.where(hit_b, bid + gamma * up, np.where(hit_a, ask + gamma * down, gamma * stay)) - cost
+    )
+
+
+class Learned(NamedTuple):
+    table1: np.ndarray
+    table2: np.ndarray
+    half: np.ndarray
+    reward1: np.ndarray
+    reward2: np.ndarray
+
+
+def train(
+    game: Game,
+    gamma: float = 0.99,
+    steps: int = 1_000_000,
+    runs: int = 16,
+    alpha: float = 0.1,
+    decay: float = 5e-6,
+    sync: bool = False,
+    window: int = 10_000,
+    seed: int = 0,
+) -> Learned:
+    rng = np.random.default_rng(seed)
+    Q = np.array(game.Q)[:, None]
+    d = levels(game)
+    M = d.size
+    idx = np.arange(runs)
+    tables = [
+        np.broadcast_to(prior(game, gamma, s), (runs, 2 * n + 1, M * M)).copy()
+        for s, n in zip((game.share, 1 - game.share), game.Q, strict=True)
+    ]
+    q = np.zeros((2, runs), dtype=np.int64)
+    a = game.A * game.dt
+    pen = game.phi * game.dt
+    windows = steps // window
+    half = np.zeros((windows, runs))
+    rewards = np.zeros((2, windows, runs))
+    grid_b = np.broadcast_to(d[:, None], (M, M)).ravel()
+    grid_a = np.broadcast_to(d[None, :], (M, M)).ravel()
+
+    for w in range(windows):
+        u, coin = rng.random((2, window, runs))
+        explore = rng.random((window, 2, runs))
+        reach = rng.exponential(1 / game.k, (window, runs))
+        picks = rng.integers(M * M, size=(window, 2, runs))
+        seen = np.zeros(runs)
+        for t in range(window):
+            eps = np.exp(-decay * (w * window + t))
+            acts = np.where(
+                explore[t] < eps,
+                picks[t],
+                [tables[i][idx, q[i] + Q[i]].argmax(axis=1) for i in (0, 1)],
+            )
+            bids = np.where(q < Q, d[acts // M], np.inf)
+            asks = np.where(q > -Q, d[acts % M], np.inf)
+            buy = u[t] < a
+            sell = (u[t] >= a) & (u[t] < 2 * a)
+            r = reach[t]
+            first = coin[t] < game.share
+            inside_b, inside_a = bids.min(axis=0), asks.min(axis=0)
+            both = np.isfinite(inside_b) & np.isfinite(inside_a)
+            half[w] += np.where(both, (inside_b + inside_a) / 2, 0.0)
+            seen += both
+            for i in (0, 1):
+                j = 1 - i
+                n = game.Q[i]
+                s = q[i] + n
+                table = tables[i]
+                mine = first if i == 0 else ~first
+                best = table.max(axis=2)
+                nxt = [best[idx, x] for x in (s, np.minimum(s + 1, 2 * n), np.maximum(s - 1, 0))]
+                cost = pen * q[i] ** 2
+                if sync:
+                    db = np.where((q[i] < n)[:, None], grid_b, np.inf)
+                    da = np.where((q[i] > -n)[:, None], grid_a, np.inf)
+                    col = (bids[j], asks[j], buy, sell, r, mine, *nxt, cost)
+                    target = backup(db, da, *(x[:, None] for x in col), gamma)
+                    table[idx, s] += alpha * (target - table[idx, s])
+                else:
+                    target = backup(
+                        bids[i], asks[i], bids[j], asks[j], buy, sell, r, mine, *nxt, cost, gamma
+                    )
+                    table[idx, s, acts[i]] += alpha * (target - table[idx, s, acts[i]])
+                fb = buy & (r >= bids[i]) & wins(bids[i], bids[j], mine)
+                fa = sell & (r >= asks[i]) & wins(asks[i], asks[j], mine)
+                rewards[i, w] += np.where(fb, bids[i], 0.0) + np.where(fa, asks[i], 0.0) - cost
+                q[i] += fb.astype(np.int64) - fa
+        half[w] /= np.maximum(seen, 1)
+    rewards /= window
+    return Learned(tables[0], tables[1], half, rewards[0], rewards[1])
+
+
+def greedy(game: Game, table: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    d = levels(game)
+    Q = (table.shape[-2] - 1) // 2
+    q = np.arange(-Q, Q + 1)
+    jb, ja = np.divmod(table.argmax(axis=-1), d.size)
+    return np.where(q < Q, d[jb], np.inf), np.where(q > -Q, d[ja], np.inf)
+
+
+def quotes(game: Game, table1: np.ndarray, table2: np.ndarray) -> tuple[np.ndarray, ...]:
+    b1, a1 = greedy(game, table1)
+    b2, a2 = greedy(game, table2)
+    m = (b1.size, b2.size)
+    return tuple(
+        np.broadcast_to(x, m) for x in (b1[:, None], a1[:, None], b2[None, :], a2[None, :])
+    )
