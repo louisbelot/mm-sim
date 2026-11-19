@@ -289,3 +289,22 @@ def quotes(game: Game, table1: np.ndarray, table2: np.ndarray) -> tuple[np.ndarr
     return tuple(
         np.broadcast_to(x, m) for x in (b1[:, None], a1[:, None], b2[None, :], a2[None, :])
     )
+
+
+class Score(NamedTuple):
+    V1: np.ndarray
+    V2: np.ndarray
+    gap1: np.ndarray
+    gap2: np.ndarray
+
+
+def score(game: Game, gamma: float, learned: Learned) -> Score:
+    Q1, Q2 = game.Q
+    rows = []
+    for t1, t2 in zip(learned.table1, learned.table2, strict=True):
+        qs = quotes(game, t1, t2)
+        V1, V2 = value(game, gamma, qs)
+        B1 = respond(game, gamma, qs, 1)[0]
+        B2 = respond(game, gamma, qs, 2)[0]
+        rows.append((V1[Q1, Q2], V2[Q1, Q2], B1[Q1, Q2] - V1[Q1, Q2], B2[Q1, Q2] - V2[Q1, Q2]))
+    return Score(*np.array(rows).T)

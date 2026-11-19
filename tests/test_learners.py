@@ -141,3 +141,13 @@ def test_train_is_seeded():
     assert np.array_equal(a.table1, b.table1) and np.array_equal(a.half, b.half)
     assert a.half.shape == (4, 2) and a.reward1.shape == (4, 2)
     assert a.table1.shape == (2, 7, le.levels(SMALL).size ** 2)
+
+
+def test_score_matches_value():
+    learned = le.train(SMALL, GAMMA, 4000, runs=2, sync=True, decay=1e-3, window=2000)
+    s = le.score(SMALL, GAMMA, learned)
+    assert np.all(s.gap1 >= -1e-8) and np.all(s.gap2 >= -1e-8)
+    for i in range(2):
+        qs = le.quotes(SMALL, learned.table1[i], learned.table2[i])
+        V1, _ = le.value(SMALL, GAMMA, qs)
+        assert s.V1[i] == pytest.approx(V1[3, 3])
