@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import NamedTuple
 
 import numpy as np
 
@@ -133,3 +134,89 @@ def profile(game: Game, table1: np.ndarray, table2: np.ndarray) -> tuple[np.ndar
     one = (np.broadcast_to(x.T[:, :, None], m) for x in (B1, A1))
     two = (np.broadcast_to(x.T[::-1][:, None, :], m) for x in (B2, A2))
     return (*one, *two)
+
+
+def reach(P: np.ndarray, start: np.ndarray, doublings: int = 12) -> np.ndarray:
+    S, A = np.eye(P.shape[0]), P
+    for _ in range(doublings):
+        S = S @ (np.eye(P.shape[0]) + A) / 2
+        A = A @ A
+    x = start
+    for _ in range(3):
+        x = x @ S
+    return x
+
+
+def undercut(game: Game, quotes) -> tuple[np.ndarray, ...]:
+    b1, a1, b2, a2 = np.broadcast_arrays(*quotes)
+    q1, _ = game.grid()
+    Q1 = game.Q[0]
+
+    def under(own, rival, can):
+        j = np.round(np.where(np.isfinite(rival), rival, 0.0) / game.tick - 0.5).astype(np.int64)
+        return np.where(np.isfinite(rival) & can, depth(game, np.maximum(j - 1, 0)), own)
+
+    return under(b1, b2, q1 < Q1), under(a1, a2, q1 > -Q1), b2, a2
+
+
+class Impulse(NamedTuple):
+    bid1: np.ndarray
+    ask1: np.ndarray
+    bid2: np.ndarray
+    ask2: np.ndarray
+    reward1: np.ndarray
+    reward2: np.ndarray
+    gain: float
+
+
+def impulse(game: Game, gamma: float, quotes, pi: np.ndarray, steps: int = 40) -> Impulse:
+    quotes = tuple(np.broadcast_arrays(*quotes))
+    forced = undercut(game, quotes)
+    P, r1, r2 = chain(game, quotes, code(*quotes))
+    D, s1, s2 = chain(game, forced, code(*forced))
+    V1 = np.linalg.solve(np.eye(P.shape[0]) - gamma * P, r1)
+    x = pi.ravel()
+    gain = float(x @ (s1 + gamma * D @ V1) - x @ V1)
+    mean = np.zeros((6, steps + 2))
+    for t in range(steps + 2):
+        qs, u1, u2, M = (forced, s1, s2, D) if t == 1 else (quotes, r1, r2, P)
+        for i, d in enumerate(qs):
+            d = d.ravel()
+            ok = np.isfinite(d)
+            mean[i, t] = x[ok] @ d[ok] / x[ok].sum()
+        mean[4, t], mean[5, t] = x @ u1, x @ u2
+        x = x @ M
+    return Impulse(*mean, gain)
+
+
+class Assessment(NamedTuple):
+    v1: float
+    v2: float
+    gap1: float
+    gap2: float
+    half: float
+    shock: Impulse
+
+
+def assess(game: Game, gamma: float, quotes, steps: int = 40) -> Assessment:
+    quotes = tuple(np.broadcast_arrays(*quotes))
+    b1, a1, b2, a2 = quotes
+    Q1, Q2 = game.Q
+    V1, V2 = evaluate(game, gamma, quotes, code(*quotes))
+    P, _, _ = chain(game, quotes, code(*quotes))
+    start = np.zeros(P.shape[0])
+    start[np.ravel_multi_index((4, Q1, Q2), b1.shape)] = 1
+    pi = reach(P, start).reshape(b1.shape)
+    w = pi[:, Q1, Q2] / pi[:, Q1, Q2].sum()
+    B1 = respond(game, gamma, quotes, 1)
+    B2 = respond(game, gamma, quotes, 2)
+    inside = (np.minimum(b1, b2) + np.minimum(a1, a2)) / 2
+    ok = np.isfinite(inside)
+    return Assessment(
+        float(w @ V1[:, Q1, Q2]),
+        float(w @ V2[:, Q1, Q2]),
+        float(w @ (B1 - V1)[:, Q1, Q2]),
+        float(w @ (B2 - V2)[:, Q1, Q2]),
+        float((pi * np.where(ok, inside, 0.0)).sum() / pi[ok].sum()),
+        impulse(game, gamma, quotes, pi, steps),
+    )

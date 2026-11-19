@@ -104,6 +104,48 @@ def test_reply_beats_memory_profile():
         assert g.max() > 0 and (B - V).max() >= g.max() - 1e-9
 
 
+def test_reach_is_stationary():
+    nash = le.markov(SMALL, GAMMA)
+    qs = spread(nash.quotes)
+    P, _, _ = mem.chain(SMALL, qs, mem.code(*qs))
+    start = np.zeros(P.shape[0])
+    start[np.ravel_multi_index((4, 3, 3), qs[0].shape)] = 1
+    pi = mem.reach(P, start)
+    assert pi.sum() == pytest.approx(1) and np.abs(pi @ P - pi).max() < 1e-9
+
+
+def test_undercut_is_one_tick():
+    nash = le.markov(SMALL, GAMMA)
+    b1, a1, b2, a2 = mem.undercut(SMALL, spread(nash.quotes))
+    q1, _ = SMALL.grid()
+    ok = np.isfinite(b2) & (q1 < SMALL.Q[0]) & (b2 > SMALL.tick)
+    assert np.allclose(b1[ok], b2[ok] - SMALL.tick)
+    assert np.all(mem.digit(b2, b1)[ok] == 2)
+    edge = np.isfinite(b2) & (q1 < SMALL.Q[0]) & (b2 < SMALL.tick)
+    assert np.all(mem.digit(b2, b1)[edge] == 1)
+
+
+def test_undercutting_nash_does_not_pay():
+    nash = le.markov(SMALL, GAMMA)
+    qs = spread(nash.quotes)
+    P, _, _ = mem.chain(SMALL, qs, mem.code(*qs))
+    start = np.zeros(P.shape[0])
+    start[np.ravel_multi_index((4, 3, 3), qs[0].shape)] = 1
+    imp = mem.impulse(SMALL, GAMMA, qs, mem.reach(P, start), steps=200)
+    assert imp.gain < 0
+    assert imp.bid1[1] < imp.bid1[0] and imp.ask1[1] < imp.ask1[0]
+    assert imp.reward1[-1] == pytest.approx(imp.reward1[0], rel=1e-3)
+    assert imp.bid2[-1] == pytest.approx(imp.bid2[0], rel=1e-3)
+
+
+def test_assess_nash():
+    nash = le.markov(SMALL, GAMMA)
+    out = mem.assess(SMALL, GAMMA, spread(nash.quotes), steps=5)
+    assert out.v1 == pytest.approx(nash.V1[3, 3]) and out.v2 == pytest.approx(nash.V2[3, 3])
+    assert abs(out.gap1) < 1e-8 and abs(out.gap2) < 1e-8
+    assert out.shock.gain < 0 and out.shock.bid1.size == 7
+
+
 def test_memory_learner_tables():
     a = le.train(SMALL, GAMMA, 2000, runs=2, window=500, seed=3, memory=True, sync=True, tau=100)
     b = le.train(SMALL, GAMMA, 2000, runs=2, window=500, seed=3, memory=True, sync=True, tau=100)
