@@ -84,3 +84,14 @@ def test_widen_moves_by_ticks(nash):
     assert np.allclose(w[ok] - b[ok], 2 * SMALL.tick)
     assert np.array_equal(np.isinf(w), np.isinf(b))
     assert w.max(initial=0, where=np.isfinite(w)) <= du.depth(SMALL, SMALL.J) + 1e-12
+
+
+def test_shared_cartel_splits_evenly(cartel):
+    qs = tr.shared(SMALL, cartel.quotes)
+    V1, V2 = le.value(SMALL, GAMMA, qs)
+    assert np.abs(V1 - V2.T).max() < 1e-10
+    assert np.all(np.isinf(qs[0][-1])) and np.all(np.isinf(qs[3][:, 0]))
+    Q = SMALL.Q[0]
+    total = (cartel.V1 + cartel.V2)[Q, Q]
+    assert 0.8 * total < 2 * V1[Q, Q] <= total + 1e-10
+    assert abs(cartel.V1[Q, Q] - cartel.V2[Q, Q]) > abs(V1[Q, Q] - V2[Q, Q]) + 0.1

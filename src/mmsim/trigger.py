@@ -82,3 +82,16 @@ def widen(game: Game, quotes, m: int) -> tuple[np.ndarray, ...]:
         j = np.round(np.where(np.isfinite(x), x, 0.0) / game.tick - 0.5).astype(np.int64)
         out.append(np.where(np.isfinite(x), depth(game, np.minimum(j + m, game.J)), np.inf))
     return tuple(out)
+
+
+def shared(game: Game, quotes) -> tuple[np.ndarray, ...]:
+    q1, q2 = game.grid()
+    Q1, Q2 = game.Q
+    b1, a1, b2, a2 = np.broadcast_arrays(*quotes)
+    b, a = np.minimum(b1, b2), np.minimum(a1, a2)
+    return (
+        np.where(q1 < Q1, b, np.inf),
+        np.where(q1 > -Q1, a, np.inf),
+        np.where(q2 < Q2, b, np.inf),
+        np.where(q2 > -Q2, a, np.inf),
+    )
