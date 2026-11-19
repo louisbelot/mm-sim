@@ -231,51 +231,59 @@ def backward(game: Game, policy) -> Solution:
     return Solution(V1, V2, *quotes)
 
 
+def equilibrium(game: Game, V1, V2) -> tuple[tuple[np.ndarray, ...], int]:
+    q1, q2 = game.grid()
+    Q1, Q2 = game.Q
+    up1, up2, dn1, dn2 = gains(V1)
+    vp1, vp2, vd1, vd2 = gains(V2)
+    b1, b2, nb = stage(game, up1, up2, vp2, vp1, q1 < Q1, q2 < Q2)
+    a1, a2, na = stage(game, dn1, dn2, vd2, vd1, q1 > -Q1, q2 > -Q2)
+    return tuple(depth(game, j) for j in (b1, a1, b2, a2)), nb + na
+
+
 def solve(game: Game) -> Solution:
     if game.tick <= 0:
         raise ValueError("competition needs a tick: Bertrand has no pure equilibrium on a line")
-    q1, q2 = game.grid()
-    Q1, Q2 = game.Q
-    can = {"bid": (q1 < Q1, q2 < Q2), "ask": (q1 > -Q1, q2 > -Q2)}
 
     def policy(n, V1, V2):
-        up1, up2, dn1, dn2 = gains(V1)
-        vp1, vp2, vd1, vd2 = gains(V2)
-        args = {"bid": (up1, up2, vp2, vp1), "ask": (dn1, dn2, vd2, vd1)}
         nonlocal hard
-        b1, b2, nb = stage(game, *args["bid"], *can["bid"])
-        a1, a2, na = stage(game, *args["ask"], *can["ask"])
-        hard += nb + na
-        return tuple(depth(game, j) for j in (b1, a1, b2, a2))
+        quotes, h = equilibrium(game, V1, V2)
+        hard += h
+        return quotes
 
     hard = 0
     return backward(game, policy)._replace(hard=hard)
 
 
-def cartel(game: Game) -> Solution:
+def pick(game: Game, G1, G2, can1, can2):
+    d1, d2 = best(game, G1), best(game, G2)
+    f1 = np.where(can1, edge(game, d1, G1), -np.inf)
+    f2 = np.where(can2, edge(game, d2, G2), -np.inf)
+    one = (f1 >= f2) & (f1 > 0)
+    two = ~one & (f2 > 0)
+    gain = np.maximum(0.0, np.maximum(f1, f2))
+    return np.where(one, d1, np.inf), np.where(two, d2, np.inf), gain
+
+
+def joint(game: Game, S) -> tuple[tuple[np.ndarray, ...], np.ndarray]:
     q1, q2 = game.grid()
     Q1, Q2 = game.Q
-    shape = (q1.size, q2.size)
-    S = np.broadcast_to(-game.eta * (q1**2 + q2**2), shape).astype(float)
     total = q1 + q2
+    up1, up2, dn1, dn2 = gains(S)
+    b1, b2, gb = pick(game, up1, up2, q1 < Q1, q2 < Q2)
+    a1, a2, ga = pick(game, dn1, dn2, q1 > -Q1, q2 > -Q2)
+    S = S + game.drift(total) * game.dt * total - game.phi * (q1**2 + q2**2) * game.dt + gb + ga
+    return (b1, a1, b2, a2), S
 
-    def pick(G1, G2, can1, can2):
-        d1, d2 = best(game, G1), best(game, G2)
-        f1 = np.where(can1, edge(game, d1, G1), -np.inf)
-        f2 = np.where(can2, edge(game, d2, G2), -np.inf)
-        one = (f1 >= f2) & (f1 > 0)
-        two = ~one & (f2 > 0)
-        gain = np.maximum(0.0, np.maximum(f1, f2))
-        return np.where(one, d1, np.inf), np.where(two, d2, np.inf), gain
+
+def cartel(game: Game) -> Solution:
+    q1, q2 = game.grid()
+    S = np.broadcast_to(-game.eta * (q1**2 + q2**2), (q1.size, q2.size)).astype(float)
 
     def policy(n, V1, V2):
         nonlocal S
-        up1, up2, dn1, dn2 = gains(S)
-        b1, b2, gb = pick(up1, up2, q1 < Q1, q2 < Q2)
-        a1, a2, ga = pick(dn1, dn2, q1 > -Q1, q2 > -Q2)
-        S = S + game.drift(total) * game.dt * total
-        S = S - game.phi * (q1**2 + q2**2) * game.dt + gb + ga
-        return b1, a1, b2, a2
+        quotes, S = joint(game, S)
+        return quotes
 
     return backward(game, policy)
 
