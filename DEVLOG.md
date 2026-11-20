@@ -2597,3 +2597,67 @@ Next: give the learners memory (the rival's last inside quote relative to
 their own, three states per side) so punishment becomes possible, and check
 for Calvano's impulse responses after a forced undercut; then a decaying
 learning rate so the synchronous runs converge instead of hovering.
+
+## 2026-11-19: learners with memory, and what collusion would need
+
+Built `memory.py` (the duopoly with each maker remembering where the rival's
+last bid and ask were relative to its own), `trigger.py` (exact
+subgame-perfection checks for trigger strategies), and `memory` and `tau`
+options on `learners.train`.
+
+Design notes:
+
+- Memory state: per side a digit 0/1/2 (rival inside, level, outside), so 9
+  states; maker 2's state is 8 - c. The joint state (c, q1, q2) has 1089
+  states at Q = 5. The memory moves deterministically with the quotes, the
+  inventory at random, so a profile is a Markov chain and `evaluate` is one
+  dense solve.
+- `improve`: for a fixed next memory the continuation is a fixed slice of V
+  and bid and ask separate again, so the best reply is a max over 9 classes
+  of (best bid in class + best ask in class). Checked against enumerating
+  all 81 pairs through `chain`. `best_reply` is policy iteration on it; a
+  state moves only on a strict improvement, so ties cannot cycle.
+- Maker 2 goes through `mirror`: swap the makers, transpose the inventory
+  axes, reverse the memory axis, flip the share.
+- `reach`: stationary distribution by Cesaro averaging with repeated
+  squaring (S_2N = S_N (I + P^N) / 2), applied three times to a start
+  vector. A plain power of P can oscillate when the memory cycles.
+- Trigger phases: on-path values are the collusive profile's stationary
+  value, punishment phases are L backward steps of `advance` from it. The
+  first version solved one dense system over all phases; at L = 200 that was
+  24,000 states and minutes per check, the recursion is milliseconds.
+- `cheat` excludes only the exact on-path pair: a deviation on either side
+  triggers the punishment, so the best deviation is max(best bid without
+  the on-path bid + best ask, best bid + best ask without the on-path ask).
+- First surprise: the cartel from `collusive` failed every trigger check,
+  even grim. Not a bug: `pick` gives ties to maker 1, so at q = 0 maker 1
+  earns 12.46 and maker 2 4.08, and maker 2 always wants out. `shared`
+  quotes the cartel's inside price for both makers; it keeps 92% of the
+  joint value and is enforceable.
+- Learner speed: `table.max` over the whole table every step would cost 4M
+  operations with memory. The row maxima are cached and refreshed only for
+  the row just written. Same numbers as before for memoryless runs (the old
+  tests pass unchanged).
+
+Results (A 140, k 1.5, phi 0.5, Q 5, gamma 0.99, per maker at q = 0):
+
+- Trigger, tick 0.1: no markup is an equilibrium with Nash punishments of
+  10 steps or fewer. 20 steps hold the shared cartel (gain 0.92) and 1 to 3
+  ticks over Nash, 50 hold up to 8 ticks. A permanent price war is not
+  credible (+0.10 for quoting wider inside it). Grim reversion holds the
+  shared cartel at gamma >= 0.7, fails at 0.5 (+0.040).
+- Tick 0.2: pure Markov Nash is only eps 0.0072; with that tolerance a
+  50-step punishment holds markups 1 to 3 (best 0.94).
+- Learners, 16 runs x 3M steps: async 0.37, async memory 0.54, sync 0.21,
+  sync memory 0.20, sync 1/n -0.09 (exploit 0.71), sync memory 1/n -0.14
+  (exploit 2.49, undercut pays in 3 of 16). Tick 0.2: async -0.25, async
+  memory +0.26.
+- Forced one-tick undercut: async memory rival tightens 0.51 ticks the next
+  step (memoryless +0.01) and returns within about ten steps, but the
+  undercut pays in all 16 runs. The learners punish, too briefly to deter.
+
+Next: learners whose punishment can last (a longer memory, e.g. the last
+two comparisons or a counter of steps since the last undercut) and a check
+of whether the learned profile with the 1/n rate is an approximate Markov
+equilibrium of the memory game; then deep RL makers on the continuous-depth
+game as in Cont and Xiong.
