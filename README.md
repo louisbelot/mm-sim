@@ -54,7 +54,9 @@ makers with inventory limits in one book, and tests a price collar, LULD bands
 with trading pauses and a trip-and-halt rule against it. Two market makers
 can also share one book: their dynamic game is solved exactly, and two
 Q-learners trained against each other on it settle above the competitive
-spread when each learns only from the quotes it posted.
+spread when each learns only from the quotes it posted, and further above it
+when they remember the rival's last quote; an exact check of trigger
+strategies shows how long a punishment that collusion would need.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
@@ -3998,6 +4000,183 @@ every state. The fallback's eps equals the exact exploitability and stays
 under 5% of the value. A lone learner (the rival can never trade) gets within
 10% (synchronous) or 15% (asynchronous) of the exact optimum.
 
+### Can collusion enforce itself?
+
+The memoryless learners above sit above Nash only because neither one finds
+out that undercutting pays. Calvano, Calzolari, Denicolo and Pastorello
+(2020) found something different in a pricing duopoly: Q-learners that see
+the rival's last price learn a reward-punishment scheme, punish an undercut
+for a few periods and then drift back to high prices. Before training
+learners with memory, `trigger.py` asks the exact question first: which
+collusive quote profiles are equilibria of the repeated duopoly once the
+makers can punish?
+
+A trigger strategy has phases. On path both makers quote a collusive
+profile; after any deviation both quote the Markov Nash profile for L steps
+(or forever, "grim") and then return. The phase is part of the state, so the
+values come from the cartel's stationary value and L backward steps of the
+stage operator (`trigger.values`; for L up to 3 it is checked against a
+direct linear solve on the phase chain). A profile is a subgame-perfect
+equilibrium iff no maker gains from a one-shot deviation in any phase and
+any inventory pair. `trigger.cheat` computes that gain: against the rival's
+prescribed quotes, best bid and ask with the post-deviation continuation,
+excluding the on-path pair. It matches a brute-force enumeration of all 81
+(bid, ask) pairs through the transition matrix to 1e-12.
+
+Three collusive profiles: the cartel as `collusive` solves it (it hands ties
+to maker 1, so maker 2 often sits out), a shared cartel where both quote the
+cartel's inside price and split the fills, and the Nash quotes widened by m
+ticks. `examples/trigger_strategies.py`, A = 140, k = 1.5, phi = 0.5, Q = 5,
+gamma 0.99:
+
+```
+phi 0.5, gamma 0.99, Q (5, 5); on path: Nash quotes widened by m ticks
+profit gain = (value - Nash) / (cartel - Nash) per maker at q = (0, 0)
+tick 0.1: nash 3.286, cartel 8.270
+  Markov Nash eps 0.0000 (the tolerance for every check)
+  gain by markup: 0:0.00 1:0.35 2:0.60 3:0.75 4:0.85 5:0.89 6:0.89 7:0.86 8:0.81 9:0.75 10:0.68 11:0.60 12:0.52 13:0.44 14:0.37 15:0.33
+  length    1: markups held   0-0 (best 0.00); deviation gain on path / in punishment: cartel +0.235 / +0.0846, shared cartel (0.92) +0.112 / +0.0475
+  length    2: markups held   0-0 (best 0.00); deviation gain on path / in punishment: cartel +0.269 / +0.1225, shared cartel (0.92) +0.106 / +0.0457
+  length    3: markups held   0-0 (best 0.00); deviation gain on path / in punishment: cartel +0.304 / +0.1715, shared cartel (0.92) +0.096 / +0.0369
+  length    5: markups held   0-0 (best 0.00); deviation gain on path / in punishment: cartel +0.396 / +0.2597, shared cartel (0.92) +0.075 / +0.0086
+  length   10: markups held   0-0 (best 0.00); deviation gain on path / in punishment: cartel +0.570 / +0.4242, shared cartel (0.92) -0.002 / +0.0033
+  length   20: markups held   0-3 (best 0.75); deviation gain on path / in punishment: cartel +0.762 / +0.6065, shared cartel (0.92) -0.227 / -0.0087
+  length   50: markups held   0-8 (best 0.89); deviation gain on path / in punishment: cartel +0.836 / +0.6731, shared cartel (0.92) -1.048 / -0.0190
+  length  100: markups held   0-9 (best 0.89); deviation gain on path / in punishment: cartel +0.639 / +0.4758, shared cartel (0.92) -1.996 / -0.0141
+  length grim: markups held  0-11 (best 0.89); deviation gain on path / in punishment: cartel +0.196 / +0.0000, shared cartel (0.92) -3.489 / +0.0000
+  shared cartel with a permanent war: on path -6.3908, in the war +0.1020
+tick 0.2: nash 4.573, cartel 8.246
+  Markov Nash eps 0.0072 (the tolerance for every check)
+  gain by markup: 0:0.00 1:0.70 2:0.94 3:0.93 4:0.78 5:0.55 6:0.31 7:0.15
+  length    1: markups held   0-0 (best 0.00); deviation gain on path / in punishment: cartel +0.242 / +0.0856, shared cartel (0.89) +0.129 / +0.0251
+  length    2: markups held   0-0 (best 0.00); deviation gain on path / in punishment: cartel +0.288 / +0.1284, shared cartel (0.89) +0.146 / +0.0262
+  length    3: markups held   0-0 (best 0.00); deviation gain on path / in punishment: cartel +0.330 / +0.1807, shared cartel (0.89) +0.162 / +0.0229
+  length    5: markups held   0-0 (best 0.00); deviation gain on path / in punishment: cartel +0.412 / +0.2783, shared cartel (0.89) +0.181 / +0.0289
+  length   10: markups held   0-0 (best 0.00); deviation gain on path / in punishment: cartel +0.615 / +0.4741, shared cartel (0.89) +0.171 / +0.0245
+  length   20: markups held   0-1 (best 0.70); deviation gain on path / in punishment: cartel +0.870 / +0.7209, shared cartel (0.89) +0.023 / -0.0177
+  length   50: markups held   0-3 (best 0.94); deviation gain on path / in punishment: cartel +1.104 / +0.9478, shared cartel (0.89) -0.588 / -0.0173
+  length  100: markups held   0-4 (best 0.94); deviation gain on path / in punishment: cartel +1.171 / +1.0134, shared cartel (0.89) -1.342 / -0.0094
+  length grim: markups held   0-5 (best 0.94); deviation gain on path / in punishment: cartel +1.246 / +0.0023, shared cartel (0.89) -2.500 / +0.0023
+  shared cartel with a permanent war: on path -5.0881, in the war +0.0920
+grim Nash reversion at tick 0.1 by discount factor (shared cartel, best markup):
+  gamma 0.50: shared cartel (1.00) on path +0.0403, in punishment -0.000329; best markup held 0.00 (nash eps 0.0000)
+  gamma 0.70: shared cartel (1.00) on path -0.0044, in punishment -0.000036; best markup held 0.87 (nash eps 0.0000)
+  gamma 0.80: shared cartel (1.00) on path -0.0461, in punishment +0.000000; best markup held 0.41 (nash eps 0.0000)
+  gamma 0.90: shared cartel (0.99) on path -0.1555, in punishment +0.000000; best markup held 0.85 (nash eps 0.0000)
+  gamma 0.95: shared cartel (0.98) on path -0.4238, in punishment +0.000000; best markup held 0.97 (nash eps 0.0000)
+```
+
+![Trigger strategies](docs/trigger_strategies.png)
+
+- Short punishments hold nothing. With L up to 10 steps of Nash quoting no
+  markup over Nash is an equilibrium at either tick. Undercutting the shared
+  cartel for one step still nets +0.11 after a one-step punishment: the
+  deviation takes a whole order at a wide price, while a step of punishment
+  costs about the per-step gap between collusive and Nash profit,
+  (8.27 - 3.29) x (1 - 0.99) = 0.05.
+- At tick 0.1 the shared cartel keeps 92% of the cartel's profit and holds
+  with a 20-step punishment. Widened Nash quotes need 20 steps for 1 to 3
+  ticks of markup and 50 for the best one (5 to 6 ticks, 89%).
+- The cartel as solved is never an equilibrium: maker 2's share is 4.08
+  against maker 1's 12.46 at q = 0, and maker 2 gains by undercutting under
+  every punishment. Splitting the rent is what makes it enforceable.
+- A price war (both at the half-tick depth forever) is the harshest
+  punishment, but it is not credible: inside the war each maker gains 0.10 by
+  quoting wider, so the threat fails the one-shot test in the punishment
+  phase.
+- Grim Nash reversion at tick 0.1 holds the shared cartel at gamma 0.7 and
+  above and fails at 0.5 (on-path gain +0.040), the folk theorem with a
+  threshold discount factor.
+- At tick 0.2 the stationary game has no exact pure Markov Nash (eps 0.0072),
+  so every check there uses eps as its tolerance. A 50-step punishment holds
+  1 to 3 ticks of markup, the best (2 ticks) at 94% of the cartel's profit.
+
+So with Nash punishments the makers need to remember a deviation for 20 to
+50 steps, about 14 to 35 orders. A learner that sees only the last step's
+comparison can still punish for longer, because its memory is
+self-perpetuating: if both undercut, the next state says so again.
+
+### Learners that remember the rival's last quote
+
+`le.train(..., memory=True)` adds Calvano's state to each learner: for the
+bid and the ask, was the rival's last quote inside, level with or outside
+mine. That is 9 memory states on top of the own inventory, and maker 2's
+memory is maker 1's mirrored (`memory.code`, 8 - c). The synchronous update
+needs the memory each counterfactual quote would have produced, which it can
+compute because the rival's posted quotes are known. `tau` switches the
+learning rate from a constant to alpha tau / (tau + n), n the visits to that
+state (or state-action for the asynchronous learner), so the steps sum to
+infinity and their squares do not. The row maxima are cached and updated
+after each write, which keeps the memory learners at 157 us a step
+(asynchronous) and 482 us (synchronous) for 16 runs.
+
+Scoring a learned pair needs the joint state (memory, q1, q2): the memory
+moves deterministically with the posted quotes and the inventories at
+random, so `memory.chain` builds the 1089-state transition matrix and
+`memory.evaluate` solves for both values. `memory.improve` is the Bellman
+optimality operator for one maker: within each of the 9 next-memory classes
+the bid and ask separate, so it maximizes per class and then over classes;
+it agrees with enumerating all 81 (bid, ask) pairs through the transition
+matrix to 1e-12. `memory.respond` runs policy iteration on it for an exact
+best response. Against a memoryless rival it equals the memoryless solver's
+best response to 1e-8, and the memoryless Nash quotes stay an equilibrium
+when the makers are allowed to remember. `memory.impulse` is Calvano's
+experiment done exactly: start from the stationary distribution of the
+learned pair (Cesaro averaging by repeated squaring, so periodic memory
+cycles are fine), force maker 1 one tick inside the rival on both sides for
+one step, and propagate the distribution forward. The deviation's exact
+value is pi (s + gamma D V) - pi V with D the forced step's transition
+matrix.
+
+`examples/memory_learners.py`, same game, 16 runs of 3,000,000 steps,
+exploration decay 2e-6, tau 5000:
+
+```
+phi 0.5, gamma 0.99, Q (5, 5), 16 runs of 3,000,000 steps
+values per maker at q = (0, 0), memory drawn from where each pair settles
+tick            learner   nash cartel         gain   half exploit undercut pays rival t+1
+ 0.1              async  3.286  8.270  0.37 +-0.09  0.308   7.669          1.00    +0.011
+ 0.1       async memory  3.286  8.270  0.54 +-0.07  0.489   9.927          1.00    -0.508
+ 0.1               sync  3.286  8.270  0.21 +-0.17  0.236   4.646          0.94    -0.034
+ 0.1           sync 1/n  3.286  8.270 -0.09 +-0.01  0.129   0.706          0.00    -0.023
+ 0.1        sync memory  3.286  8.270  0.20 +-0.12  0.227   5.441          1.00    -0.397
+ 0.1    sync memory 1/n  3.286  8.270 -0.14 +-0.04  0.130   2.489          0.19    -0.155
+ 0.2              async  4.573  8.246 -0.25 +-0.12  0.214   5.199          0.94    -0.013
+ 0.2       async memory  4.573  8.246  0.26 +-0.07  0.426   8.519          1.00    -0.349
+ 0.2           sync 1/n  4.573  8.246 -0.28 +-0.04  0.169   0.597          0.00    -0.013
+ 0.2    sync memory 1/n  4.573  8.246 -0.30 +-0.05  0.173   1.722          0.12    -0.104
+```
+
+"exploit" is the best responder's gain at q = (0, 0), "undercut pays" the
+share of runs where the forced undercut raises maker 1's value, "rival t+1"
+the change in the rival's mean bid depth, in ticks, the step after it.
+
+![Memory learners](docs/memory_learners.png)
+
+- Memory buys collusion. Asynchronous learners with memory keep 54% of the
+  Nash-to-cartel gap against 37% without (same seed, same 3M steps). At
+  tick 0.2, where
+  memoryless asynchronous learners end below Nash (-0.25), memory lifts
+  them to +0.26.
+- They do punish. After a forced undercut the memoryless rival barely moves
+  (+0.01 ticks, an inventory effect), the asynchronous memory rival tightens
+  its bid by half a tick on average the next step, and both makers' quotes
+  are back near their old level within about ten steps, the shape Calvano et
+  al. report.
+- The punishment is too short to deter. The undercut pays in all 16 runs and
+  a best responder earns 9.9 more than the learner. The trigger analysis
+  says why: holding even one tick of markup needs about 20 steps of
+  punishment, and the learners punish for a few.
+- A decaying rate makes the synchronous learners converge, and to something
+  close to competitive. With the 1/n rate the memoryless pair ends 9% of the
+  gap below Nash with an exploit of 0.71 (4.65 with a constant rate), and the
+  spread curve flattens just under the Nash 0.15. With memory and 1/n the
+  undercut pays in only 3 of 16 runs (exploit 2.49), but the pair also sits
+  below Nash (-0.14). Converging learners here end competitive, not
+  collusive.
+- The constant-rate synchronous memory learners (dotted blue) never settle:
+  the spread in the right panel keeps jumping after 2M steps.
+
 ## Install
 
 ```
@@ -4191,7 +4370,9 @@ hidden-liquidity worlds and the switching-rate sweep on six workers and
 simulates 100,000 paths per quoter in a few minutes. `duopoly.py` solves 16
 games four ways each on six workers in about a minute and a half.
 `learners.py` trains 192 pairs of learners on twelve workers in about five
-minutes.
+minutes. `trigger_strategies.py` checks every punishment length and markup in
+about nine minutes; `memory_learners.py` trains 160 pairs on ten workers in
+about an hour.
 
 ## Notes
 
