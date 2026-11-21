@@ -2661,3 +2661,78 @@ two comparisons or a counter of steps since the last undercut) and a check
 of whether the learned profile with the 1/n rate is an approximate Markov
 equilibrium of the memory game; then deep RL makers on the continuous-depth
 game as in Cont and Xiong.
+
+## 2026-11-20: short-horizon execution and the shape of the book
+
+Built `afs.py` (Alfonsi, Fruth and Schied 2010: optimal execution in a limit
+order book of any shape, with volume or price resilience) and
+`examples/short_execution.py`, which measures the zero-intelligence book's
+shape and two resilience rates and races five schedules for 12 shares over
+horizons from 6 seconds to 6.4 minutes.
+
+Design notes:
+
+- A shape is anything with f, F, F^-1 and G (the integral of x f). `Block`,
+  `Power` (f = q (1 + x)^-alpha, alpha < 1 so the book is infinite, the
+  family in the paper's examples) and `Profile` (piecewise-constant density,
+  last level extended forever).
+- `cost` walks the trades in price space: a buy lifts D to F^-1(F(D) + xi)
+  and costs G(D') - G(D). The two models differ only in the decay step:
+  D' becomes F^-1(a F(D')) (volume) or a D' (price). The same loop gives
+  Obizhaeva-Wang's quadratic form on a block book, which is the main
+  cross-check.
+- `optimal` uses the paper's Theorems 4.1 and 5.1. Both are block, N - 1
+  trickle trades that put back exactly what decayed, and a last block, with
+  the first trade from a scalar equation. I derived the first-order
+  conditions myself (Lagrangian over the post-trade levels) before reading
+  the paper; they match. The root is bracketed between 0 and the first
+  trade that leaves nothing for the end (itself a Brent root for the price
+  model). The sign change at the ends needs f(D) > a f(aD) in the price
+  model, true for every shape here.
+- `continuous` is the volume model's limit (Remark 4.4): F^-1(X - rho T x0) =
+  F^-1(x0) + x0 / f(F^-1(x0)), rate rho x0 in between.
+- The executor gets catch-up market orders every 0.05 minutes for 2 minutes
+  after T, identical for every plan. Without them, 20% of the six-second runs
+  ended short: buying 12 shares that fast empties the whole ask side, because
+  the flow never rests orders more than 10 ticks from the bid, and the last
+  market order finds nothing. A first run with 24 shares was invalid for the
+  same reason (unfilled shares made the cost look smaller) and was dropped.
+
+Checks:
+
+- Shapes: F^-1(F(x)) = x and F, G against `scipy.integrate.quad` for four
+  shapes; a flat profile equals a block.
+- Block book: trades equal `ObizhaevaWang.trades` to 1e-10 for rho 0.5, 2
+  and 20 in both models, and the cost of any schedule equals OW's quadratic
+  form.
+- Optimality: SLSQP over all 7 trades lands within 0.002 X of the closed
+  form, and never below it, for two power shapes in both models and a
+  measured-looking profile in the volume model; 30 random zero-sum
+  perturbations cost more; a = 0 gives even slices; each model's plan is
+  the cheaper one under its own model on a curved book.
+- Continuous limit: 20,000 trades match the block, flow and final block to
+  1e-3.
+
+Results (ticks; 4000 paired runs per cell, 12 shares, 11 trades):
+
+- Shape: 2.11 shares at the ask, about 1.55 a tick for the next six, 0.79
+  at 9 ticks, 0.23 and 0.10 past the tenth.
+- Quote: permanent 0.289, transient 0.265, rho 5.77 (half-life 0.12 min).
+  Volume taken by a buy refills at 0.69 a minute (half-life 1.0 min), with
+  nearly the same fraction left after a minute for sweeps of 1, 2, 6, 12.
+- Against even slices: a block costs +0.006 at 6 seconds and +1.25 at 6.4
+  minutes. At 0.1 minutes 5-1-1-5 saves 0.042 (se 0.007) and 6+6 saves
+  0.066 (0.008). At 0.4 nothing beats even. At 0.8 to 1.6 the OW and AFS
+  price plans save 0.02 to 0.065 (se about 0.02). From 3.2 minutes they
+  round to even lots.
+- Past 6 seconds every model predicts a larger saving than the book pays,
+  usually several times larger. The price model misses the permanent half of the impact; the
+  volume model with the slow refill rate front-loads for volume that sits
+  deep in the book and does not set the price.
+
+Open: why two half blocks beat even slices at 6 seconds, when almost nothing
+has decayed. The models have nothing that produces it.
+
+Next: an AFS book whose shape is the transient part only (permanent impact
+on top, as in OW with lambda) and a refill rate per depth, so that the
+touch recovers fast and the deep levels slow; then the gain at 6 seconds.
