@@ -137,7 +137,7 @@ def chart(depth, ow, ask, gone, rho_e, table, path):
         textcoords="offset points",
         color=ORANGE,
     )
-    b.annotate("ask move above its\npermanent level", (3.7, 0.36), color=BLUE)
+    b.annotate("ask move above its\npermanent level", (0.3, 0.1), color=BLUE)
     b.set_xticks(x, ["0", "1/32", "1/16", "1/8", "1/4", "1/2", "1", "2", "4", "8"])
     b.set_xlabel("minutes since a market buy", color=INK)
     b.set_ylabel("fraction of the lag-zero impact left", color=INK)
