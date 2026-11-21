@@ -47,8 +47,9 @@ manages its portfolio vega with the Baldacci-Bergault-Gueant model, solved in
 closed form and as an exact one-dimensional HJB. The
 counterparty can also be an execution algorithm: Almgren-Chriss and
 Obizhaeva-Wang schedules checked against their papers, the book's own impact
-measured and fed back into both models, and a hidden-Markov filter on the trade
-tape that lets a quoter find a working order and lean with it. Last of all, a
+measured and fed back into both models, Alfonsi-Fruth-Schied schedules for
+the book's measured shape at horizons of seconds, and a hidden-Markov filter on
+the trade tape that lets a quoter find a working order and lean with it. Last of all, a
 flash-crash scenario puts a volume-paced seller, stop-loss orders and market
 makers with inventory limits in one book, and tests a price collar, LULD bands
 with trading pauses and a trip-and-halt rule against it. Two market makers
@@ -3130,6 +3131,88 @@ worth the most (+10.82). The attribution of that case is not broken down yet.
 
 ![Hidden executors on a plain and a resilient book](docs/stealth.png)
 
+### Short horizons: the shape of the book and two kinds of resilience
+
+At 24 minutes resilience is too fast for the schedule to matter. Obizhaeva and
+Wang only bite when the horizon is of the order of 1/rho, so this section buys
+12 shares in seconds to minutes, in 11 trades, and asks whether the optimal
+schedules for a transient-impact book beat even slices in the simulated one.
+
+**Alfonsi, Fruth and Schied (2010).** `mmsim.afs` solves the optimal
+execution problem for a book of any shape. A density f(x) of shares x ticks
+past the ask gives the volume F(x) and the cost G(x) of the integral of
+x f(x). A buy of size xi on a book whose ask has been pushed D ticks costs
+G(D') - G(D), where F(D') = F(D) + xi. Between trades the impact decays by
+a = exp(-rho tau), either in volume (E = F(D) shrinks by a, the paper's
+model 1) or in price (D shrinks by a, model 2). For both the optimum is a
+block, N - 1 equal trades that refill exactly what decayed, and a last block.
+In the volume model the first trade solves
+
+    F^-1(X - N (1 - a) xi0) = (F^-1(xi0) - a F^-1(a xi0)) / (1 - a)
+
+and the price model has the same structure with a different right-hand side.
+`optimal` brackets both with Brent's method, `continuous` gives the
+continuous-time limit of the volume model, and the shapes are `Block`, the
+paper's `Power` family f = q (1 + x)^-alpha and `Profile`, a piecewise-constant
+density read off a measured book.
+
+Checks: a block book gives Obizhaeva-Wang's trades and cost to 1e-10 in both
+models; SLSQP over all 7 trades lands on the closed form for two power shapes
+and a profile; 30 random zero-sum perturbations all cost more; with a = 0 the
+optimum is even slices; 20,000 trades converge to the continuous limit; F, G
+and F^-1 agree with quadrature.
+
+**Two resilience rates.** The ask side of the zero-intelligence book holds
+2.1 shares at the touch, about 1.55 a tick for the next six ticks and almost
+nothing past 10, because the flow only places orders within 10 ticks of the
+opposite quote. The quote and the volume recover at very different speeds.
+The ask's excess over its permanent level (0.289 a share) has a half-life of
+0.12 minutes (rho 5.77). The ask volume a buy removed, counted over a fixed
+16-tick window, comes back at 0.69 a minute, a half-life of a minute, and over
+the first minute the fraction left is within a few points for sweeps of 1, 2,
+6 and 12 shares. So the volume model's proportional decay is a fair
+description, at a rate eight times slower than the quote's. My reading: new
+sell orders are placed relative to the bid, so the ones that land at the new
+touch close the price gap quickly, and the deep levels refill last.
+
+**Results.** 4000 paired runs per cell, shortfall per share against the mid
+at the first trade, ticks. Integer lots from rounding the cumulative
+schedule. The block of 12 can empty the ask side (it holds about 15 shares),
+so every plan gets the same catch-up market orders every 0.05 minutes after
+T; all 140,000 runs finish.
+
+| T (min) | even | block | OW | AFS price | AFS volume |
+|---|---|---|---|---|---|
+| 0.1 | 3.744 | +0.006 (0.010) | -0.042 (0.007) | -0.042 (0.007) | -0.066 (0.008) |
+| 0.2 | 3.629 | +0.123 (0.011) | -0.012 (0.008) | -0.019 (0.009) | -0.035 (0.010) |
+| 0.4 | 3.476 | +0.275 (0.014) | +0.004 (0.011) | -0.001 (0.012) | +0.000 (0.013) |
+| 0.8 | 3.298 | +0.450 (0.017) | -0.032 (0.015) | -0.018 (0.015) | -0.019 (0.018) |
+| 1.6 | 3.027 | +0.714 (0.021) | -0.065 (0.020) | -0.051 (0.020) | +0.005 (0.024) |
+| 3.2 | 2.713 | +1.015 (0.025) | same lots as even | same lots as even | +0.008 (0.028) |
+| 6.4 | 2.467 | +1.254 (0.031) | same lots as even | same lots as even | +0.025 (0.034) |
+
+Columns after "even" are differences from even slices on the same seeds,
+with standard errors. In six seconds a block costs the same as even slices,
+yet two blocks of 6 (the volume plan at T = 0.1) save 0.066 a share and the
+5-1-1-5 plans 0.042. None of the models has a mechanism for that at a horizon
+where almost nothing has decayed; I have not pinned the cause down. Between
+0.8 and 1.6 minutes the quote-calibrated plans (OW, AFS price) save 0.02 to
+0.065. Past 3 minutes they round to even slices.
+
+Each model also predicts its own saving on the same integer lots, and outside
+the six-second case they all promise more than the book pays. Obizhaeva-Wang,
+fitted to the same impulse response, predicts 0.08 to 0.10 from 0.1 to 0.4
+minutes, where the book gives 0.042, 0.012 and nothing. The price model with
+the quote's rate predicts 0.14 to 0.19 up to 0.8 minutes: it has the right
+speed but not the permanent half of the impact (0.289 of 0.554), so it thinks
+waiting buys back twice what it does. The volume model with the slow refill
+rate predicts 0.19 to 0.24 between 0.8 and 3.2 minutes and gets at most 0.02. Its
+front-loaded plans (4 or 5 shares first) wait for volume that does not set
+the price: the quote has long recovered, and the shares still missing sit
+deep in the book where a 1-share slice never reaches.
+
+![Short-horizon execution](docs/short_execution.png)
+
 ## Toxic bursts
 
 The informed traders so far trade at a steady rate. Real toxic flow arrives in
@@ -4358,6 +4441,7 @@ half minutes. `heston_mm.py` solves the paper's book and runs 20 simulated
 days in a few minutes.
 `execution.py` runs about 66,000 sessions in seven minutes, `stealth.py` about
 36,000 in six and `toxic_bursts.py` about 7,000 in two and a half.
+`short_execution.py` runs about 172,000 short sessions in eight minutes.
 `flash_crash.py` runs about 17,000 sessions in seven minutes, and
 `strategies.py` (which reads the PPO seed from `data/`) 8,000 in about one.
 `arl_mm.py` trains nine PPO runs in parallel and saves their quote tables in
