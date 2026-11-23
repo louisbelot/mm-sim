@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beat the bot</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-mode="make">
+<main>
+<header>
+<h1>Beat the bot</h1>
+<p>A market maker running the Avellaneda-Stoikov model, in the setting of their 2008 paper:
+the mid price is a random walk with &sigma; = 2 over one session of 200 steps, and buyers and
+sellers arrive at rate A e<sup>-k&delta;</sup> (A = 140, k = 1.5) when a quote sits &delta;
+away from the mid. The bot has risk aversion &gamma; = 0.1. It quotes around a reservation
+price that moves against its inventory, and its spread narrows as the session ends.</p>
+<p>Either quote next to it and try to make more money, or trade against its quotes and try to
+take money from it. P&amp;L is marked at the final mid.</p>
+</header>
+
+<section class="controls">
+<div class="modes" role="group" aria-label="mode">
+<button data-pick="make" aria-pressed="true">Make the market</button>
+<button data-pick="take" aria-pressed="false">Trade against it</button>
+</div>
+<button id="go" class="primary">Start</button>
+<label>speed
+<select id="speed">
+<option value="slow">slow</option>
+<option value="normal" selected>normal</option>
+<option value="fast">fast</option>
+</select>
+</label>
+<label>seed <input id="seed" type="number" min="1" step="1"></label>
+<button id="reseed">New prices</button>
+</section>
+
+<p class="hint make">You and the bot each trade with your own copy of the order flow, drawn from
+the same random numbers, so a quote at least as close to the mid as the bot's fills whenever
+the bot's does. Neither of you takes orders away from the other.
+<kbd>&uarr;</kbd> <kbd>&darr;</kbd> change your half spread, <kbd>&larr;</kbd> <kbd>&rarr;</kbd>
+move both quotes down or up, <kbd>space</kbd> pauses.</p>
+<p class="hint take">Buy at the bot's ask or sell at its bid, one unit at a time. Each trade
+moves the bot's inventory, and its quotes move with it. <kbd>b</kbd> buys, <kbd>s</kbd> sells,
+<kbd>space</kbd> pauses. With the tip on, you see a noisy forecast of the final mid (error
+sd 0.5).</p>
+
+<section class="board">
+<div class="chart">
+<div class="head"><span>Prices</span><span id="clock"></span></div>
+<canvas id="price"></canvas>
+<div class="legend">
+<span class="k mid">mid</span><span class="k ask">bot ask</span><span class="k bid">bot bid</span>
+<span class="k you make">your quotes</span><span class="k trades">your trades</span>
+</div>
+</div>
+<aside>
+<div class="panel make">
+<label>half spread <output id="halfv"></output>
+<input id="half" type="range" min="0.1" max="3" step="0.05"></label>
+<label>lean <output id="leanv"></output>
+<input id="lean" type="range" min="-4" max="4" step="0.1"></label>
+</div>
+<div class="panel take">
+<div class="buttons">
+<button id="buy" class="buy">Buy at ask</button>
+<button id="sell" class="sell">Sell at bid</button>
+</div>
+<label class="check"><input id="insider" type="checkbox"> show the tip</label>
+</div>
+<table class="ladder"><tbody id="ladder"></tbody></table>
+<table class="positions">
+<thead><tr><th></th><th>position</th><th>cash</th><th>P&amp;L</th><th>trades</th></tr></thead>
+<tbody id="book"></tbody>
+</table>
+</aside>
+</section>
+
+<section class="pair">
+<div class="chart">
+<div class="head"><span>Inventory</span><span class="k bot">bot</span><span class="k you">you</span></div>
+<canvas id="inventory"></canvas>
+</div>
+<div class="chart">
+<div class="head"><span>P&amp;L marked to mid</span><span class="k bot">bot</span><span class="k you">you</span></div>
+<canvas id="pnl"></canvas>
+</div>
+</section>
+
+<section id="results" hidden>
+<h2>Result</h2>
+<p id="lead"></p>
+<table class="split">
+<thead><tr><th></th><th>edge at trade</th><th>inventory</th><th>total</th></tr></thead>
+<tbody id="split"></tbody>
+</table>
+<p class="note">Edge is the distance from the mid at which each trade happened, summed. Inventory
+is the position held times each price move. The two add up to the P&amp;L exactly.</p>
+<div class="chart">
+<div class="head"><span>The bot's P&amp;L over 2000 other sessions</span></div>
+<canvas id="dist"></canvas>
+</div>
+</section>
+
+<footer>
+<p>Part of <a href="https://github.com/louisbelot/mm-sim">mm-sim</a>. The JavaScript model is
+tested against the package's Python implementation.</p>
+</footer>
+</main>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
