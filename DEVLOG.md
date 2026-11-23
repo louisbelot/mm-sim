@@ -2736,3 +2736,75 @@ has decayed. The models have nothing that produces it.
 Next: an AFS book whose shape is the transient part only (permanent impact
 on top, as in OW with lambda) and a refill rate per depth, so that the
 touch recovers fast and the deep levels slow; then the gain at 6 seconds.
+
+## 2026-11-22: beat the bot, in the browser
+
+Built `web/`, a static page (no build step, no libraries) where a person plays
+against the Avellaneda-Stoikov market maker in the 2008 paper's setting:
+sigma 2, A 140, k 1.5, gamma 0.1, dt 0.005, 200 steps. It deploys to GitHub
+Pages from `.github/workflows/pages.yml`, and a second CI job runs its tests
+with Node 22.
+
+Two games:
+
+- Make the market. The player sets a half spread and a lean (arrow keys or
+  sliders) and quotes next to the bot. Each side trades with its own copy of
+  the flow: one uniform per side per step, shared by both makers, and a fill
+  when it falls under min(1, A exp(-k delta) dt). Common random numbers make
+  the comparison fair: a quote at least as close as the bot's fills whenever
+  the bot's does, so a difference in P&L is the quotes and not the luck of
+  the draw.
+- Trade against it. The player buys at the bot's ask or sells at its bid. The
+  bot requotes after every trade, so its quotes reveal its inventory (the
+  "price reading" effect in Barzykin, Bergault, Gueant and Lemmel 2025). An
+  optional tip shows the final mid plus N(0, 0.5^2) noise. At the end the
+  page replays the bot alone on the same draws and reports what the player
+  gave it or took from it.
+
+Design notes:
+
+- `as.js` is a direct port of `mmsim.avellaneda` (reservation price, spread,
+  quotes). `world(seed)` draws the whole session up front with mulberry32:
+  the binomial mid path and both fill uniforms per step, plus the tip. A
+  session is then a pure function of the seed and the player's actions, which
+  is what makes the counterfactual and the shareable `?seed=` links work.
+- `session.js` has one `Maker` record for both sides (position, cash, trades
+  with the mid at the time, quote history) and `split`, the exact P&L
+  identity: wealth = sum over trades of side (mid - px) + sum over steps of
+  q (mid change). It holds to 1e-9 in the tests, for both games.
+- Charts are about 150 lines of canvas code; colours come from CSS variables
+  so the page follows light and dark mode.
+
+Checks (`npm test` in `web/`, 11 tests):
+
+- Quotes, reservation price and spread equal the Python code to 1e-12 on five
+  parameter sets (`examples/web_reference.py` writes the reference file).
+- The paper table: for gamma 0.1, 0.01 and 1, inventory and symmetric, 4000
+  JavaScript paths against 20,000 Python paths. Means of profit and final q
+  within 4 combined standard errors, standard deviations within 8%. The RNGs
+  differ, so this is a statistical check, not bit-for-bit.
+- A player who sets half spread and lean to the bot's own formula, with their
+  own inventory, gets the bot's trades one for one.
+- With no player trades the bot equals the bot alone on the same world.
+
+Measured (2000 seeds, JavaScript):
+
+- The bot averages 65.10 per session (sd 6.40); Python's 20,000-path run gives
+  64.85 (sd 6.53).
+- Buying whenever the bot's ask is under the mid, selling whenever its bid is
+  over it: 0.20 trades a session, +0.038 (se 0.020). The skew only crosses the
+  mid when |q| gamma sigma^2 tau exceeds the half spread, about |q| > 2 early
+  in the session, and the first trade pushes the inventory back.
+- An insider who buys while the ask is 0.5 under the tip and sells while the
+  bid is 0.5 over it (up to 5 units a step): +24.3 (se 0.9) over 59 trades a
+  session. The bot makes +45.7 (se 1.0) more than it does alone. I expected
+  the opposite and checked it on single sessions: the bot earns the half
+  spread on every insider trade (about 47 per session), its skew then sells
+  the position back to the background flow within a few steps, and only a
+  few units of drift hit its own inventory. The flow, whose arrival rates
+  ignore information, ends up holding the losing side. Adverse selection lands
+  on whoever holds the position longest.
+
+Next: a version of the page on the order book itself (the CST flow and the
+queue), so quotes have depth and priority; and the AFS book with a transient
+shape and per-level refill from the last entry.
