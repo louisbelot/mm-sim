@@ -61,6 +61,40 @@ strategies shows how long a punishment that collusion would need.
 
 ![Avellaneda-Stoikov replication](docs/as_replication.png)
 
+## Beat the bot in the browser
+
+[louisbelot.github.io/mm-sim](https://louisbelot.github.io/mm-sim/) runs the
+Avellaneda-Stoikov market maker live, in the setting of the 2008 paper (sigma
+2, A 140, k 1.5, gamma 0.1, 200 steps). There are two games. In the first you
+quote next to the bot with a half spread and a lean, and both of you trade
+with your own copy of the order flow drawn from the same random numbers, so
+any difference in P&L comes from the quotes. In the second you buy at its ask
+or sell at its bid, and the page reruns the session without you to show what
+you cost it. At the end the P&L of each side is split exactly into the edge
+at which it traded and the inventory it carried.
+
+![Beat the bot](docs/beat_the_bot.png)
+
+The model in `web/js` is a port of `mmsim.avellaneda`. Its tests compare the
+quotes with the Python code to 1e-12 and the six rows of the paper table
+(three gammas, inventory and symmetric) with a 20,000-path Python run, within
+4 standard errors on the means; on 2000 sessions the JavaScript bot averages
+65.10 against Python's 64.85. Quoting exactly like the bot reproduces its
+trades one for one.
+
+Two things the games show. Trading against the bot's skew is free money when
+its quote crosses the mid, but at gamma 0.1 that almost never happens: a rule
+that buys whenever the ask is below the mid makes 0.20 trades a session and
+earns 0.04 (se 0.02). And a trader who sees the final mid with noise of sd 0.5,
+and buys while the ask is more than 0.5 below that forecast (sells while the
+bid is 0.5 above it), makes 24.3 a session (se 0.9), yet the bot makes 45.7 more
+(se 1.0) with that trader in the market than without, over 2000 sessions. It
+earns the half spread on each of the insider's trades and passes the position
+back to the uninformed flow within a few steps, so the flow ends up on the
+losing side of the information. That is a property of this model, where
+arrivals do not react to information and the bot's inventory mean-reverts
+fast.
+
 ## Four market makers, one chart
 
 Each bot below trades alone in 1000 sessions of 60 minutes on the
@@ -4267,6 +4301,11 @@ python -m venv .venv
 .venv/Scripts/pip install -e ".[dev]"     # .venv/bin/pip on Linux and macOS
 .venv/Scripts/python -m pytest
 ```
+
+The browser page has no build step. Its tests run with Node 22 or later
+(`npm test` in `web/`), and `python -m http.server -d web` serves it locally.
+`examples/web_reference.py` regenerates the Python reference values the tests
+use.
 
 Requires Python 3.10+, numpy and scipy. matplotlib is only needed for the
 examples, and gymnasium only for `mmsim.env` (`pip install -e ".[rl]"`).
