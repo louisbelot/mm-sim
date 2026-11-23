@@ -2798,10 +2798,12 @@ Measured (2000 seeds, JavaScript):
 - An insider who buys while the ask is 0.5 under the tip and sells while the
   bid is 0.5 over it (up to 5 units a step): +24.3 (se 0.9) over 59 trades a
   session. The bot makes +45.7 (se 1.0) more than it does alone. I expected
-  the opposite and checked it on single sessions: the bot earns the half
-  spread on every insider trade (about 47 per session), its skew then sells
-  the position back to the background flow within a few steps, and only a
-  few units of drift hit its own inventory. The flow, whose arrival rates
+  the opposite, so I split it over the same 2000 seeds: the insider's trades
+  give the bot 104.0 of edge a session (more than half the spread per trade,
+  because each buy lifts the bot's ask further above the mid), its inventory
+  term is -11.6 against 0.05 alone, and its edge from the flow drops by the
+  rest. The skew sells the position back to the background flow within a few
+  steps, so little of the drift toward the tip hits the bot. The flow, whose arrival rates
   ignore information, ends up holding the losing side. Adverse selection lands
   on whoever holds the position longest.
 

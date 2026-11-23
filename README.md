@@ -88,10 +88,11 @@ that buys whenever the ask is below the mid makes 0.20 trades a session and
 earns 0.04 (se 0.02). And a trader who sees the final mid with noise of sd 0.5,
 and buys while the ask is more than 0.5 below that forecast (sells while the
 bid is 0.5 above it), makes 24.3 a session (se 0.9), yet the bot makes 45.7 more
-(se 1.0) with that trader in the market than without, over 2000 sessions. It
-earns the half spread on each of the insider's trades and passes the position
-back to the uninformed flow within a few steps, so the flow ends up on the
-losing side of the information. That is a property of this model, where
+(se 1.0) with that trader in the market than without, over 2000 sessions. The
+insider's trades hand it 104.0 of edge a session, since each buy lifts its ask
+further from the mid, and it loses only 11.6 on inventory because its skew
+passes the position back to the uninformed flow within a few steps. The flow
+ends up on the losing side of the information. That is a property of this model, where
 arrivals do not react to information and the bot's inventory mean-reverts
 fast.
 
