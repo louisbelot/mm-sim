@@ -96,6 +96,50 @@ ends up on the losing side of the information. That is a property of this model,
 arrivals do not react to information and the bot's inventory mean-reverts
 fast.
 
+## Market makers on the book, in the browser
+
+[louisbelot.github.io/mm-sim/book.html](https://louisbelot.github.io/mm-sim/book.html)
+puts the GLFT bot (gamma 0.08, Q 5) and the Avellaneda-Stoikov bot (gamma
+0.003) into one order book filled by the Cont-Stoikov-Talreja flow with the
+Sky Perfect rates, for 60 minutes after a 30-minute warm-up. Here nothing
+fills by formula: a quote trades when a market order walks down to it, after
+every share that joined the level before it. The ladder draws each resting
+order as a block in queue order, and the table gives each bot's shares ahead.
+At the end each P&L is split into the edge at the fill and what the mid did
+afterwards, fills are grouped by queue position at entry, and the session is
+placed against 400 others with the same settings.
+
+![Market makers on the book](docs/on_the_book.png)
+
+The book, the flow, the GLFT quotes and both bots in `web/js` are ports of
+`mmsim.book`, `mmsim.flow`, `mmsim.glft` and `mmsim.bots`. The matching engine
+is checked against a brute-force matcher on 8000 random submits and cancels (trades, depth
+and queue position after every order). The seeded book equals Python's level
+for level, the stationary GLFT quotes agree with `Model.quotes(inf)` to 1e-9
+(found by inverse iteration on the ground state of the tridiagonal matrix
+rather than a matrix exponential), and 1000 flow-only sessions and 400 bot
+sessions per setup match a 2000-session Python run within 4 standard errors
+on the mean and 10 to 15% on the standard deviation. A session played frame
+by frame is the same, fill for fill, as one run straight through.
+
+Over 2000 sessions (`node web/study.js`), P&L per 60 minutes in ticks:
+
+| setup | bot | P&L (se) | edge at fill | after the fill | fills | first in queue |
+|---|---|---|---|---|---|---|
+| alone | GLFT | 11.91 (0.23) | 18.66 | -6.74 | 26.2 | 26.5% |
+| alone | AS | 15.19 (0.28) | 22.40 | -7.20 | 37.3 | 27.3% |
+| together | GLFT | 8.81 (0.19) | 15.68 | -6.87 | 26.2 | 4.6% |
+| together | AS | 12.47 (0.20) | 18.78 | -6.31 | 34.7 | 2.6% |
+
+Sharing the book costs each bot about 3 ticks an hour, and most of it is
+edge, not fills: GLFT keeps its 26 fills, but the share it gets at the
+front of a queue drops from 26.5% to 4.6% and most fills now come with three
+or more shares ahead. Being first is worth a little in this flow. GLFT's
+1-minute markout is 0.68 ticks for fills with nobody ahead and 0.61 to 0.64
+for the rest (se 0.01), the direction Moallemi and Yuan (2016) predict, but
+small, because the zero-intelligence flow carries no information that a
+longer queue would protect against.
+
 ## Four market makers, one chart
 
 Each bot below trades alone in 1000 sessions of 60 minutes on the
@@ -4305,8 +4349,8 @@ python -m venv .venv
 
 The browser page has no build step. Its tests run with Node 22 or later
 (`npm test` in `web/`), and `python -m http.server -d web` serves it locally.
-`examples/web_reference.py` regenerates the Python reference values the tests
-use.
+`examples/web_reference.py` and `examples/book_reference.py` regenerate the
+Python reference values the tests use.
 
 Requires Python 3.10+, numpy and scipy. matplotlib is only needed for the
 examples, and gymnasium only for `mmsim.env` (`pip install -e ".[rl]"`).

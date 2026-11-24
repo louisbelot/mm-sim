@@ -2810,3 +2810,88 @@ Measured (2000 seeds, JavaScript):
 Next: a version of the page on the order book itself (the CST flow and the
 queue), so quotes have depth and priority; and the AFS book with a transient
 shape and per-level refill from the last entry.
+
+## 2026-11-24: market makers on the book, in the browser
+
+A second page, `web/book.html`, runs the GLFT and Avellaneda-Stoikov bots in
+one limit order book with the Cont-Stoikov-Talreja flow, so fills come from
+market orders reaching the bot's place in a FIFO queue instead of from an
+intensity formula. The ladder shows every resting order as a block in queue
+order, coloured by owner.
+
+What got built:
+
+- `book.js`: price-time priority book (sorted keys per side, a FIFO array per
+  level, an id index), limit, market and post-only orders, cancel, `ahead`
+  and an `audit` that checks every invariant the Python `Book.audit` checks.
+- `cst.js`: the zero-intelligence flow, event for event like
+  `mmsim.flow.ZeroIntelligence`: the same menu of limit arrivals at distance i
+  from the opposite best, market orders at mu, and per-order cancels at
+  theta(i) for the flow's own orders only.
+- `glft.js`: the stationary GLFT quotes. Python gets them from a matrix
+  exponential at a long horizon. In the limit that is the ground state of the
+  tridiagonal matrix alpha q^2 - k mu q with off-diagonal -eta, so the port
+  finds the smallest eigenvalue by Sturm-sequence bisection and the
+  eigenvector by inverse iteration with a Thomas solve, shifted 1e-9 below the
+  eigenvalue so the shifted matrix stays positive definite. The quotes are
+  then base -/+ log(v[q+1]/v[q]) / k.
+- `market.js` and `bots.js`: the zero-latency part of `mmsim.sim` (agents
+  react to each flow event, fills carry the mid before the trade and the
+  shares ahead at entry, callbacks are queued so they never nest) and the
+  `Quoter` logic with keep, inside and the inventory cap.
+- `live.js`: the page. It samples every 0.05 minutes for the charts and, at
+  the end, splits each P&L into edge at the fill and everything after, groups
+  fills by queue position at entry with a 1-minute markout, and places the
+  session against 400 others with the same settings.
+
+Design notes:
+
+- The Python loop draws the next flow event against a horizon and throws the
+  draw away when it falls past it. That is fine by memorylessness but means a
+  session stepped in 0.05-minute frames would use the random numbers
+  differently from one run straight through. The JS market keeps the pending
+  event and its absolute time across frames and redraws only when a bot
+  changes the book. The two are identical fill for fill, which a test checks,
+  so the 400-session comparison at the end of a live session uses exactly the
+  same simulator as the live one.
+- Bot seats are shuffled per seed, like `tournament.session`, because seat
+  order decides who joins a level first when both bots react to the same
+  event.
+
+Checks (`npm test` in `web/`, 23 tests, 11 s):
+
+- 20 runs of 400 random submits and cancels against a brute-force matcher that
+  sorts all resting orders on every call: same trades, same depth after every
+  order, same shares ahead for every resting order at the end, clean audit.
+- Seeded book equal to Python's; GLFT quotes within 1e-9 of
+  `Model.quotes(inf)` on five parameter sets (with drift and terminal
+  penalty), the closed-form approximation within 1e-12.
+- `examples/book_reference.py` runs 2000 Python sessions per setup. JS flow
+  alone (mid change, spread, depth at the bid, 1000 sessions) and the three bot
+  setups (pnl, fills, final position, 400 sessions) agree within 4 combined
+  standard errors on the means and 10 to 15% on the standard deviations.
+  Over 2000 JS sessions: GLFT alone 12.84 against Python's 12.58, AS alone
+  14.59 against 15.27 (1.8 se), together 9.02 and 12.56 against 9.24 and
+  12.74.
+- Accounts rebuilt from the fills equal the bots' cash and position, the
+  bots' live orders equal what the book holds for their owner, every fill is
+  on the good side of the mid before it.
+
+Measured (`node web/study.js`, 2000 sessions of 60 minutes):
+
+- Alone, GLFT makes 11.91 a session (se 0.23) from 26.2 fills and AS 15.19
+  (0.28) from 37.3. Together, 8.81 and 12.47. The fill counts barely move. The
+  loss is edge: GLFT's edge at the fill drops from 18.66 to 15.68 while what
+  happens after the fill stays near -6.8.
+- Queue position explains it. Alone, 26.5% of GLFT's fills had nobody ahead;
+  together, 4.6%, and 44% had three or more shares ahead. AS goes from 27.3%
+  to 2.6%. Each bot spends the session behind the other.
+- Being first is worth a little: GLFT's 1-minute markout is 0.68 ticks (se
+  0.01) with nobody ahead against 0.61 to 0.64 further back, AS 0.56 against
+  0.48 to 0.49. That is the sign Moallemi and Yuan (2016) find for queue
+  value, but small here, since this flow carries no information that a long
+  queue protects against.
+
+Next: put the informed trader and the Hawkes flow on the page, so that queue
+position meets adverse selection, and the same fill-quality table on the
+Python side for the ITCH replay.
