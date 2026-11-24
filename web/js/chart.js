@@ -60,13 +60,13 @@ function extent(values, minSpan) {
   return [mid - half, mid + half]
 }
 
-export function lines(canvas, { n, series, dots = [], levels = [], minSpan = 1 }) {
+export function lines(canvas, { n, series, dots = [], levels = [], minSpan = 1, dx = 1 }) {
   const { g, width, height } = setup(canvas)
   const all = series.flatMap((s) => Array.from(s.data))
   for (const l of levels) all.push(l.y)
   const [y0, y1] = extent(all, minSpan)
   const pad = { l: 44, r: 40, t: 8, b: 22 }
-  const { X, Y } = frame(g, width, height, 0, n, y0, y1, pad, (v) => String(v))
+  const { X, Y } = frame(g, width, height, 0, n * dx, y0, y1, pad, String)
   for (const l of levels) {
     g.strokeStyle = l.color
     g.setLineDash([4, 4])
@@ -85,7 +85,15 @@ export function lines(canvas, { n, series, dots = [], levels = [], minSpan = 1 }
     g.lineWidth = s.width ?? 1.5
     g.setLineDash(s.dash ?? [])
     g.beginPath()
-    s.data.forEach((v, i) => (i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v))))
+    let pen = false
+    s.data.forEach((v, i) => {
+      if (!Number.isFinite(v)) pen = false
+      else if (pen) g.lineTo(X(i * dx), Y(v))
+      else {
+        g.moveTo(X(i * dx), Y(v))
+        pen = true
+      }
+    })
     g.stroke()
   }
   g.setLineDash([])
