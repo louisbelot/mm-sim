@@ -11,6 +11,9 @@
   --you: #1f9d6b;
   --tip: #a35bd6;
   --bar: #b9cde6;
+  --glft: #2a78d6;
+  --avs: #a35bd6;
+  --flow: #cfcdc6;
   color-scheme: light;
 }
 
@@ -28,6 +31,9 @@
     --you: #3fc28e;
     --tip: #c08ae8;
     --bar: #33496a;
+  --glft: #5b9cec;
+  --avs: #c08ae8;
+  --flow: #4a4945;
     color-scheme: dark;
   }
 }
@@ -45,6 +51,9 @@
   --you: #3fc28e;
   --tip: #c08ae8;
   --bar: #33496a;
+  --glft: #5b9cec;
+  --avs: #c08ae8;
+  --flow: #4a4945;
   color-scheme: dark;
 }
 
@@ -233,6 +242,30 @@ canvas {
 
 .k.you::before {
   background: var(--you);
+}
+
+.k.glft::before {
+  background: var(--glft);
+}
+
+.k.as::before {
+  background: var(--avs);
+}
+
+.k.flow::before {
+  background: var(--flow);
+}
+
+#depth {
+  height: 340px;
+}
+
+.positions tr.glft td:first-child {
+  color: var(--glft);
+}
+
+.positions tr.as td:first-child {
+  color: var(--avs);
 }
 
 .k.trades::before {

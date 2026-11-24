@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Market makers on the book</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+<header>
+<h1>Market makers on the book</h1>
+<p>A limit order book with price-time priority, filled by zero-intelligence order flow from
+Cont, Stoikov and Talreja (2010) with their rates fitted to Sky Perfect: limit orders arrive
+at each distance from the opposite best, market orders at 0.94 a minute, and each resting
+order is cancelled at a rate that depends on how deep it sits. Two market makers quote one
+lot each, post only. The GLFT bot uses the Gu&eacute;ant, Lehalle and Fernandez-Tapia quotes
+for an inventory limit of 5; the Avellaneda-Stoikov bot shrinks its spread as the hour runs
+out. Both fit A = 2.1 and k = 3.6 per minute to this flow.</p>
+<p>Unlike the other page, nothing here fills by formula. An order trades when a market order
+reaches it, which means waiting behind every order that joined the level first. The ladder
+shows each order as a block in queue order, inside edge on the left.</p>
+</header>
+
+<section class="controls">
+<button id="go" class="primary">Start</button>
+<button id="skip">Run to the end</button>
+<label>speed
+<select id="speed">
+<option value="slow">15 s a second</option>
+<option value="normal" selected>1 min a second</option>
+<option value="fast">4 min a second</option>
+</select>
+</label>
+<label>GLFT &gamma; <select id="glft-gamma"></select></label>
+<label>AS &gamma; <select id="as-gamma"></select></label>
+<label>seed <input id="seed" type="number" min="1" step="1"></label>
+<button id="reseed">New flow</button>
+</section>
+
+<section class="board">
+<div class="chart">
+<div class="head"><span>Prices (ticks)</span><span id="clock"></span></div>
+<canvas id="price"></canvas>
+<div class="legend">
+<span class="k mid">mid</span><span class="k glft">GLFT quotes and fills</span>
+<span class="k as">AS quotes and fills</span>
+</div>
+</div>
+<aside>
+<div class="chart">
+<div class="head"><span>Book</span><span class="k flow">flow</span><span class="k glft">GLFT</span><span class="k as">AS</span></div>
+<canvas id="depth"></canvas>
+</div>
+<table class="positions">
+<thead><tr><th></th><th>q</th><th>bid</th><th>ask</th><th>P&amp;L</th><th>fills</th></tr></thead>
+<tbody id="book"></tbody>
+</table>
+<p class="note">In brackets: shares ahead in the queue.</p>
+</aside>
+</section>
+
+<section class="pair">
+<div class="chart">
+<div class="head"><span>Inventory</span><span class="k glft">GLFT</span><span class="k as">AS</span></div>
+<canvas id="inventory"></canvas>
+</div>
+<div class="chart">
+<div class="head"><span>P&amp;L marked to mid (ticks)</span><span class="k glft">GLFT</span><span class="k as">AS</span></div>
+<canvas id="pnl"></canvas>
+</div>
+</section>
+
+<section id="results" hidden>
+<h2>Result</h2>
+<p id="lead"></p>
+<table class="split">
+<thead><tr><th></th><th>edge at fill</th><th>after the fill</th><th>total</th><th>fills</th><th>at the front</th></tr></thead>
+<tbody id="split"></tbody>
+</table>
+<p class="note">Edge is the distance from the mid at which each fill happened. After the fill is
+everything the mid did to the position from then on. They add up to the P&amp;L.</p>
+<table class="split">
+<thead><tr id="queue-head"></tr></thead>
+<tbody id="queue"></tbody>
+</table>
+<p class="note">Fills grouped by how many shares were ahead of the order when it joined its
+level. The markout is the mid one minute after the fill minus the fill price, signed so that
+a positive number is a gain for the bot.</p>
+<section class="pair">
+<div class="chart" id="dist-glft">
+<div class="head"><span>GLFT P&amp;L over 400 other sessions</span></div>
+<canvas></canvas>
+</div>
+<div class="chart" id="dist-as">
+<div class="head"><span>AS P&amp;L over 400 other sessions</span></div>
+<canvas></canvas>
+</div>
+</section>
+</section>
+
+<footer>
+<p>Part of <a href="https://github.com/louisbelot/mm-sim">mm-sim</a>. The book, the flow and
+both bots are ports of the package's Python code and are tested against it. See also
+<a href="index.html">Beat the bot</a>.</p>
+</footer>
+</main>
+<script type="module" src="js/live.js"></script>
+</body>
+</html>
