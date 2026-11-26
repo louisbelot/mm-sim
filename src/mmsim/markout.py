@@ -76,6 +76,16 @@ def totals(fills: Sequence[Fill], m: np.ndarray) -> tuple[np.ndarray, np.ndarray
     return (np.where(ok, m, 0.0) * qty).sum(axis=0), (ok * qty).sum(axis=0)
 
 
+def grouped(
+    fills: Sequence[Fill], m: np.ndarray, groups: np.ndarray, k: int
+) -> tuple[np.ndarray, np.ndarray]:
+    num, den = np.zeros((k, m.shape[1])), np.zeros((k, m.shape[1]))
+    for g in range(k):
+        sel = np.flatnonzero(groups == g)
+        num[g], den[g] = totals([fills[i] for i in sel], m[sel])
+    return num, den
+
+
 def clustered(num: np.ndarray, den: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     num, den = np.asarray(num, dtype=float), np.asarray(den, dtype=float)
     n, total = len(num), den.sum(axis=0)

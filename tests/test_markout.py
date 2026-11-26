@@ -3,7 +3,7 @@ import pytest
 
 from mmsim.accounting import Account, Fill
 from mmsim.book import Side
-from mmsim.markout import Tape, clustered, curve, markouts, signature, totals
+from mmsim.markout import Tape, clustered, curve, grouped, markouts, signature, totals
 
 
 def tape():
@@ -70,6 +70,17 @@ def test_totals_skip_horizons_past_the_end():
     num, den = totals(fills, m)
     assert list(den) == [5, 3]
     assert num == pytest.approx([3 * 0.5 + 2 * 0.5, 3 * 0.0])
+
+
+def test_grouped_splits_totals_by_group():
+    fills = [fill(0.5, Side.BUY, 100, 3), fill(1.0, Side.SELL, 102, 2), fill(2.0, Side.BUY, 101)]
+    m = markouts(fills, tape(), [0, 1], end=3.2)
+    num, den = grouped(fills, m, np.array([1, 0, 1]), 3)
+    assert list(den[:, 0]) == [2, 4, 0]
+    assert num[0] == pytest.approx(totals(fills[1:2], m[1:2])[0])
+    assert num[1] == pytest.approx(totals([fills[0], fills[2]], m[[0, 2]])[0])
+    assert num.sum(axis=0) == pytest.approx(totals(fills, m)[0])
+    assert not num[2].any()
 
 
 def test_clustered_with_equal_weights_is_the_mean_of_cluster_means():
