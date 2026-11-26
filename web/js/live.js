@@ -1,7 +1,8 @@
 import { BUY, SELL } from "./book.js"
 import { AvellanedaStoikov, GLFT } from "./bots.js"
 import { bars, color, lines } from "./chart.js"
-import { ZeroIntelligence, skyPerfect } from "./cst.js"
+import { HawkesFlow, ZeroIntelligence, skyPerfect, symmetricHawkes } from "./cst.js"
+import { Fundamental, InformedTrader } from "./informed.js"
 import { open, session } from "./market.js"
 import { mulberry32 } from "./rng.js"
 import { histogram, mean, rank, sd } from "./stats.js"
@@ -20,6 +21,17 @@ export const MAKERS = {
 }
 
 export const NAMES = { glft: "GLFT", as: "AS" }
+
+export function world(cfg, seed) {
+  const sky = skyPerfect()
+  const flow = cfg.hawkes ? new HawkesFlow(sky, symmetricHawkes(sky.mu, 0.6, 0.1, 6)) : new ZeroIntelligence(sky)
+  const crowd = []
+  if (cfg.informed) {
+    const rand = mulberry32(seed + 0x5eed)
+    crowd.push(new InformedTrader(new Fundamental(SIGMA, rand), 1, rand))
+  }
+  return { flow, crowd }
+}
 
 export function makers(cfg) {
   const out = {}
@@ -40,17 +52,19 @@ export function midAt(tape, t) {
   return tape[lo][1]
 }
 
+export const edgeOf = (f) => (f.mid === null ? 0 : (f.side === BUY ? 1 : -1) * f.qty * (f.mid - f.price))
+
 export function split(ctx, close) {
   let edge = 0
-  for (const f of ctx.fills) edge += (f.side === BUY ? 1 : -1) * f.qty * (f.mid - f.price)
+  for (const f of ctx.fills) edge += edgeOf(f)
   const pnl = ctx.value(close)
   return { edge, inventory: pnl - edge, pnl }
 }
 
-export function byQueue(ctx, tape, horizon = 1) {
-  const rows = [0, 1, 2, 3].map((k) => ({ k, n: 0, markout: 0 }))
+function markoutBy(ctx, tape, group, k, horizon) {
+  const rows = Array.from({ length: k }, () => ({ n: 0, markout: 0 }))
   for (const f of ctx.fills) {
-    const r = rows[Math.min(f.ahead, 3)]
+    const r = rows[group(f)]
     r.n++
     r.markout += (f.side === BUY ? 1 : -1) * (midAt(tape, f.t + horizon) - f.price)
   }
@@ -58,13 +72,16 @@ export function byQueue(ctx, tape, horizon = 1) {
   return rows
 }
 
+export const byQueue = (ctx, tape, horizon = 1) => markoutBy(ctx, tape, (f) => Math.min(f.ahead, 3), 4, horizon)
+
+export const byLevel = (ctx, tape, horizon = 1) => markoutBy(ctx, tape, (f) => (f.left === 0 ? 1 : 0), 2, horizon)
+
 export class Live {
   constructor(seed, cfg) {
     this.names = Object.keys(makers(cfg))
-    const { market, ctx } = open(new ZeroIntelligence(skyPerfect()), makers(cfg), mulberry32(seed), {
-      minutes: MINUTES,
-      warm: WARM,
-    })
+    const { flow, crowd } = world(cfg, seed)
+    const { market, ctx } = open(flow, makers(cfg), mulberry32(seed), { minutes: MINUTES, warm: WARM, crowd })
+    this.informed = crowd.length ? market.contexts[this.names.length] : null
     this.market = market
     this.ctx = ctx
     this.start = market.t
@@ -74,6 +91,7 @@ export class Live {
     this.quotes = Object.fromEntries(this.names.map((n) => [n, { bid: [], ask: [] }]))
     this.q = Object.fromEntries(this.names.map((n) => [n, []]))
     this.pnl = Object.fromEntries(this.names.map((n) => [n, []]))
+    this.value = []
     this.sample()
   }
 
@@ -94,6 +112,7 @@ export class Live {
   sample() {
     const mark = this.market.mark()
     this.mid.push(mark)
+    this.value.push(this.informed ? this.informed.agent.value.v : NaN)
     for (const name of this.names) {
       const ctx = this.ctx[name]
       const [bid, ask] = this.resting(name)
@@ -120,7 +139,8 @@ export class Live {
 export function distribution(cfg, n, first = 1_000_000) {
   const out = Object.fromEntries(Object.keys(makers(cfg)).map((k) => [k, []]))
   for (let s = 0; s < n; s++) {
-    const { results } = session(new ZeroIntelligence(skyPerfect()), makers(cfg), mulberry32(first + s))
+    const { flow, crowd } = world(cfg, first + s)
+    const { results } = session(flow, makers(cfg), mulberry32(first + s), { crowd })
     for (const k in out) out[k].push(results[k].pnl)
   }
   return out
@@ -140,7 +160,12 @@ function page() {
   }
   const state = {
     seed: Number(params.get("seed")) || 1 + Math.floor(Math.random() * 99999),
-    cfg: { glft: pick("glft", 0.08), as: pick("as", 0.003) },
+    cfg: {
+      glft: pick("glft", 0.08),
+      as: pick("as", 0.003),
+      hawkes: params.get("flow") === "hawkes",
+      informed: params.get("informed") === "on",
+    },
   }
   const swatch = (name) => color(name === "as" ? "avs" : name)
   let s = null
@@ -161,9 +186,13 @@ function page() {
     s = new Live(state.seed, state.cfg)
     $("seed").value = state.seed
     for (const name of Object.keys(GAMMAS)) $(`${name}-gamma`).value = String(state.cfg[name] ?? "off")
+    $("flow").value = state.cfg.hawkes ? "hawkes" : "poisson"
+    $("informed").value = state.cfg.informed ? "on" : "off"
     $("results").hidden = true
     const q = new URLSearchParams({ seed: state.seed })
     for (const name of Object.keys(GAMMAS)) q.set(name, String(state.cfg[name] ?? "off"))
+    q.set("flow", $("flow").value)
+    q.set("informed", $("informed").value)
     history.replaceState(null, "", `?${q}`)
     render()
   }
@@ -256,6 +285,7 @@ function page() {
 
   function render() {
     const series = [{ data: s.mid, color: color("ink"), width: 2 }]
+    if (s.informed) series.push({ data: s.value, color: color("ask"), width: 1.5, dash: [4, 3] })
     const dots = []
     for (const name of s.names) {
       const c = swatch(name)
@@ -273,6 +303,7 @@ function page() {
     for (const name of Object.keys(GAMMAS)) {
       for (const el of document.querySelectorAll(`.k.${name}`)) el.hidden = !s.names.includes(name)
     }
+    for (const el of document.querySelectorAll(".k.value")) el.hidden = !s.informed
     ladder()
     positions()
   }
@@ -290,15 +321,18 @@ function page() {
         return `<tr><td>${NAMES[name]}</td><td>${signed(edge)}</td><td>${signed(inventory)}</td><td>${signed(pnl)}</td><td>${ctx.fills.length}</td><td>${front}</td></tr>`
       })
       .join("")
-    $("queue").innerHTML = [0, 1, 2, 3]
-      .map((k) => {
+    const rows = (by, labels, cls) =>
+      labels.map((label, k) => {
         const cells = s.names.map((name) => {
-          const r = byQueue(s.ctx[name], m.tape)[k]
+          const r = by(s.ctx[name], m.tape)[k]
           return `<td>${r.n}</td><td>${r.n ? signed(r.markout, 2) : ""}</td>`
         })
-        return `<tr><td>${k === 3 ? "3 or more" : k}</td>${cells.join("")}</tr>`
+        return `<tr class="${cls}"><td>${label}</td>${cells.join("")}</tr>`
       })
-      .join("")
+    $("queue").innerHTML = [
+      ...rows(byQueue, ["0", "1", "2", "3 or more"], ""),
+      ...rows(byLevel, ["level left standing", "level cleared"], "sep"),
+    ].join("")
     $("queue-head").innerHTML =
       "<th>ahead at entry</th>" +
       s.names.map((n) => `<th>${NAMES[n]} fills</th><th>1-min markout</th>`).join("")
@@ -310,6 +344,7 @@ function page() {
       const xs = dist[name]
       return `${NAMES[name]} made ${fmt(pnl)} ticks, better than ${fmt(100 * rank(xs, pnl), 0)}% of 400 other sessions with the same settings (mean ${fmt(mean(xs))}, sd ${fmt(sd(xs))}).`
     })
+    if (s.informed) lead.push(`The informed trader made ${fmt(s.informed.value(close))} on ${s.informed.fills.length} trades.`)
     $("lead").textContent = lead.join(" ")
     $("results").hidden = false
     const all = s.names.flatMap((n) => dist[n])
@@ -337,6 +372,14 @@ function page() {
   })
   $("reseed").addEventListener("click", () => {
     state.seed = 1 + Math.floor(Math.random() * 99999)
+    reset()
+  })
+  $("flow").addEventListener("change", (e) => {
+    state.cfg.hawkes = e.target.value === "hawkes"
+    reset()
+  })
+  $("informed").addEventListener("change", (e) => {
+    state.cfg.informed = e.target.value === "on"
     reset()
   })
   for (const name of Object.keys(GAMMAS)) {

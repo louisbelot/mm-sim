@@ -256,6 +256,14 @@ canvas {
   background: var(--flow);
 }
 
+tr.sep td {
+  border-top: 1px solid var(--line);
+}
+
+.k.value::before {
+  background: repeating-linear-gradient(90deg, var(--ask) 0 4px, transparent 4px 7px);
+}
+
 #depth {
   height: 340px;
 }

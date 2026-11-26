@@ -20,6 +20,12 @@ out. Both fit A = 2.1 and k = 3.6 per minute to this flow.</p>
 <p>Unlike the other page, nothing here fills by formula. An order trades when a market order
 reaches it, which means waiting behind every order that joined the level first. The ladder
 shows each order as a block in queue order, inside edge on the left.</p>
+<p>Two switches make the flow harder. Hawkes market orders arrive in bursts: each one raises
+the rate of the next on the same side by 0.6 and on the other side by 0.1, decaying over
+10 seconds, with the same 0.94 a minute on average. The informed trader watches a value
+that moves like the mid would (1 tick per square-root minute), checks it about once a
+minute, and sends a market order whenever the value is outside the best quotes. Turn them on
+and see which fills hurt: the table at the end splits them by place in the queue.</p>
 </header>
 
 <section class="controls">
@@ -34,6 +40,18 @@ shows each order as a block in queue order, inside edge on the left.</p>
 </label>
 <label>GLFT &gamma; <select id="glft-gamma"></select></label>
 <label>AS &gamma; <select id="as-gamma"></select></label>
+<label>market orders
+<select id="flow">
+<option value="poisson">Poisson</option>
+<option value="hawkes">Hawkes</option>
+</select>
+</label>
+<label>informed trader
+<select id="informed">
+<option value="off">off</option>
+<option value="on">on</option>
+</select>
+</label>
 <label>seed <input id="seed" type="number" min="1" step="1"></label>
 <button id="reseed">New flow</button>
 </section>
@@ -45,6 +63,7 @@ shows each order as a block in queue order, inside edge on the left.</p>
 <div class="legend">
 <span class="k mid">mid</span><span class="k glft">GLFT quotes and fills</span>
 <span class="k as">AS quotes and fills</span>
+<span class="k value">informed value</span>
 </div>
 </div>
 <aside>
@@ -86,7 +105,8 @@ everything the mid did to the position from then on. They add up to the P&amp;L.
 </table>
 <p class="note">Fills grouped by how many shares were ahead of the order when it joined its
 level. The markout is the mid one minute after the fill minus the fill price, signed so that
-a positive number is a gain for the bot.</p>
+a positive number is a gain for the bot. The last rows split them by whether the order
+that filled the bot also emptied its price level.</p>
 <section class="pair">
 <div class="chart" id="dist-glft">
 <div class="head"><span>GLFT P&amp;L over 400 other sessions</span></div>
