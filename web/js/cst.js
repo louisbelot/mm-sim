@@ -36,8 +36,11 @@ export class ZeroIntelligence {
     })
   }
 
-  step(book, rand, ids) {
-    const p = this.p
+  rate() {
+    return this.p.mu
+  }
+
+  menu(book) {
     const bid = book.bid
     const ask = book.ask
     if (bid !== null) this.bid = bid
@@ -49,28 +52,29 @@ export class ZeroIntelligence {
       ["limit", BUY, lam],
       ["limit", SELL, lam],
     ]
-    if (ask !== null) menu.push(["market", BUY, p.mu])
-    if (bid !== null) menu.push(["market", SELL, p.mu])
+    if (ask !== null) menu.push(["market", BUY, this.rate(BUY)])
+    if (bid !== null) menu.push(["market", SELL, this.rate(SELL)])
     for (const side of [BUY, SELL]) {
       for (const l of book.levels(side)) {
         let n = 0
         for (const o of l.orders) if (o.owner === this.owner) n++
         if (n) {
           const i = side === BUY ? this.ask - l.price : l.price - this.bid
-          menu.push(["cancel", l, thetaAt(p, i) * n, n])
+          menu.push(["cancel", l, thetaAt(this.p, i) * n, n])
         }
       }
     }
-    let total = 0
-    for (const m of menu) total += m[2]
-    const dt = expo(rand, total)
-    let u = rand() * total
-    let k = 0
-    while (k < menu.length - 1 && u >= menu[k][2]) u -= menu[k++][2]
-    return { dt, fire: this.#fire(menu[k], rand, ids) }
+    return menu
   }
 
-  #fire([kind, arg, , n], rand, ids) {
+  step(book, rand, ids) {
+    const menu = this.menu(book)
+    const total = sum(menu)
+    const dt = expo(rand, total)
+    return { dt, fire: this.fire(menu[pick(menu, rand() * total)], rand, ids) }
+  }
+
+  fire([kind, arg, , n], rand, ids) {
     if (kind === "cancel") {
       let j = Math.floor(rand() * n)
       for (const o of arg.orders) {
@@ -88,5 +92,84 @@ export class ZeroIntelligence {
     while (i < this.cum.length && u >= this.cum[i - 1]) i++
     const px = arg === BUY ? this.ask - i : this.bid + i
     return (b) => b.submit(id, arg, px, 1, { owner: this.owner })
+  }
+}
+
+function sum(menu) {
+  let total = 0
+  for (const m of menu) total += m[2]
+  return total
+}
+
+function pick(menu, u) {
+  let k = 0
+  while (k < menu.length - 1 && u >= menu[k][2]) u -= menu[k++][2]
+  return k
+}
+
+export function symmetricHawkes(rate, own, cross, beta) {
+  const m = rate * (1 - own - cross)
+  return {
+    mu: [m, m],
+    alpha: [
+      [own * beta, cross * beta],
+      [cross * beta, own * beta],
+    ],
+    beta: [
+      [beta, beta],
+      [beta, beta],
+    ],
+  }
+}
+
+export class HawkesFlow extends ZeroIntelligence {
+  constructor(params, hawkes, owner = 0) {
+    super(params, owner)
+    this.h = hawkes
+    this.t = 0
+    this.s = [
+      [0, 0],
+      [0, 0],
+    ]
+    this.markets = []
+  }
+
+  rate(side, t = this.t) {
+    const { mu, beta } = this.h
+    const s = this.s[side]
+    return mu[side] + s[0] * Math.exp(-beta[side][0] * (t - this.t)) + s[1] * Math.exp(-beta[side][1] * (t - this.t))
+  }
+
+  advance(t) {
+    const { beta } = this.h
+    for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) this.s[i][j] *= Math.exp(-beta[i][j] * (t - this.t))
+    this.t = t
+  }
+
+  step(book, rand, ids, t) {
+    this.advance(t)
+    const menu = this.menu(book)
+    const bound = sum(menu)
+    let dt = 0
+    for (;;) {
+      dt += expo(rand, bound)
+      for (const m of menu) if (m[0] === "market") m[2] = this.rate(m[1], t + dt)
+      const u = rand() * bound
+      if (u >= sum(menu)) continue
+      const choice = menu[pick(menu, u)]
+      const fire = this.fire(choice, rand, ids)
+      if (choice[0] !== "market") return { dt, fire }
+      const at = t + dt
+      const side = choice[1]
+      return {
+        dt,
+        fire: (b) => {
+          this.advance(at)
+          for (let i = 0; i < 2; i++) this.s[i][side] += this.h.alpha[i][side]
+          this.markets.push([at, side])
+          return fire(b)
+        },
+      }
+    }
   }
 }
