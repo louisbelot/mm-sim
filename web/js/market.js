@@ -64,6 +64,10 @@ class Context {
     this.market.execute(this, (b) => b.cancel(id))
   }
 
+  setTimer(delay) {
+    this.market.timer(this.t + delay, this)
+  }
+
   reduce(id, qty) {
     const o = this.orders.get(id)
     o.qty -= qty
@@ -88,6 +92,8 @@ export class Market {
     this.preMid = null
     this.tape = []
     this.next = null
+    this.timers = []
+    this.seq = 0
   }
 
   seed(bid, ask) {
@@ -109,18 +115,40 @@ export class Market {
   loop(until) {
     for (;;) {
       if (this.next === null) {
-        const { dt, fire } = this.flow.step(this.book, this.rand, this.ids)
+        const { dt, fire } = this.flow.step(this.book, this.rand, this.ids, this.t)
         this.next = { at: this.t + dt, fire }
       }
-      if (this.next.at > until) {
-        this.t = until
-        return
+      const k = this.soonest()
+      if (k >= 0 && this.timers[k].at < this.next.at) {
+        const { at, ctx } = this.timers[k]
+        if (at > until) break
+        this.timers.splice(k, 1)
+        this.t = at
+        this.queue(() => ctx.agent.onTimer(ctx))
+        this.drain()
+        continue
       }
+      if (this.next.at > until) break
       const { at, fire } = this.next
       this.next = null
       this.t = at
       this.execute(null, fire)
     }
+    this.t = until
+  }
+
+  timer(at, ctx) {
+    this.timers.push({ at, seq: this.seq++, ctx })
+  }
+
+  soonest() {
+    let k = -1
+    for (let i = 0; i < this.timers.length; i++) {
+      const a = this.timers[i]
+      const b = this.timers[k]
+      if (k < 0 || a.at < b.at || (a.at === b.at && a.seq < b.seq)) k = i
+    }
+    return k
   }
 
   mark() {
@@ -203,13 +231,13 @@ export class Market {
 }
 
 
-export function open(flow, makers, rand, { minutes = 60, warm = 30 } = {}) {
+export function open(flow, makers, rand, { minutes = 60, warm = 30, crowd = [] } = {}) {
   const names = Object.keys(makers)
   for (let i = names.length - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1))
     ;[names[i], names[j]] = [names[j], names[i]]
   }
-  const market = new Market(flow, names.map((n) => makers[n]()), rand)
+  const market = new Market(flow, [...names.map((n) => makers[n]()), ...crowd], rand)
   market.seed(10_000, 10_001)
   market.warmUp(warm)
   market.start(minutes)
