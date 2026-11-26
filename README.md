@@ -140,6 +140,60 @@ for the rest (se 0.01), the direction Moallemi and Yuan (2016) predict, but
 small, because the zero-intelligence flow carries no information that a
 longer queue would protect against.
 
+Two switches on the page make the flow harder, and both are ports with tests
+against Python as well. Hawkes market orders (`mmsim.flow.HawkesFlow`) arrive
+in bursts: each one adds 0.6 to the branching of its own side and 0.1 to the
+other, decaying at 6 a minute, so the mean rate stays 0.94 a minute a side.
+The informed trader (`mmsim.informed`) watches a random-walk value (1 tick per
+square-root minute), looks about once a minute and sends a market order when
+the value is outside the best quotes. For these the JS market got agent timers,
+and the Hawkes flow samples by thinning from the time it is asked, with the
+excitation applied when its order actually fires, so a step thrown away
+because a bot moved its quote changes nothing. `examples/queue_reference.py`
+runs 2000 Python sessions for each of the six setups below; 250 JS sessions
+per setup agree on P&L, fills, position, fills at the front and summed 1-minute
+markout within 4 standard errors on the mean and on the standard deviation
+(the second with a kurtosis-aware error, since Hawkes sessions are fat
+tailed). Over 2000 JS sessions the largest gap on 45 statistics was 2.1
+standard errors. The rescaled market order gaps pass a Kolmogorov-Smirnov test
+against Exp(1) under the true kernel and fail by more than 3x the critical
+value under Poisson rates.
+
+P&L per hour in ticks, 2000 sessions each (`node web/study.js`), GLFT gamma
+0.08 and AS gamma 0.003 as above:
+
+| flow | bot | P&L (se) | edge at fill | after the fill | fills |
+|---|---|---|---|---|---|
+| Poisson, informed | GLFT alone | 9.00 (0.31) | 29.37 | -20.37 | 37.8 |
+| Hawkes | GLFT alone | -9.30 (0.74) | 30.82 | -40.12 | 36.1 |
+| Hawkes, informed | GLFT alone | -5.52 (0.68) | 42.70 | -48.22 | 50.0 |
+| Hawkes | together, GLFT | -12.23 (0.65) | 18.74 | -30.98 | 26.9 |
+| Hawkes | together, AS | -14.49 (0.76) | 20.06 | -34.56 | 32.2 |
+
+Bursts hurt more than the informed trader does. Alone under Hawkes flow, GLFT
+fills more often and its edge rises from 18.66 to 30.82 ticks an hour, but
+what the mid does after the fills goes from -6.74 to -40.12, because a burst
+walks through the quote and keeps going.
+
+The queue table at the end of the page now splits each fill into its edge and
+the 1-minute move of the mid after it, and it is the move that carries the
+adverse selection. Measured that way, the place in the queue at entry is a
+poor predictor. A GLFT order that joined with nobody ahead earns more edge
+(0.91 ticks against 0.75 with three or more ahead, Hawkes flow, alone), but
+the mid then moves 0.74 against it, against 0.55 for the back of a queue. An
+order with nobody ahead is usually alone at its price, so the market order
+that fills it also empties the level. That is what predicts the move: under
+Poisson flow the fills that cleared their level lost 0.30 ticks in the next
+minute and the ones that left a queue standing lost 0.02; under Hawkes, 0.96
+against 0.38. This is the mechanism behind Moallemi and Yuan's (2016) queue
+value, where a deep order only fills when a trade is big enough to go through
+it, but here every market order is one lot, so being at the back of a long
+queue rarely means being the last share before the price moves. The one case
+where the front looks protected (GLFT together, Hawkes, move 0.00 with nobody
+ahead against -0.82 one share back) is a bot improving the price inside a
+wide spread right after a burst, when the next market order is as likely to
+come from the other side.
+
 ## Four market makers, one chart
 
 Each bot below trades alone in 1000 sessions of 60 minutes on the
@@ -455,6 +509,37 @@ instant it happens, and it takes about a quarter fewer fills from the informed
 trader. Without informed flow it is close to neutral (+4.5 for GLFT, -1.1 for
 the touch quoter), and at keep = 2 the bot starts missing fills that were worth
 having.
+
+### Queue position on the real tape
+
+`examples/queue_fills.py` asks the same question of the ITCH replay: six
+symbols, twelve half-hour sessions each, both 100-share bots, the sweep fill
+rule. Each maker fill keeps the shares that were ahead when the quote joined
+its level and whether the aggressor left anything at the price. Queue ahead is
+bucketed within each symbol (nobody ahead, then terciles of the rest, since a
+long queue in AAPL is 200 shares and in QQQ 2600) and pooled with standard
+errors clustered by session, in basis points:
+
+| keep priority | shares | edge | move 1 s | move 1 min | 1-min markout (se) |
+|---|---|---|---|---|---|
+| nobody ahead | 735,797 | 0.31 | -0.61 | -0.80 | -0.49 (0.13) |
+| short queue | 896,604 | 0.40 | -0.66 | -0.66 | -0.26 (0.06) |
+| middle | 600,259 | 0.45 | -0.72 | -0.90 | -0.46 (0.09) |
+| long queue | 619,084 | 0.44 | -0.70 | -0.76 | -0.31 (0.07) |
+| level left standing | 541,503 | 0.52 | -0.48 | -0.53 | -0.00 (0.06) |
+| level cleared | 2,310,241 | 0.36 | -0.71 | -0.82 | -0.46 (0.05) |
+
+![queue position and fill quality on ITCH](docs/queue_fills.png)
+
+The real tape says the same as the simulator. Queue ahead at entry has no
+monotone effect: the four buckets run from -0.26 to -0.49 bp in no order, and
+no two are more than 2 standard errors apart. Fills whose aggressor emptied the
+level lose 0.46 bp in the next minute and fills that left a queue behind lose
+nothing. The split holds on every symbol: CSCO 0.23 against -0.86, INTC 0.01
+against -0.89, CMCSA 0.18 against -1.01, MSFT 0.22 against -0.29, AAPL -0.21
+against -0.45 and QQQ -0.04 against -0.33. Most of the move happens within one
+second. Join the touch gives the same table within two standard errors. The
+terciles are uneven because many queues sit at exactly 100 or 200 shares.
 
 ## Latency
 
