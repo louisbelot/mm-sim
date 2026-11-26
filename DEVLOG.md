@@ -2895,3 +2895,126 @@ Measured (`node web/study.js`, 2000 sessions of 60 minutes):
 Next: put the informed trader and the Hawkes flow on the page, so that queue
 position meets adverse selection, and the same fill-quality table on the
 Python side for the ITCH replay.
+
+## 2026-11-25: queue position meets adverse selection
+
+Built:
+
+- Agent timers in the JS market (`ctx.setTimer`), so an agent can act on its
+  own clock instead of only reacting to the book. A timer runs before the
+  next flow event when it comes first; ties go to the flow, as in Python.
+  `open` and `session` take a `crowd` of extra agents that are not scored.
+- `HawkesFlow` in `web/js/cst.js`: the zero-intelligence flow with market
+  orders from a two-dimensional exponential Hawkes process, sampled by Ogata
+  thinning. The menu building and the order firing were split out of
+  `ZeroIntelligence.step` so the subclass only changes the market order
+  rates. The flow is asked for its next event at the market's current time
+  and decays its state to then; the jump in intensity is applied inside the
+  command when the order actually fires. A sampled event that gets thrown
+  away because a bot moved a quote therefore leaves no trace, which is what
+  keeps frame-by-frame play equal to one-shot play.
+- `web/js/informed.js`: `Fundamental` (Brownian value, drawn lazily at the
+  times it is read) and `InformedTrader` (Poisson clock, market order when the
+  value is outside the full book's best quotes by more than `edge`), ports of
+  `mmsim.informed`.
+- The book page has two new switches, Hawkes market orders and the informed
+  trader, kept in the URL. The informed value is drawn on the price chart as
+  a dashed line, the result lists the informed trader's P&L, and the queue
+  table has two new rows: fills whose aggressor cleared the level and fills
+  that left a queue standing.
+- `examples/queue_reference.py` writes `web/test/queue_reference.json`: 2000
+  Python sessions for three worlds (informed, Hawkes, both) and two games
+  (GLFT alone, GLFT with AS), five statistics per bot.
+- `markout.grouped` (share-weighted markout sums by group) and
+  `examples/queue_fills.py`, the same question on the ITCH replay.
+
+Bug found on the way: on a one-sided book the pre-trade mid is null, and the
+JS split computed `null - price`, which JavaScript turns into about -10000
+instead of an error. The fix leaves every Poisson and informed-flow row of
+the study unchanged, but Hawkes bursts empty a side often enough that the
+first study run had a mean edge of -27 ticks in one bucket. The JS split now does what the Python attribution does and
+gives such a fill no edge. A test runs 40 Hawkes sessions, checks that
+one-sided fills happen, and requires the summed edge to be non-negative.
+
+Checks (`npm test` in `web/`, 32 tests, 27 s; pytest suite green):
+
+- Timers: a clock agent every 0.25 minutes over 10 minutes, driven in 0.1
+  frames, fires 40 times on time to 1e-9 and the tape stays in time order.
+- Hawkes rate on a book three times as deep (so neither side empties): 20,000
+  minutes give 1.92 to 1.94 market orders a minute against 1.88, inside the
+  4 sd band of sqrt(rate / w) / (1 - 0.7) = 0.13. On the normal thin book the
+  same run gives 1.79 and Python's 60-minute sessions 1.83: when a burst
+  empties the far side, market orders on that side have nowhere to go and
+  the menu drops them.
+- Time rescaling: the compensator of each side's market orders, computed from
+  the recorded times with the true kernel, turns the gaps into Exp(1) draws
+  that pass a KS test at the 1% level over 2000 minutes; with Poisson rates
+  the statistic is more than 3 times the critical value.
+- Informed trader scripted against a 99/101 book: value 103 buys, 97 sells,
+  100 and 101 do nothing, edge 2 stops 103 and lets 103.5 through.
+  Fundamental increments over 40,000 steps have variance sigma^2 dt within 3%.
+- 600 JS Hawkes-only sessions match Python's mid change and market order
+  count. 250 JS sessions per setup match all 45 statistics within 4 standard
+  errors on the mean and on the sd. The sd error uses the sample kurtosis
+  (se of sd = sd sqrt((kurt - 1) / 4n)); the flat 15% tolerance from the
+  Poisson tests failed once at 23% on a fat-tailed Hawkes markout. A
+  2000-session JS run against the reference had a largest gap of 2.1 se and
+  sd ratios between 0.93 and 1.16.
+- Frame-by-frame equals one-shot, fill for fill, with Hawkes flow and the
+  informed trader on.
+- `grouped` against `totals` on hand-built fills.
+
+Measured (`node web/study.js`, 2000 sessions per row; edge and move in ticks
+per fill, move is the mid one minute later minus the mid before the fill):
+
+- GLFT alone: Poisson 11.91 an hour, with the informed trader 9.00, with
+  Hawkes flow -9.30, with both -5.52. Under Hawkes the edge is 30.82 and the
+  after-fill part -40.12 (Poisson: 18.66 and -6.74).
+- Splitting the markout into edge and move changes last run's reading. Under
+  Poisson flow GLFT's fills with nobody ahead earn 0.82 edge but move -0.14,
+  against 0.66 and -0.02 with three or more ahead. The better markout at the
+  front was all edge from improving the price. Under Hawkes: 0.91 and -0.74
+  against 0.75 and -0.55.
+- What predicts the move is whether the fill emptied the level: -0.30 against
+  -0.02 (Poisson, alone), -0.38 against -0.08 (informed), -0.96 against -0.38
+  (Hawkes). Alone, GLFT clears its level on 18% of fills under Poisson and 54%
+  under Hawkes.
+- Together under Hawkes, GLFT's fills with nobody ahead move 0.00 against
+  -0.82 one share back. These are mostly quotes that improved a wide spread
+  right after a burst.
+
+ITCH replay (`examples/queue_fills.py`, 3.2 minutes, six symbols, twelve
+30-minute sessions, sweep rule, 100-share quotes; basis points, se clustered
+by session):
+
+- Queue ahead at entry, bucketed within each symbol (nobody, then terciles),
+  keep priority: 1-minute markout -0.49 (0.13), -0.26 (0.06), -0.46 (0.09),
+  -0.31 (0.07). No order to it.
+- Level left standing 0.00 (0.06), cleared -0.46 (0.05), with cleared worse on
+  all six symbols, from 0.23 against -0.86 (CSCO) to -0.04 against -0.33
+  (QQQ). The move is mostly done within a second.
+- The first ITCH run used absolute share buckets pooled across symbols and
+  showed a jagged non-pattern that was mostly symbol mix (AAPL queues are
+  100 to 200 shares, QQQ's run to 2600), so the buckets are now ranked within
+  each symbol.
+
+Design notes:
+
+- Thinning with a stored next event is valid because the Hawkes intensity
+  only decays between events: the bound taken at the time of the request
+  stays above the true rate until the next accepted event, and resampling
+  from a later time after an agent action is the same conditional law.
+- The Albers, Cucuringu, Howison and Shestopaloff (2025) market maker's
+  dilemma paper compares front-decile and back-quartile fills on Binance
+  perpetuals; their conditioning on the queue behind the order is the same
+  thing the cleared/standing split measures here.
+- A headless Edge screenshot of the new page state came out blank (dark
+  theme, canvases not drawn by the time of capture), so the README keeps the
+  older screenshot. A DOM dump confirmed the page renders with the new
+  controls.
+
+Next: give the bots the cleared-level signal. A quote that is alone at its
+price (nothing behind it) is the one that gets run over, so a maker could
+widen or step back when it would be the last order at a level, and the same
+rule can be scored on the ITCH replay. After that, market orders of random
+size on the book page, so a long queue can be eaten in one print.
