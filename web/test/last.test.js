@@ -4,7 +4,8 @@ import { test } from "node:test"
 import { BUY, Book, SELL } from "../js/book.js"
 import { Touch, others } from "../js/bots.js"
 import { ZeroIntelligence, drawSize, itchSizes, skyPerfect, zetaSizes } from "../js/cst.js"
-import { Market } from "../js/market.js"
+import { Live, makers, world } from "../js/live.js"
+import { Market, session } from "../js/market.js"
 import { mulberry32 } from "../js/rng.js"
 
 function fakeCtx() {
@@ -106,4 +107,16 @@ test("own orders do not count as company", () => {
     [BUY, 100],
     [SELL, 101],
   ])
+})
+
+test("frame by frame equals one shot with big orders and the last-share rule", () => {
+  const cfg = { glft: 0.08, as: 0.003, hawkes: true, informed: true, sizes: true, thin: 1 }
+  for (const seed of [5, 77]) {
+    const live = new Live(seed, cfg)
+    while (!live.done) live.step()
+    const { flow, crowd } = world(cfg, seed)
+    const { results } = session(flow, makers(cfg), mulberry32(seed), { crowd })
+    for (const name of live.names) assert.deepEqual(live.ctx[name].fills, results[name].ctx.fills)
+    assert.ok(live.ctx.glft.fills.length > 0)
+  }
 })

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs"
 import { test } from "node:test"
 
 import { BUY, Book, SELL } from "../js/book.js"
-import { HawkesFlow, ZeroIntelligence, skyPerfect, symmetricHawkes } from "../js/cst.js"
+import { HawkesFlow, ZeroIntelligence, itchSizes, skyPerfect, symmetricHawkes } from "../js/cst.js"
 import { Fundamental, InformedTrader } from "../js/informed.js"
 import { Live, byLevel, edgeOf, makers, midAt, split, world } from "../js/live.js"
 import { Market, session } from "../js/market.js"
@@ -225,15 +225,24 @@ function stats(ctx, tape, close) {
   return { pnl: ctx.value(close), fills: ctx.fills.length, position: ctx.position, front, markout }
 }
 
-test("sessions with hawkes flow and informed trading match python", () => {
+test("itch sizes match python to rounding", () => {
+  const { pmf } = itchSizes()
+  assert.equal(pmf.length, ref.sizes.length)
+  pmf.forEach((p, k) => close(p, ref.sizes[k], 1e-14, `size ${k + 1}`))
+})
+
+test("sessions with bursts, informed trading, big orders and the last-share rule match python", () => {
   const n = 250
   for (const [key, want] of Object.entries(ref.games)) {
     const [w, game] = key.split("/")
+    const flags = w.split("+")
     const cfg = {
       glft: 0.08,
       as: game === "both" ? 0.003 : null,
-      hawkes: w.startsWith("hawkes"),
-      informed: w.endsWith("informed"),
+      thin: game === "last" ? 1 : 0,
+      hawkes: flags.includes("hawkes"),
+      informed: flags.includes("informed"),
+      sizes: flags.includes("sizes"),
     }
     const rows = []
     for (let s = 0; s < n; s++) {
