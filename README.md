@@ -175,6 +175,13 @@ fills more often and its edge rises from 18.66 to 30.82 ticks an hour, but
 what the mid does after the fills goes from -6.74 to -40.12, because a burst
 walks through the quote and keeps going.
 
+Two more switches put market orders of real sizes on the page and give GLFT a
+rule that steps back from a price where it would be alone; both are explained
+under queue position below. The Python reference now has 15 setups, and 250 JS
+sessions for each match it in the same way. A session with Hawkes flow, the
+informed trader, real sizes and the rule on is still the same frame by frame
+as in one run.
+
 The queue table at the end of the page now splits each fill into its edge and
 the 1-minute move of the mid after it, and it is the move that carries the
 adverse selection. Measured that way, the place in the queue at entry is a
@@ -540,6 +547,93 @@ against -0.89, CMCSA 0.18 against -1.01, MSFT 0.22 against -0.29, AAPL -0.21
 against -0.45 and QQQ -0.04 against -0.33. Most of the move happens within one
 second. Join the touch gives the same table within two standard errors. The
 terciles are uneven because many queues sit at exactly 100 or 200 shares.
+
+### Market orders are not one lot
+
+The zero-intelligence flow sends market orders of one lot, and the ITCH day
+says that is wrong in an important way. `examples/order_sizes.py` takes every
+market order on six symbols from `calibrate` (shares hit on one side in one
+timestamp), divides by the symbol's mean limit order size, which is the unit
+Cont, Stoikov and Talreja count queues in, and rounds to whole lots with a
+floor of 1 and a cap of 20. Then it fits two one-parameter laws on 1 to 20 by
+maximum likelihood: a truncated discrete power law, P(k) proportional to
+k^-alpha, and a truncated geometric. Both are exponential families, so the fit
+sets the model mean of log k (or k) equal to the sample mean and solves for
+the parameter with Brent's method. `sizes.vuong` compares them with Vuong's
+likelihood ratio test.
+
+| symbol | orders | above 1 lot | mean lots | alpha | Vuong z, zeta vs geometric |
+|---|---|---|---|---|---|
+| CSCO | 4,008 | 24.1% | 1.85 | 2.36 | 17.3 |
+| INTC | 7,551 | 22.0% | 1.63 | 2.55 | 18.4 |
+| CMCSA | 4,420 | 26.0% | 1.84 | 2.34 | 16.9 |
+| MSFT | 17,320 | 25.0% | 1.51 | 2.60 | 12.5 |
+| AAPL | 37,245 | 21.8% | 1.50 | 2.68 | 23.9 |
+| QQQ | 13,078 | 9.4% | 1.21 | 3.53 | 14.3 |
+| pooled | 83,622 | 20.9% | 1.50 | 2.69 | 42.7 |
+
+![market order sizes on ITCH](docs/order_sizes.png)
+
+The power law wins on every symbol. Pooled, it puts 0.786 on one lot, 0.122
+on two and 0.041 on three, against 0.791, 0.113 and 0.041 in the data; the
+geometric says 0.666, 0.223 and 0.074 and has nothing left by ten lots. The
+exponents sit around 2.4 to 2.7, near the 2.4 Maslov and Mills (2001) found
+for NASDAQ marketable orders, and QQQ, with its deep queues and small prints,
+is the outlier at 3.5. The simulator uses alpha 2.7 capped at 20 lots
+(`Sizes.itch()`, mean 1.48). `ZeroIntelligence(..., sizes=...)` divides the
+market order rate by the mean size so the flow trades the same shares per
+minute; a 3000-minute run on a deep book matches both the order count and the
+share count within 4 standard deviations. With `sizes=None` the flow takes no
+extra random numbers, and every Python reference session from before is
+unchanged to the last digit.
+
+### Stepping back from the last share
+
+The queue table above says the fills that hurt are the ones that empty their
+level. With one-lot market orders that happens only when the quote is the
+only order at its price. So the quoters got a rule: `thin=n` means that if
+other traders have fewer than n lots at the target price, the quote moves one
+tick away from the mid (up to `back` ticks). The rule sits in
+`mmsim.bots.Quoter` and its JS port, and runs after the model's target and
+before the post-only and position checks. `examples/last_share.py` gives it to
+GLFT (gamma 0.08, alone) in five worlds, 2000 one-hour sessions each, with the
+same seeds for every rule so the differences are paired:
+
+| world | P&L, rule off | alone | change (se) | under 2 lots | change (se) | fills off, alone |
+|---|---|---|---|---|---|---|
+| Poisson | 12.58 | 11.69 | -0.89 (0.32) | 5.98 | -6.60 (0.33) | 26.5, 21.3 |
+| informed trader | 9.46 | 6.54 | -2.92 (0.40) | 3.70 | -5.76 (0.38) | 38.0, 26.4 |
+| Hawkes | -8.52 | 7.38 | +15.89 (0.92) | 6.95 | +15.46 (0.95) | 36.1, 22.6 |
+| ITCH sizes | 3.29 | 5.18 | +1.89 (0.45) | 4.00 | +0.71 (0.47) | 26.1, 22.1 |
+| Hawkes and ITCH sizes | -27.31 | -3.86 | +23.45 (1.20) | -1.57 | +25.74 (1.20) | 30.8, 22.5 |
+
+![the last-share rule across worlds](docs/last_share.png)
+
+When the flow has no memory, the rule only throws away good fills. A quote
+alone inside the spread earns the most edge, and with Poisson flow the next
+market order is as likely to come from the other side. The informed trader is
+the same story: it trades on the value, not on how thin the book is, so
+stepping back mostly loses volume. Bursts turn the sign. Under Hawkes flow the
+lone quote is the one sitting where the last burst emptied the level, the next
+order of the burst comes from the same side, and stepping back turns -8.5
+ticks an hour into +7.4. With real sizes on top, GLFT loses 27.3 ticks an
+hour without the rule and 3.9 with it. Being alone also covers being the last
+lot of a level that is about to go: the share of fills that cleared their level
+falls from 54% to 32% under Hawkes. Stepping back two ticks instead of one
+adds 0.7 to 3.2 ticks an hour wherever the rule pays and costs 0.4 under
+Poisson flow. The stricter thresholds cut fills hard and only beat "alone"
+when bursts and big orders come together.
+
+On the ITCH replay (the 100-share symmetric quoter that keeps priority, 12
+half-hour sessions per symbol, sweep fills) "alone" means nothing beside you
+at all, and it rarely fires, because that quoter joins existing levels instead
+of improving them. It changes AAPL, where queues are often one order long, by
++$360 a session (se 125). Counting shares instead helps much more. With "fewer
+than 200 other shares at the price", AAPL loses $262 a session instead of
+$1,617 (+1,355, se 241), on a third of the volume and at -0.53 instead of
+-1.20 cents a share. MSFT and QQQ improve by about two standard errors. The
+other three move within noise. The quoter still loses money on most symbols;
+the rule cuts the bad volume first. It does not make the quotes good.
 
 ## Latency
 
