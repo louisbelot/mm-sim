@@ -3018,3 +3018,97 @@ price (nothing behind it) is the one that gets run over, so a maker could
 widen or step back when it would be the last order at a level, and the same
 rule can be scored on the ITCH replay. After that, market orders of random
 size on the book page, so a long queue can be eaten in one print.
+
+## 2026-11-27: big market orders, and stepping back from the last share
+
+Built:
+
+- `mmsim.sizes`: a `Sizes` distribution on 1 to cap lots (inverse-CDF draw
+  with one uniform), truncated zeta and geometric families, maximum
+  likelihood fits for both, `units` (shares to lots of the mean limit order,
+  floor 1, capped) and Vuong's likelihood ratio test. `Sizes.itch()` is the
+  zeta law with alpha 2.7 and cap 20.
+- `ZeroIntelligence` and `HawkesFlow` take `sizes=`. The base flow divides
+  its market order rate by the mean size so shares per minute stay at mu; the
+  Hawkes flow keeps its own order rates, so callers build the kernel from
+  mu / mean. The size is drawn when the order is chosen, from the same random
+  stream, and only when sizes are on.
+- `examples/order_sizes.py`: the size fit on six ITCH symbols, with a chart.
+- `thin` and `back` on the Python quoters (GLFT and the symmetric quoter) and
+  on every JS quoter: when others hold fewer than `thin` lots at the target
+  price, step one tick away from the mid, at most `back` times.
+- Book page: "market order size" (one lot or ITCH sizes) and "GLFT last
+  share" (off, alone, under 2), kept in the URL.
+- `examples/queue_reference.py` now writes 15 setups (five worlds, three
+  games) plus the size pmf; the JS test checks all of them.
+- `examples/last_share.py`: GLFT with five rules in five worlds, paired
+  seeds, then the symmetric quoter with share thresholds on the ITCH replay.
+
+Checks (pytest green, `npm test` 41 tests):
+
+- Sizes: zeta with cap 10^6 gives P(1) = 1/zeta(2.5) to 1e-8 and the mean
+  zeta(1.5)/zeta(2.5) to 1e-3; draws match the pmf cell by cell within 4 sd
+  over 200,000; the zeta MLE recovers alpha 1.5, 2.7 and 3.5 within 4 Fisher
+  standard errors, the geometric MLE recovers q = 0.4 the same way and matches
+  the sample mean exactly; Vuong picks the true law on 5000 draws either way.
+- Flow: on a book three times as deep, 3000 minutes give the right number of
+  market orders (rate mu / mean) and the right number of shares (compound
+  Poisson variance rate E[K^2]) within 4 sd, and some orders walk two levels.
+  Same test in JS.
+- The 6 old reference setups are bit-identical after the change, which is
+  the check that sizes=None draws nothing.
+- JS pmf equals Python's to 1e-14. 250 JS sessions per setup match all 15 x 5
+  statistics within 4 se on mean and sd. Frame-by-frame equals one-shot with
+  everything on.
+- Rule: scripted books for thin 1 and 6, back 1 and 2; joining once someone
+  else is at the price and leaving after that order trades; own orders do
+  not count.
+
+Measured, market order sizes in lots of the mean limit order (6 symbols, 09:35
+to 15:55): alpha 2.36 (CSCO), 2.55 (INTC), 2.34 (CMCSA), 2.60 (MSFT), 2.68
+(AAPL), 3.53 (QQQ), pooled 2.69 on 83,622 orders. Vuong z for zeta over
+geometric 12.5 to 23.9 per symbol, 42.7 pooled. Pooled P(1), P(2), P(3): data
+0.791, 0.113, 0.041; zeta 0.786, 0.122, 0.041; geometric 0.666, 0.223, 0.074.
+
+Measured, GLFT alone, P&L per hour in ticks, 2000 sessions, change against the
+same seeds with the rule off (se):
+
+- Poisson: 12.58; alone -0.89 (0.32), under 2 -6.60, under 3 -9.32.
+- Informed trader: 9.46; alone -2.92 (0.40).
+- Hawkes: -8.52; alone +15.89 (0.92), two ticks back +16.59.
+- ITCH sizes: 3.29; alone +1.89 (0.45), two back +2.72.
+- Hawkes and sizes: -27.31; alone +23.45 (1.20), under 3 +26.22, two back
+  +26.65.
+
+ITCH replay, symmetric quoter, 100 shares, keep priority, change in dollars
+per half-hour session (se over 12 sessions): "alone" moves only AAPL (+360,
+125). "Under 200 shares from others": AAPL +1,355 (241), MSFT +127 (66), QQQ
++111 (59), the other three within noise. AAPL's cents per share go from -1.20
+to -0.53 on a third of the volume.
+
+Design notes:
+
+- Units: Cont-Stoikov-Talreja count everything in mean limit order sizes, so
+  market order sizes go in the same unit. Prints below half a lot round up to
+  one, which is why P(1) is 0.79 while the median print is under one lot.
+- The zeta and geometric fits are one-line exponential-family moment
+  matches, and Brent on the truncated mean is exact, so the fit has no
+  optimizer settings to tune.
+- The rule is defined on what others hold at the price, not on the queue
+  behind the bot's own order: a freshly joined order always has nothing
+  behind it, so "nothing behind me" would fire on every quote.
+- Why it pays only with bursts: with Poisson flow the next market order is
+  independent of where the last one stopped, so a lone quote inside the
+  spread is the best fill there is. With Hawkes flow the next order is likely
+  from the same side, and the lone quote is exactly where the last one
+  stopped. The informed trader acts on the value, not on the book, so the
+  rule cannot see it coming.
+- On the replay the threshold is in shares, which means different things on
+  different symbols (AAPL queues are a few hundred shares, CSCO's thousands);
+  that is part of why the gains concentrate in AAPL.
+
+Next: Moallemi-Yuan queue value with these sizes. A deep order now fills only
+against a big print, so the value of a place in the queue can be measured on
+the book page and compared with their formula. After that, a rule that uses
+the size law directly: the probability that the next market order eats past
+the quote, given what sits ahead of and beside it.
