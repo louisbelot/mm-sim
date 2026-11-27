@@ -2,12 +2,22 @@ import { quotes as asQuotes } from "./as.js"
 import { BUY, SELL } from "./book.js"
 import { Model } from "./glft.js"
 
+export function others(book, side, px, owner) {
+  const l = book.level(side, px)
+  if (l === null) return 0
+  let n = 0
+  for (const o of l.orders) if (o.owner !== owner) n += o.qty
+  return n
+}
+
 class Quoter {
-  constructor({ size = 1, maxPosition = null, keep = 0, inside = true } = {}) {
+  constructor({ size = 1, maxPosition = null, keep = 0, inside = true, thin = 0, back = 1 } = {}) {
     this.size = size
     this.maxPosition = maxPosition
     this.keep = keep
     this.inside = inside
+    this.thin = thin
+    this.back = back
     this.ids = [null, null]
   }
 
@@ -25,6 +35,10 @@ class Quoter {
 
   requote(ctx) {
     let [bid, ask] = this.targets(ctx)
+    if (this.thin) {
+      bid = this.stepBack(ctx, BUY, bid)
+      ask = this.stepBack(ctx, SELL, ask)
+    }
     if (!this.inside) {
       if (bid !== null && ctx.bid !== null) bid = Math.min(bid, ctx.bid)
       if (ask !== null && ctx.ask !== null) ask = Math.max(ask, ctx.ask)
@@ -35,6 +49,16 @@ class Quoter {
     }
     this.quote(ctx, BUY, bid)
     this.quote(ctx, SELL, ask)
+  }
+
+  stepBack(ctx, side, px) {
+    if (px === null) return null
+    const away = side === BUY ? -1 : 1
+    for (let i = 0; i < this.back; i++) {
+      if (others(ctx.book, side, px, ctx.owner) >= this.thin) break
+      px += away
+    }
+    return px
   }
 
   quote(ctx, side, px) {

@@ -14,10 +14,34 @@ export function thetaAt(p, i) {
 
 export const expo = (rand, rate) => -Math.log(1 - rand()) / rate
 
+export const ITCH_ALPHA = 2.7
+export const ITCH_CAP = 20
+
+export function zetaSizes(alpha, cap) {
+  const w = []
+  for (let k = 1; k <= cap; k++) w.push(k ** -alpha)
+  const total = w.reduce((a, b) => a + b, 0)
+  const pmf = w.map((x) => x / total)
+  const cum = []
+  let s = 0
+  for (const p of pmf) cum.push((s += p))
+  return { pmf, cum, mean: pmf.reduce((a, p, i) => a + (i + 1) * p, 0) }
+}
+
+export const itchSizes = () => zetaSizes(ITCH_ALPHA, ITCH_CAP)
+
+export function drawSize(sizes, rand) {
+  const u = rand() * sizes.cum[sizes.cum.length - 1]
+  let k = 0
+  while (k < sizes.cum.length - 1 && u >= sizes.cum[k]) k++
+  return k + 1
+}
+
 export class ZeroIntelligence {
-  constructor(params, owner = 0) {
+  constructor(params, owner = 0, sizes = null) {
     this.p = params
     this.owner = owner
+    this.sizes = sizes
     this.cum = []
     let s = 0
     for (const x of params.lam) this.cum.push((s += x))
@@ -37,7 +61,7 @@ export class ZeroIntelligence {
   }
 
   rate() {
-    return this.p.mu
+    return this.sizes === null ? this.p.mu : this.p.mu / this.sizes.mean
   }
 
   menu(book) {
@@ -85,7 +109,10 @@ export class ZeroIntelligence {
       }
     }
     const id = ids()
-    if (kind === "market") return (b) => b.submit(id, arg, 0, 1, { owner: this.owner, market: true })
+    if (kind === "market") {
+      const qty = this.sizes === null ? 1 : drawSize(this.sizes, rand)
+      return (b) => b.submit(id, arg, 0, qty, { owner: this.owner, market: true })
+    }
     const lam = this.cum[this.cum.length - 1]
     const u = rand() * lam
     let i = 1
@@ -123,8 +150,8 @@ export function symmetricHawkes(rate, own, cross, beta) {
 }
 
 export class HawkesFlow extends ZeroIntelligence {
-  constructor(params, hawkes, owner = 0) {
-    super(params, owner)
+  constructor(params, hawkes, owner = 0, sizes = null) {
+    super(params, owner, sizes)
     this.h = hawkes
     this.t = 0
     this.s = [
