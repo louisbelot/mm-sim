@@ -86,7 +86,6 @@ def zeta_alpha(s: Sizes) -> float:
     return float(p[0] - p[1]) / math.log(2)
 
 
-def vuong(a: Sizes, b: Sizes, k: np.ndarray) -> tuple[float, float]:
+def vuong(a: Sizes, b: Sizes, k: np.ndarray) -> float:
     d = a.logpmf(k) - b.logpmf(k)
-    z = float(d.sum() / (math.sqrt(len(d)) * d.std()))
-    return float(d.sum()), z
+    return float(d.sum() / (math.sqrt(len(d)) * d.std()))

@@ -43,7 +43,7 @@ if __name__ == "__main__":
         k = units(shares, unit, CAP)
         ks[symbol] = k
         z, g = fit_zeta(k, CAP), fit_geometric(k, CAP)
-        _, vz = vuong(z, g, k)
+        vz = vuong(z, g, k)
         print(
             f"{symbol:6s} {unit:5.0f} {len(k):8d}  {np.mean(k > 1):6.1%}  {k.mean():5.2f}"
             f"  {zeta_alpha(z):5.2f}  {g.pmf[1] / g.pmf[0]:6.3f}  {vz:8.1f}"
@@ -51,7 +51,7 @@ if __name__ == "__main__":
         )
     pooled = np.concatenate(list(ks.values()))
     z, g = fit_zeta(pooled, CAP), fit_geometric(pooled, CAP)
-    _, vz = vuong(z, g, pooled)
+    vz = vuong(z, g, pooled)
     sim = Sizes.itch()
     print(
         f"pooled {len(pooled)} orders, alpha {zeta_alpha(z):.3f}, vuong z {vz:.1f},"

@@ -73,5 +73,5 @@ def test_vuong_picks_the_true_law():
     cap = 30
     for truth, sign in ((Sizes.zeta(2.5, cap), 1), (Sizes.geometric(0.35, cap), -1)):
         k = sample(truth, 5000, 9)
-        _, z = vuong(fit_zeta(k, cap), fit_geometric(k, cap), k)
+        z = vuong(fit_zeta(k, cap), fit_geometric(k, cap), k)
         assert sign * z > 3
