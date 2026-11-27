@@ -26,6 +26,14 @@ the rate of the next on the same side by 0.6 and on the other side by 0.1, decay
 that moves like the mid would (1 tick per square-root minute), checks it about once a
 minute, and sends a market order whenever the value is outside the best quotes. Turn them on
 and see which fills hurt: the table at the end splits them by place in the queue.</p>
+<p>Real market orders are not one lot. On the NASDAQ day this project replays, 21% of the
+83,622 market orders across six symbols were at least one and a half times the average limit
+order, and their sizes follow a power law, P(k) proportional to k<sup>-2.7</sup>, much heavier
+than a geometric fit. With ITCH sizes on, market orders draw from that law (capped at 20 lots)
+and arrive less often, so the same number of shares trades per minute. A big one can eat a
+whole level and the one behind it. The last-share switch gives GLFT a defence: when its quote
+would be alone at its price, or have fewer than two lots from others beside it, it steps one
+tick back.</p>
 </header>
 
 <section class="controls">
@@ -50,6 +58,19 @@ and see which fills hurt: the table at the end splits them by place in the queue
 <select id="informed">
 <option value="off">off</option>
 <option value="on">on</option>
+</select>
+</label>
+<label>market order size
+<select id="sizes">
+<option value="one">one lot</option>
+<option value="itch">ITCH sizes</option>
+</select>
+</label>
+<label>GLFT last share
+<select id="thin">
+<option value="0">off</option>
+<option value="1">step back when alone</option>
+<option value="2">step back under 2</option>
 </select>
 </label>
 <label>seed <input id="seed" type="number" min="1" step="1"></label>

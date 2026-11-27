@@ -1,7 +1,7 @@
 import { BUY, SELL } from "./book.js"
 import { AvellanedaStoikov, GLFT } from "./bots.js"
 import { bars, color, lines } from "./chart.js"
-import { HawkesFlow, ZeroIntelligence, skyPerfect, symmetricHawkes } from "./cst.js"
+import { HawkesFlow, ZeroIntelligence, itchSizes, skyPerfect, symmetricHawkes } from "./cst.js"
 import { Fundamental, InformedTrader } from "./informed.js"
 import { open, session } from "./market.js"
 import { mulberry32 } from "./rng.js"
@@ -16,7 +16,7 @@ export const K = 3.6
 export const Q = 5
 
 export const MAKERS = {
-  glft: (gamma) => () => new GLFT({ sigma: SIGMA, A, k: K, gamma, Q }, { keep: 1 }),
+  glft: (gamma, cfg) => () => new GLFT({ sigma: SIGMA, A, k: K, gamma, Q }, { keep: 1, thin: cfg.thin ?? 0 }),
   as: (gamma) => () => new AvellanedaStoikov({ gamma, sigma: SIGMA, k: K, maxPosition: Q }),
 }
 
@@ -24,7 +24,11 @@ export const NAMES = { glft: "GLFT", as: "AS" }
 
 export function world(cfg, seed) {
   const sky = skyPerfect()
-  const flow = cfg.hawkes ? new HawkesFlow(sky, symmetricHawkes(sky.mu, 0.6, 0.1, 6)) : new ZeroIntelligence(sky)
+  const sizes = cfg.sizes ? itchSizes() : null
+  const rate = sizes === null ? sky.mu : sky.mu / sizes.mean
+  const flow = cfg.hawkes
+    ? new HawkesFlow(sky, symmetricHawkes(rate, 0.6, 0.1, 6), 0, sizes)
+    : new ZeroIntelligence(sky, 0, sizes)
   const crowd = []
   if (cfg.informed) {
     const rand = mulberry32(seed + 0x5eed)
@@ -36,7 +40,7 @@ export function world(cfg, seed) {
 export function makers(cfg) {
   const out = {}
   for (const name of Object.keys(MAKERS)) {
-    if (cfg[name] !== null) out[name] = MAKERS[name](cfg[name])
+    if (cfg[name] !== null) out[name] = MAKERS[name](cfg[name], cfg)
   }
   return out
 }
@@ -165,6 +169,8 @@ function page() {
       as: pick("as", 0.003),
       hawkes: params.get("flow") === "hawkes",
       informed: params.get("informed") === "on",
+      sizes: params.get("sizes") === "itch",
+      thin: [1, 2].includes(Number(params.get("thin"))) ? Number(params.get("thin")) : 0,
     },
   }
   const swatch = (name) => color(name === "as" ? "avs" : name)
@@ -188,11 +194,15 @@ function page() {
     for (const name of Object.keys(GAMMAS)) $(`${name}-gamma`).value = String(state.cfg[name] ?? "off")
     $("flow").value = state.cfg.hawkes ? "hawkes" : "poisson"
     $("informed").value = state.cfg.informed ? "on" : "off"
+    $("sizes").value = state.cfg.sizes ? "itch" : "one"
+    $("thin").value = String(state.cfg.thin)
     $("results").hidden = true
     const q = new URLSearchParams({ seed: state.seed })
     for (const name of Object.keys(GAMMAS)) q.set(name, String(state.cfg[name] ?? "off"))
     q.set("flow", $("flow").value)
     q.set("informed", $("informed").value)
+    q.set("sizes", $("sizes").value)
+    q.set("thin", $("thin").value)
     history.replaceState(null, "", `?${q}`)
     render()
   }
@@ -380,6 +390,14 @@ function page() {
   })
   $("informed").addEventListener("change", (e) => {
     state.cfg.informed = e.target.value === "on"
+    reset()
+  })
+  $("sizes").addEventListener("change", (e) => {
+    state.cfg.sizes = e.target.value === "itch"
+    reset()
+  })
+  $("thin").addEventListener("change", (e) => {
+    state.cfg.thin = Number(e.target.value)
     reset()
   })
   for (const name of Object.keys(GAMMAS)) {
