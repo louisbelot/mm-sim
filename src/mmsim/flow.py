@@ -13,6 +13,7 @@ from scipy.sparse.linalg import spsolve
 
 from .book import Book, Event, OrderType, Side
 from .hawkes import Hawkes
+from .sizes import Sizes
 
 _LIMIT, _MARKET, _CANCEL = range(3)
 
@@ -39,9 +40,10 @@ class CSTParams:
 
 
 class ZeroIntelligence:
-    def __init__(self, params: CSTParams, owner: int = 0) -> None:
+    def __init__(self, params: CSTParams, owner: int = 0, *, sizes: Sizes | None = None) -> None:
         self.params = params
         self.owner = owner
+        self.sizes = sizes
         self._cum_lam = list(accumulate(params.lam))
         self._bid: int | None = None
         self._ask: int | None = None
@@ -66,7 +68,7 @@ class ZeroIntelligence:
         return dt, self._fire(actions[k], rng, ids)
 
     def _market_rate(self, side: Side) -> float:
-        return self.params.mu
+        return self.params.mu if self.sizes is None else self.params.mu / self.sizes.mean
 
     def _menu(self, book: Book) -> tuple[list[tuple], list[float]]:
         p = self.params
@@ -103,7 +105,8 @@ class ZeroIntelligence:
             return lambda b: b.cancel(oid)
         oid = next(ids)
         if kind == _MARKET:
-            return lambda b: b.submit(oid, arg, 0, 1, owner=self.owner, kind=OrderType.MARKET)
+            qty = 1 if self.sizes is None else self.sizes.draw(rng)
+            return lambda b: b.submit(oid, arg, 0, qty, owner=self.owner, kind=OrderType.MARKET)
         lam = self._cum_lam[-1]
         i = 1 + bisect_right(self._cum_lam, rng.random() * lam, 0, len(self._cum_lam) - 1)
         px = self._ask - i if arg == Side.BUY else self._bid + i
@@ -149,10 +152,12 @@ class RegimeFlow(ZeroIntelligence):
 
 
 class HawkesFlow(ZeroIntelligence):
-    def __init__(self, params: CSTParams, hawkes: Hawkes, owner: int = 0) -> None:
+    def __init__(
+        self, params: CSTParams, hawkes: Hawkes, owner: int = 0, *, sizes: Sizes | None = None
+    ) -> None:
         if hawkes.d != 2:
             raise ValueError("market orders need two dimensions: buys and sells")
-        super().__init__(params, owner)
+        super().__init__(params, owner, sizes=sizes)
         self.hawkes = hawkes
         self.t = 0.0
         self.markets: list[tuple[float, Side]] = []

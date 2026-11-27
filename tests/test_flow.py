@@ -20,6 +20,7 @@ from mmsim.flow import (
 from mmsim.glft import Model
 from mmsim.hawkes import Hawkes, fit
 from mmsim.sim import Agent, Latency, Simulator
+from mmsim.sizes import Sizes
 
 SKY = CSTParams.sky_perfect()
 LAM1, MU, THETA1 = SKY.lam[0], SKY.mu, SKY.theta[0]
@@ -146,6 +147,30 @@ def test_market_orders_take_one_lot():
             assert ev[0].qty == 1
             assert sum(e.qty for e in ev if e.type == EventType.TRADE) == 1
     assert seen > 0
+
+
+def test_random_sizes_keep_the_share_rate():
+    deep = SKY.scale(lam=3.0)
+    sizes = Sizes.itch()
+    rng, ids, book = random.Random(21), itertools.count(1), Book()
+    flow = ZeroIntelligence(deep, sizes=sizes)
+    flow.seed(book, 1000, 1001, ids)
+    T, t, qty, walks = 3000.0, 0.0, [], 0
+    while (step := flow.step(book, rng, T - t, ids)) is not None:
+        t += step[0]
+        ev = step[1](book)
+        if ev[0].type == EventType.ACCEPTED and ev[0].price == 0:
+            qty.append(ev[0].qty)
+            walks += len({e.price for e in ev if e.type == EventType.TRADE}) > 1
+    assert book.audit() == ""
+    qty = np.array(qty)
+    p = np.array(sizes.pmf)
+    rate = 2 * deep.mu / sizes.mean * T
+    assert abs(len(qty) - rate) < 4 * math.sqrt(rate)
+    share = 2 * deep.mu * T
+    assert abs(qty.sum() - share) < 4 * math.sqrt(rate * (p @ np.arange(1, 21) ** 2))
+    assert abs(np.mean(qty == 1) - p[0]) < 4 * math.sqrt(p[0] * (1 - p[0]) / len(qty))
+    assert walks > 0
 
 
 def test_hawkes_flow_rate_and_refit():
