@@ -255,3 +255,23 @@ def test_widen_scales_with_the_posterior():
     assert w.width(ctx) == 1
     w.observe(Print(0.0, Side.SELL, 10_000, 3))
     assert w.width(ctx) == 3
+
+
+@pytest.mark.parametrize(
+    ("thin", "back", "want"), [(1, 1, (99, 102)), (6, 1, (99, 102)), (6, 2, (98, 103))]
+)
+def test_thin_steps_back_from_an_empty_price(thin, back, want):
+    sim = make([], SymmetricQuoter(thin=thin, back=back))
+    sim.run(1.0)
+    assert quotes(sim.contexts[0]) == [(Side.BUY, want[0]), (Side.SELL, want[1])]
+
+
+def test_thin_joins_once_someone_else_is_there_and_leaves_when_they_go():
+    bot = SymmetricQuoter(thin=1)
+    sim = make([(1.0, limit(Side.BUY, 100)), (2.0, market(Side.SELL, 1))], bot)
+    ctx = sim.contexts[0]
+    sim.run(1.5)
+    assert quotes(ctx) == [(Side.BUY, 100), (Side.SELL, 102)]
+    sim.run(1.0)
+    assert ctx.position == 0
+    assert quotes(ctx) == [(Side.BUY, 99), (Side.SELL, 102)]

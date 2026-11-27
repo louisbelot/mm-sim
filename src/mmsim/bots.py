@@ -7,7 +7,7 @@ import numpy as np
 
 from . import alpha, avellaneda, glft
 from .accounting import Fill
-from .book import Side
+from .book import Book, Side
 from .detect import Filter
 from .hawkes import Hawkes, Tracker
 from .markout import Tape
@@ -69,6 +69,13 @@ class Widen:
         return round(self.ticks * float(self.filter.at(ctx.t)[1]))
 
 
+def others(book: Book, side: Side, px: int, owner: int) -> int:
+    lvl = book.level(side, px)
+    if lvl is None:
+        return 0
+    return sum(o.qty for o in lvl.orders.values() if o.owner != owner)
+
+
 class Signal(Protocol):
     def lean(self, ctx: Context) -> float: ...
 
@@ -84,6 +91,8 @@ class Quoter(Agent):
         signal: Signal | None = None,
         inside: bool = True,
         widen: Widen | None = None,
+        thin: int = 0,
+        back: int = 1,
     ) -> None:
         self.size = size
         self.max_position = max_position
@@ -91,6 +100,8 @@ class Quoter(Agent):
         self.signal = signal
         self.inside = inside
         self.widen = widen
+        self.thin = thin
+        self.back = back
         self._oids: dict[Side, int | None] = {Side.BUY: None, Side.SELL: None}
 
     def targets(self, ctx: Context) -> tuple[int | None, int | None]:
@@ -123,6 +134,9 @@ class Quoter(Agent):
             w = self.widen.width(ctx)
             bid = None if bid is None else bid - w
             ask = None if ask is None else ask + w
+        if self.thin:
+            bid = self._step_back(ctx, Side.BUY, bid)
+            ask = self._step_back(ctx, Side.SELL, ask)
         if not self.inside:
             if bid is not None and ctx.bid is not None:
                 bid = min(bid, ctx.bid)
@@ -135,6 +149,16 @@ class Quoter(Agent):
                 ask = None
         self._quote(ctx, Side.BUY, bid)
         self._quote(ctx, Side.SELL, ask)
+
+    def _step_back(self, ctx: Context, side: Side, px: int | None) -> int | None:
+        if px is None:
+            return None
+        away = -1 if side == Side.BUY else 1
+        for _ in range(self.back):
+            if others(ctx.book, side, px, ctx.owner) >= self.thin:
+                break
+            px += away
+        return px
 
     def _quote(self, ctx: Context, side: Side, px: int | None) -> None:
         oid = self._oids[side]
@@ -157,8 +181,11 @@ class SymmetricQuoter(Quoter):
         keep: int = 0,
         signal: Signal | None = None,
         inside: bool = True,
+        *,
+        thin: int = 0,
+        back: int = 1,
     ) -> None:
-        super().__init__(size, max_position, keep, signal, inside)
+        super().__init__(size, max_position, keep, signal, inside, thin=thin, back=back)
         self.half_spread = half_spread
 
     def targets(self, ctx: Context) -> tuple[int | None, int | None]:
@@ -210,8 +237,10 @@ class GLFT(Quoter):
         signal: Signal | None = None,
         inside: bool = True,
         widen: Widen | None = None,
+        thin: int = 0,
+        back: int = 1,
     ) -> None:
-        super().__init__(size, model.Q * size, keep, signal, inside, widen)
+        super().__init__(size, model.Q * size, keep, signal, inside, widen, thin, back)
         self.model = model
         self.bids, self.asks = model.quotes(math.inf)
 
